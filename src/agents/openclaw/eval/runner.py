@@ -184,6 +184,11 @@ class SWEBenchRunner:
         prompt_text = self._build_swe_bench_prompt(
             task.problem_statement, prompt_template=prompt_template
         )
+        print(f"\n{'='*60}", flush=True)
+        print(f"PROBLEM [{task.instance_id}]", flush=True)
+        print(f"{'='*60}", flush=True)
+        print(task.problem_statement, flush=True)
+        print(f"{'='*60}\n", flush=True)
         session_key = f"eval:{task.instance_id}"
         result = await self._session_runner.run(
             prompt=prompt_text,
@@ -233,6 +238,21 @@ class SWEBenchRunner:
                 diff_cwd,
                 base_commit=task.base_commit,
             )
+
+        print(f"\n{'='*60}", flush=True)
+        print(f"RESULT [{task.instance_id}]", flush=True)
+        print(f"  success       = {bool(container_patch)}", flush=True)
+        print(f"  stop_reason   = {result.stop_reason}", flush=True)
+        print(f"  n_iterations  = {n_iterations}", flush=True)
+        print(f"  tools_used    = {list(set(tools_used))}", flush=True)
+        print(f"  patch_size    = {len(container_patch or '')} chars", flush=True)
+        if result.error:
+            print(f"  error         = {result.error[:200]}", flush=True)
+        if container_patch:
+            print(f"  --- PATCH ---", flush=True)
+            print(container_patch, flush=True)
+            print(f"  --- END PATCH ---", flush=True)
+        print(f"{'='*60}\n", flush=True)
 
         return EvalResult(
             instance_id=task.instance_id,

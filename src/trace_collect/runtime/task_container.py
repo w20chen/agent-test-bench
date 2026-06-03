@@ -401,29 +401,64 @@ def exec_task_container_entrypoint(
     if not kind:
         raise ValueError(f"missing request kind in {request_path}")
     mode = "preflight" if kind == "preflight" else "run"
-    return subprocess.run(
-        [
-            container_executable,
-            "exec",
-            "-i",
-            "-w",
-            cwd,
-            "-e",
-            f"PYTHONPATH={pythonpath or _DEFAULT_RUNTIME_PYTHONPATH}",
-            "-e",
-            "PYTHONDONTWRITEBYTECODE=1",
-            container_id,
-            runtime,
-            "-m",
-            "trace_collect.runtime.entrypoint",
-            "--mode",
-            mode,
-        ],
-        input=json.dumps(request, ensure_ascii=False),
-        capture_output=True,
+    cmd = [
+        container_executable,
+        "exec",
+        "-i",
+        "-w",
+        cwd,
+        "-e",
+        f"PYTHONPATH={pythonpath or _DEFAULT_RUNTIME_PYTHONPATH}",
+        "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "-e",
+        "PYTHONUNBUFFERED=1",
+        container_id,
+        runtime,
+        "-m",
+        "trace_collect.runtime.entrypoint",
+        "--mode",
+        mode,
+    ]
+    if mode == "preflight":
+        return subprocess.run(
+            cmd,
+            input=json.dumps(request, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    # run mode: stream stdout to host terminal in real-time
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
-        timeout=timeout,
+    )
+    stdout_lines: list[str] = []
+    try:
+        assert proc.stdout is not None
+        assert proc.stdin is not None
+        # Write stdin in a way that avoids deadlock
+        stdin_data = json.dumps(request, ensure_ascii=False)
+        proc.stdin.write(stdin_data)
+        proc.stdin.close()
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            stdout_lines.append(line)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    stderr_data = proc.stderr.read() if proc.stderr else ""
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout="".join(stdout_lines),
+        stderr=stderr_data,
     )
 
 

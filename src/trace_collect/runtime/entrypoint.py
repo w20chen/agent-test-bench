@@ -16,6 +16,27 @@ from typing import Any
 from llm_call import UnifiedProvider, resolve_llm_config
 
 
+class _TeeOutput:
+    """Write to *primary* (pipe) and *secondary* (file) simultaneously."""
+
+    def __init__(self, primary, secondary):
+        self.primary = primary
+        self.secondary = secondary
+
+    def write(self, data: str) -> int:
+        self.primary.write(data)
+        self.primary.flush()
+        self.secondary.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self.primary.flush()
+        self.secondary.flush()
+
+    def close(self) -> None:
+        self.secondary.close()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m trace_collect.runtime.entrypoint",
@@ -183,11 +204,12 @@ def main() -> None:
         stderr_path = Path(request["raw_stderr_path"])
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        # Tee stdout to both the pipe (host terminal) and the log file
+        _tee_stdout = _TeeOutput(sys.stdout, stdout_path.open("w", encoding="utf-8"))
+        _tee_stderr = _TeeOutput(sys.stderr, stderr_path.open("w", encoding="utf-8"))
         with (
-            stdout_path.open("w", encoding="utf-8") as stdout_handle,
-            stderr_path.open("w", encoding="utf-8") as stderr_handle,
-            contextlib.redirect_stdout(stdout_handle),
-            contextlib.redirect_stderr(stderr_handle),
+            contextlib.redirect_stdout(_tee_stdout),  # type: ignore[arg-type]
+            contextlib.redirect_stderr(_tee_stderr),  # type: ignore[arg-type]
         ):
             asyncio.run(_run_request(request))
     except Exception:

@@ -113,7 +113,7 @@ docker pull swerebench/sweb.eval.x86_64.12rambau_1776_sepal_ui-411:latest
 ### 第三步：运行
 
 ```bash
-DEEPSEEK_API_KEY=sk-e1e1e85834e44613b2a1e19843f880c2 PYTHONPATH=src python -m trace_collect.cli \
+DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
     --model deepseek-chat \
     --benchmark swe-rebench \
@@ -127,9 +127,12 @@ DEEPSEEK_API_KEY=sk-e1e1e85834e44613b2a1e19843f880c2 PYTHONPATH=src python -m tr
 ### 如果卡住时排查
 
 ```bash
-docker ps                              # 看容器是否在跑
-ls -lt traces/swe-rebench/deepseek-chat/最近目录/12rambau__sepal_ui-411/attempt_1/_task_container_runtime/  # 看进度
-curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-你的key" | tail -1  # 测 API 通不通
+docker ps
+# 看容器是否在跑
+ls -lt traces/swe-rebench/deepseek-chat/最近目录/12rambau__sepal_ui-411/attempt_1/_task_container_runtime/
+# 看进度
+curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-你的key" | tail -1
+# 测 API 通不通
 ```
 
 ### Recording Internals

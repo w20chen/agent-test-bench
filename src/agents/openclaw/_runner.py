@@ -189,6 +189,11 @@ class AgentRunner:
             context.tool_calls = list(response.tool_calls)
             self._accumulate_usage(usage, raw_usage)
 
+            if response.has_tool_calls:
+                print(f"[LLM iter={iteration}] tool_calls={[tc.name for tc in response.tool_calls]}", flush=True)
+            else:
+                print(f"[LLM iter={iteration}] final_response={(response.content or '')[:120]}", flush=True)
+
             self._refresh_hook_context_messages(context, messages)
             await hook.after_llm_response(context)
 
@@ -227,6 +232,10 @@ class AgentRunner:
                     response.tool_calls,
                     external_lookup_counts,
                 )
+                for tool_call, result in zip(response.tool_calls, results):
+                    status = "OK" if not (isinstance(result, str) and result.startswith("Error")) else "ERR"
+                    preview = str(result)[:100].replace("\n", " ")
+                    print(f"[TOOL iter={iteration}] {tool_call.name} → {status} ({preview})", flush=True)
                 tool_events.extend(new_events)
                 context.tool_results = list(results)
                 context.tool_events = list(new_events)
