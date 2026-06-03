@@ -1,0 +1,5 @@
+(VllmWorkerProcess pid=12345) INFO model_loader.py:204] Model weights take 0.96 GiB
+(VllmWorkerProcess pid=12345) INFO worker.py:88] GPU KV cache size: 32768 tokens, 0.25 GiB
+(VllmWorkerProcess pid=12345) INFO config.py:144] dtype='float16'
+(VllmWorkerProcess pid=12345) INFO config.py:145] model="facebook/opt-125m"
+(VllmWorkerProcess pid=12345) INFO config.py:146] tensor_parallel_size=2

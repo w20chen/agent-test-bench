@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git gcc g++ gfortran make curl wget \
+        libffi-dev libssl-dev libxml2-dev libxslt1-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install common test/build dependencies
+RUN pip install --no-cache-dir \
+    pytest pytest-xdist hypothesis \
+    setuptools wheel pip cython numpy
+
+WORKDIR /workspace

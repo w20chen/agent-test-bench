@@ -1,0 +1,9 @@
+defaults:
+  - systems: vllm_baseline
+
+# No default sweep workloads remain after the legacy code_agent path
+# was removed. Use trace_collect.cli benchmark configs for collection.
+matrix:
+  systems: []
+  workloads: []
+  concurrency: []

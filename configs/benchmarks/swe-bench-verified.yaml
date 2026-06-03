@@ -1,0 +1,18 @@
+# SWE-Bench Verified benchmark plugin config.
+# Used by agents.benchmarks.get_benchmark_class("swe-bench-verified").
+#
+# Legacy path note: data_root / repos_root / trace_root all use the
+# historical ``swebench_verified`` underscored name (NOT the hyphenated
+# slug) to preserve existing on-disk experimental results.
+slug: swe-bench-verified
+display_name: "SWE-Bench Verified"
+harness_dataset: princeton-nlp/SWE-bench_Verified
+harness_split: test
+data_root: data/swebench_verified
+repos_root: data/swebench_repos
+trace_root: traces/swebench_verified
+default_max_iterations: 100
+selection_n: 32
+selection_seed: 42
+default_prompt_template: default
+exclude_lite: false

@@ -1,0 +1,4 @@
+groups:
+  - name: "Terminal-Bench One Trace - GLM-5.1"
+    paths:
+      - traces/terminal-bench/z-ai-glm-5.1/20260428T181149Z-one-a39ea65/fix-git/attempt_1/trace.jsonl

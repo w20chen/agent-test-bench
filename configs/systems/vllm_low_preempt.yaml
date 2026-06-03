@@ -1,0 +1,20 @@
+name: vllm-low-preempt
+api_base: ${oc.env:VLLM_API_BASE,"http://localhost:8000/v1"}
+metrics_url: ${oc.env:VLLM_METRICS_URL,"http://localhost:8000/metrics"}
+program_id_mode: passthrough
+package_spec: ${oc.env:VLLM_SPEC,"vllm==0.10.2"}
+launch:
+  host: ${oc.env:VLLM_HOST,"0.0.0.0"}
+  port: 8000
+  dtype: float16
+  max_model_len: 32768
+  gpu_memory_utilization: 0.90
+  enable_chunked_prefill: true
+  preemption_mode: ${oc.env:VLLM_PREEMPTION_MODE,"recompute"}
+  max_num_seqs: 32
+health:
+  timeout_s: ${oc.env:VLLM_HEALTH_TIMEOUT_S,180}
+  poll_interval_s: 2.0
+notes:
+  - "max_num_seqs=32 reduces but does not eliminate preemption compared to the baseline (256)."
+  - "True preemption disabling requires a vLLM source patch; this config approximates low-preemption behavior."

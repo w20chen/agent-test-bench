@@ -1,0 +1,13 @@
+name: thunderagent
+api_base: ${oc.env:THUNDERAGENT_API_BASE,"http://localhost:9000/v1"}
+metrics_url: ${oc.env:THUNDERAGENT_METRICS_URL,"http://localhost:9000/metrics"}
+program_id_mode: passthrough
+launch:
+  repo_url: ${oc.env:THUNDERAGENT_REPO_URL,"https://github.com/ThunderAgent-org/ThunderAgent.git"}
+  ref: ${oc.env:THUNDERAGENT_REF,"REPLACE_WITH_COMMIT_OR_TAG"}
+  backend_type: vllm
+  backend_url: ${oc.env:THUNDERAGENT_BACKENDS,"http://127.0.0.1:8000"}
+  port: ${oc.env:THUNDERAGENT_PORT,9000}
+  profile: true
+  metrics: true
+  profile_dir: ${oc.env:THUNDERAGENT_PROFILE_DIR,"results/processed/thunderagent_profiles"}

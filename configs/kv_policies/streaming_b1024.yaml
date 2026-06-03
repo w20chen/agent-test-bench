@@ -1,0 +1,9 @@
+# StreamingLLM (Xiao et al. 2023, arXiv:2309.17453). Naive variant — no
+# RoPE re-rotation; cached K/V keep their original rotations and HF's
+# `cache_position` continues to advance with the absolute index.
+# `budget` is the fixed cache capacity and must equal sink_size + recent_window.
+name: streaming
+budget: 1024
+sink_size: 4
+recent_window: 1020
+record: true

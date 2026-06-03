@@ -1,0 +1,24 @@
+# StreamingLLM protect-tools ablation, not the generic paper baseline.
+# For the generic b4096 StreamingLLM baseline, use streaming_b4096.yaml.
+#
+# StreamingLLM (Xiao et al. ICLR 2024, arXiv:2309.17453), naive variant.
+# Designed to test the "tool-definition KV is the cliff" hypothesis from the
+# h2o b4096 capstone: that policy's catastrophic zombie loop coincided with
+# the cumulative prompt crossing 4096 tokens at call_idx ≈ 7, suggesting the
+# tools section (rendered into the system message at iter 0, ~2200 tokens)
+# was being evicted once attention-driven heavy hitters re-ranked toward
+# user-facing content.
+#
+# This policy hard-protects the entire initial prompt by setting
+# sink_size = 2560 ≥ initial_prompt_tokens (~2540 measured on jsonl-aggregator),
+# so the system prompt + tools + first user message survive every eviction.
+# recent_window = 1024 keeps the most recent assistant + tool_result turn
+# intact. Middle assistant/tool history is dropped — the contrast vs. h2o
+# isolates whether tools-KV preservation alone reverses the cliff.
+#
+# Fixed capacity: sink_size + recent_window = 4096 tokens.
+name: streaming
+budget: 4096
+sink_size: 2560
+recent_window: 1536
+record: true

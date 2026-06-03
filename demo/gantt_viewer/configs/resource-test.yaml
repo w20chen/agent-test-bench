@@ -1,0 +1,4 @@
+groups:
+  - name: "Resource Sampling Test — Kinto"
+    paths:
+      - traces/simulate/test-resource-sampling/Kinto__kinto-http.py-384/attempt_1/trace.jsonl

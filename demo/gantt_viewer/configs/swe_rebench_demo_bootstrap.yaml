@@ -1,0 +1,4 @@
+groups:
+  - name: "SWE-REBENCH-DEMO"
+    paths:
+      - "tmp/__gantt_swe_rebench_demo_empty__/*.jsonl"

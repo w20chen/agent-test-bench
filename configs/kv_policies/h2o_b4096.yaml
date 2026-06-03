@@ -1,0 +1,16 @@
+# H2O (Heavy-Hitter Oracle, Zhang et al. NeurIPS 2023, arXiv:2306.14048).
+# Budget-4096 sibling of h2o_b1024.yaml — identical knobs except `budget`.
+# Used as the "ample-budget" arm in the b1024-vs-b4096 capstone ablation:
+# both runs use the same sink/recent/aggregate/prefill_mode so the only
+# delta is the per-layer middle-slot count. `prefill_mode: full` streams
+# prefill scoring to H2O in bounded chunks; attention.npz remains sampled.
+# (b1024 → 764 middle slots, b4096 → 3836 middle slots).
+name: h2o
+budget: 4096
+sink_size: 4
+recent_window: 256
+heavy_ratio: 0.5
+aggregate: sum
+ema_decay: 0.9
+record: true
+prefill_mode: full

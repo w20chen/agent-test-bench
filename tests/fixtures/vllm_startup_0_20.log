@@ -1,0 +1,11 @@
+(APIServer pid=2997) INFO 04-30 16:04:24 [utils.py:299] vLLM version 0.20.0
+(APIServer pid=2997) INFO 04-30 16:04:24 [utils.py:299] model: Qwen/Qwen2.5-1.5B-Instruct
+(APIServer pid=2997) INFO 04-30 16:04:24 [utils.py:233] non-default args: {'host': '0.0.0.0', 'model': 'Qwen/Qwen2.5-1.5B-Instruct', 'dtype': 'float16', 'max_model_len': 8192, 'gpu_memory_utilization': 0.85, 'max_num_seqs': 256}
+(EngineCore pid=3193) INFO 04-30 16:04:36 [config.py:88] dtype: float16
+(EngineCore pid=3193) INFO 04-30 16:04:36 [gpu_model_runner.py:4777] Starting to load model Qwen/Qwen2.5-1.5B-Instruct...
+(EngineCore pid=3193) INFO 04-30 16:04:51 [default_loader.py:384] Loading weights took 0.47 seconds
+(EngineCore pid=3193) INFO 04-30 16:04:52 [gpu_model_runner.py:4879] Model loading took 2.89 GiB memory and 15.150555 seconds
+(EngineCore pid=3193) INFO 04-30 16:05:33 [gpu_worker.py:440] Available KV cache memory: 22.63 GiB
+(EngineCore pid=3193) INFO 04-30 16:05:33 [kv_cache_utils.py:1711] GPU KV cache size: 847,424 tokens
+(EngineCore pid=3193) INFO 04-30 16:05:34 [core.py:299] init engine took 42.47 s
+(APIServer pid=2997) INFO 04-30 16:05:36 [api_server.py:598] Supported tasks: ['generate']

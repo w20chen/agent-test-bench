@@ -1,0 +1,8 @@
+# StreamingLLM (Xiao et al. ICLR 2024, arXiv:2309.17453), naive RoPE variant.
+# Fixed-capacity 4096-token sink + sliding-window cache. This is the generic
+# StreamingLLM baseline; use protect-tools configs only as explicit ablations.
+name: streaming
+budget: 4096
+sink_size: 4
+recent_window: 4092
+record: true

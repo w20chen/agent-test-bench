@@ -1,0 +1,17 @@
+groups:
+  - name: "Curated 14 — Qwen3-Coder terminal-bench 2026-05-09"
+    paths:
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/01_fix-git/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/02_dna-insert/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/03_causal-inference-r/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/04_security-celery-redis-rce/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/05_schemelike-metacircular-eval/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/06_multi-source-data-merger/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/07_ode-solver-rk4/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/08_git-leak-recovery/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/09_cancel-async-tasks/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/10_analyze-access-logs/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/11_jsonl-aggregator/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/12_assign-seats/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/13_recover-obfuscated-files/attempt_1/trace.jsonl
+      - traces/terminal-bench/Qwen_Qwen3-Coder-30B-A3B-Instruct/curated-14-traces-resources-20260509T0525Z/14_countdown-game/attempt_1/trace.jsonl

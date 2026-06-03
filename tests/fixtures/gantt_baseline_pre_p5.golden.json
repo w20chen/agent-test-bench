@@ -1,0 +1,70 @@
+{
+  "traces": [
+    {
+      "id": "test",
+      "lanes": [
+        {
+          "agent_id": "test-openclaw-1",
+          "markers": [],
+          "spans": [
+            {
+              "detail": {
+                "completion_tokens": 50,
+                "llm_latency_ms": 2500.0,
+                "prompt_tokens": 100
+              },
+              "end": 2.5,
+              "end_abs": 1700000002.5,
+              "iteration": 0,
+              "start": 0.0,
+              "start_abs": 1700000000.0,
+              "type": "llm"
+            },
+            {
+              "detail": {
+                "duration_ms": 3000.0,
+                "success": true,
+                "tool_args": "{\"query\": \"openclaw test\"}",
+                "tool_name": "mcp_context7_search",
+                "tool_result": "[REPLAYED] context7 returned 3 docs about openclaw"
+              },
+              "end": 5.599999904632568,
+              "end_abs": 1700000005.6,
+              "iteration": 0,
+              "start": 2.5999999046325684,
+              "start_abs": 1700000002.6,
+              "type": "tool"
+            },
+            {
+              "detail": {
+                "duration_ms": 50.0,
+                "success": true,
+                "tool_args": "{\"path\": \"src/main.py\"}",
+                "tool_name": "read_file",
+                "tool_result": "def main(): pass"
+              },
+              "end": 5.75,
+              "end_abs": 1700000005.75,
+              "iteration": 0,
+              "start": 5.700000047683716,
+              "start_abs": 1700000005.7,
+              "type": "tool"
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "elapsed_s": 5.75,
+        "instance_id": "test-openclaw-1",
+        "max_iterations": 80,
+        "mode": "collect",
+        "model": "qwen-plus-latest",
+        "n_actions": 3,
+        "n_events": 0,
+        "n_iterations": 1,
+        "scaffold": "openclaw"
+      },
+      "t0": 1700000000.0
+    }
+  ]
+}

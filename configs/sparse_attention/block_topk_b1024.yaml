@@ -1,0 +1,9 @@
+name: block_topk
+budget: 1024
+sink_size: 4
+recent_window: 256
+block_size: 16
+score_reduction: max
+phase_scope: decode_only
+record: true
+observe_only: true

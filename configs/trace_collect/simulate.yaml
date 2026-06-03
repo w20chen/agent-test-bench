@@ -1,0 +1,5 @@
+task_source: data/swebench_verified/tasks.json
+repos_root: data/swebench_repos
+output_dir: traces/simulate
+command_timeout_s: 120
+task_timeout_s: 1200

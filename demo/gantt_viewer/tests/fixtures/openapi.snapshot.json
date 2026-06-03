@@ -1,0 +1,922 @@
+{
+  "components": {
+    "schemas": {
+      "Body_upload_trace_endpoint_api_traces_upload_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_trace_endpoint_api_traces_upload_post",
+        "type": "object"
+      },
+      "GanttPayload": {
+        "properties": {
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/PayloadError"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "registries": {
+            "$ref": "#/components/schemas/Registries"
+          },
+          "traces": {
+            "items": {
+              "$ref": "#/components/schemas/TracePayload-Output"
+            },
+            "title": "Traces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "registries",
+          "traces"
+        ],
+        "title": "GanttPayload",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "n_discovered": {
+            "title": "N Discovered",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "n_discovered"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "Lane": {
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "markers": {
+            "items": {
+              "$ref": "#/components/schemas/Marker"
+            },
+            "title": "Markers",
+            "type": "array"
+          },
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/Span"
+            },
+            "title": "Spans",
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_id",
+          "spans",
+          "markers"
+        ],
+        "title": "Lane",
+        "type": "object"
+      },
+      "Marker": {
+        "properties": {
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "iteration": {
+            "title": "Iteration",
+            "type": "integer"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          },
+          "t_abs": {
+            "title": "T Abs",
+            "type": "number"
+          },
+          "t_real": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T Real"
+          },
+          "t_real_abs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T Real Abs"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "event",
+          "t",
+          "t_abs",
+          "iteration",
+          "detail"
+        ],
+        "title": "Marker",
+        "type": "object"
+      },
+      "MarkerDef": {
+        "properties": {
+          "color": {
+            "title": "Color",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "color",
+          "label"
+        ],
+        "title": "MarkerDef",
+        "type": "object"
+      },
+      "PayloadError": {
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "stage",
+          "error"
+        ],
+        "title": "PayloadError",
+        "type": "object"
+      },
+      "PayloadRequest": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "PayloadRequest",
+        "type": "object"
+      },
+      "RegisterTracesRequest": {
+        "properties": {
+          "labels_by_path": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels By Path",
+            "type": "object"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "title": "RegisterTracesRequest",
+        "type": "object"
+      },
+      "RegisterTracesResponse": {
+        "properties": {
+          "registered": {
+            "items": {
+              "$ref": "#/components/schemas/TraceDescriptor"
+            },
+            "title": "Registered",
+            "type": "array"
+          }
+        },
+        "required": [
+          "registered"
+        ],
+        "title": "RegisterTracesResponse",
+        "type": "object"
+      },
+      "Registries": {
+        "properties": {
+          "markers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MarkerDef"
+            },
+            "title": "Markers",
+            "type": "object"
+          },
+          "spans": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SpanDef"
+            },
+            "title": "Spans",
+            "type": "object"
+          }
+        },
+        "required": [
+          "spans",
+          "markers"
+        ],
+        "title": "Registries",
+        "type": "object"
+      },
+      "Span": {
+        "properties": {
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "end": {
+            "title": "End",
+            "type": "number"
+          },
+          "end_abs": {
+            "title": "End Abs",
+            "type": "number"
+          },
+          "end_real": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Real"
+          },
+          "end_real_abs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Real Abs"
+          },
+          "iteration": {
+            "title": "Iteration",
+            "type": "integer"
+          },
+          "start": {
+            "title": "Start",
+            "type": "number"
+          },
+          "start_abs": {
+            "title": "Start Abs",
+            "type": "number"
+          },
+          "start_real": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Real"
+          },
+          "start_real_abs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Real Abs"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "start",
+          "end",
+          "start_abs",
+          "end_abs",
+          "iteration",
+          "detail"
+        ],
+        "title": "Span",
+        "type": "object"
+      },
+      "SpanDef": {
+        "properties": {
+          "color": {
+            "title": "Color",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "order": {
+            "title": "Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "color",
+          "label",
+          "order"
+        ],
+        "title": "SpanDef",
+        "type": "object"
+      },
+      "TraceDescriptor": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "mtime": {
+            "title": "Mtime",
+            "type": "number"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source_format": {
+            "const": "trace",
+            "title": "Source Format",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "source_format",
+          "path",
+          "size_bytes",
+          "mtime"
+        ],
+        "title": "TraceDescriptor",
+        "type": "object"
+      },
+      "TraceListResponse": {
+        "properties": {
+          "registries": {
+            "$ref": "#/components/schemas/Registries"
+          },
+          "traces": {
+            "items": {
+              "$ref": "#/components/schemas/TraceDescriptor"
+            },
+            "title": "Traces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "traces",
+          "registries"
+        ],
+        "title": "TraceListResponse",
+        "type": "object"
+      },
+      "TraceMetadata": {
+        "properties": {
+          "elapsed_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed S"
+          },
+          "instance_id": {
+            "default": "",
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "max_iterations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Iterations"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "n_actions": {
+            "title": "N Actions",
+            "type": "integer"
+          },
+          "n_events": {
+            "title": "N Events",
+            "type": "integer"
+          },
+          "n_iterations": {
+            "title": "N Iterations",
+            "type": "integer"
+          },
+          "scaffold": {
+            "title": "Scaffold",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scaffold",
+          "n_actions",
+          "n_iterations",
+          "n_events"
+        ],
+        "title": "TraceMetadata",
+        "type": "object"
+      },
+      "TracePayload-Input": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/Lane"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/TraceMetadata"
+          },
+          "t0": {
+            "title": "T0",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "metadata",
+          "t0",
+          "lanes"
+        ],
+        "title": "TracePayload",
+        "type": "object"
+      },
+      "TracePayload-Output": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/Lane"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/TraceMetadata"
+          },
+          "t0": {
+            "title": "T0",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "metadata",
+          "t0",
+          "lanes"
+        ],
+        "title": "TracePayload",
+        "type": "object"
+      },
+      "UnregisterTracesRequest": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "UnregisterTracesRequest",
+        "type": "object"
+      },
+      "UnregisterTracesResponse": {
+        "properties": {
+          "missing_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Ids",
+            "type": "array"
+          },
+          "removed_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "removed_ids",
+          "missing_ids"
+        ],
+        "title": "UnregisterTracesResponse",
+        "type": "object"
+      },
+      "UploadTraceResponse": {
+        "properties": {
+          "descriptor": {
+            "$ref": "#/components/schemas/TraceDescriptor"
+          },
+          "payload_fragment": {
+            "$ref": "#/components/schemas/TracePayload-Output"
+          }
+        },
+        "required": [
+          "descriptor",
+          "payload_fragment"
+        ],
+        "title": "UploadTraceResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Gantt Viewer API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "health_endpoint_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Endpoint"
+      }
+    },
+    "/api/payload": {
+      "post": {
+        "operationId": "payload_endpoint_api_payload_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GanttPayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Payload Endpoint"
+      }
+    },
+    "/api/traces": {
+      "get": {
+        "operationId": "list_traces_endpoint_api_traces_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Traces Endpoint"
+      }
+    },
+    "/api/traces/register": {
+      "post": {
+        "operationId": "register_traces_endpoint_api_traces_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterTracesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterTracesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Traces Endpoint"
+      }
+    },
+    "/api/traces/reload": {
+      "post": {
+        "operationId": "reload_traces_endpoint_api_traces_reload_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reload Traces Endpoint"
+      }
+    },
+    "/api/traces/unregister": {
+      "post": {
+        "operationId": "unregister_traces_endpoint_api_traces_unregister_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterTracesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnregisterTracesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unregister Traces Endpoint"
+      }
+    },
+    "/api/traces/upload": {
+      "post": {
+        "operationId": "upload_trace_endpoint_api_traces_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_trace_endpoint_api_traces_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadTraceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Trace Endpoint"
+      }
+    }
+  }
+}

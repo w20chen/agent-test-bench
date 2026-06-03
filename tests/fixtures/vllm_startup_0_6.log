@@ -1,0 +1,6 @@
+INFO 09-15 09:11:23 model_runner.py:1182] Loading model weights took 14.22 GiB
+INFO 09-15 09:11:25 distributed_gpu_executor.py:46] # GPU blocks: 12345, # CPU blocks: 4096
+INFO 09-15 09:11:25 llm_engine.py:402] GPU KV cache size: 1234567 tokens, 6.0 GiB
+INFO 09-15 09:11:25 worker.py:101] dtype: torch.bfloat16
+INFO 09-15 09:11:25 worker.py:102] model: meta-llama/Llama-3-7B
+INFO 09-15 09:11:25 worker.py:103] tensor_parallel_size: 1

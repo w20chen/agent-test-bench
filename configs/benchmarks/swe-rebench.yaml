@@ -1,0 +1,18 @@
+# SWE-rebench benchmark plugin config.
+# Used by agents.benchmarks.get_benchmark_class("swe-rebench").
+slug: swe-rebench
+display_name: "SWE-rebench (filtered)"
+harness_dataset: nebius/SWE-rebench
+harness_split: filtered
+data_root: data/swe-rebench
+repos_root: data/swe-rebench/repos
+trace_root: traces/swe-rebench
+default_max_iterations: 100
+selection_n: 32
+selection_seed: 42
+default_prompt_template: cc_aligned
+# nebius ships fully qualified image URIs (swerebench/sweb.eval.x86_64.*)
+# exclude_lite default: false per CLAUDE.md §1 "no benchmark-specific
+# tuning". Flip to true (with a prose rationale here) only if you have
+# a documented research reason to drop single-file lite tasks.
+exclude_lite: false

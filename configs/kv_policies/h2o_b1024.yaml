@@ -1,0 +1,27 @@
+# H2O (Heavy-Hitter Oracle, Zhang et al. NeurIPS 2023, arXiv:2306.14048).
+# Per-layer keep set = sink + recent + top-(budget - sink - recent) middle
+# positions ranked by cumulative post-softmax attention. Subscribes to the
+# AttentionBus and shares LayerCapturer's softmax tensor (no double-softmax).
+#
+# `aggregate`: how scores are combined across queries.
+#   sum  — paper default; cumulative mass over all observed queries.
+#   mean — sum divided by query-row count (per-position); reduces drift on
+#          long contexts where heavy hitters accumulate purely by exposure.
+#   ema  — exponential moving average with decay `ema_decay`; favours
+#          recently heavy positions over historically heavy ones.
+#
+# `prefill_mode`:
+#   sampled — observe only LayerCapturer-sampled query rows during prefill
+#             (cheap approximation). meta.json marks `prefill_score_bias=true`.
+#   full    — stream every prefill query row to H2O in bounded chunks while
+#             keeping attention.npz sampling capped. This is the paper-faithful
+#             setting and avoids materializing a full QxK recording tensor.
+name: h2o
+budget: 1024
+sink_size: 4
+recent_window: 256
+heavy_ratio: 0.5
+aggregate: sum
+ema_decay: 0.9
+record: true
+prefill_mode: full

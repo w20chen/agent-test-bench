@@ -1,0 +1,8 @@
+# Random KV eviction policy. Used as the H2O paper's control baseline:
+# every position in [0, key_len) is equally evictable, no recency carve-out.
+# `seed` makes a single run reproducible; rerunning with the same seed and
+# same prompt sequence yields byte-identical evict masks.
+name: random
+budget: 1024
+seed: 0
+record: true

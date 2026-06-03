@@ -1,0 +1,13 @@
+[
+  {
+    "name": "terminal-bench-core",
+    "version": "head-pinned-2025-12-04",
+    "description": "Local pin: parent of upstream PR #1382 (2af0e447 'Rename tasks folder to original-tasks', 2026-01-21). Layout still has ./tasks/<task-id>/, all 241 tasks present including jsonl-aggregator. Bypasses upstream's mutable `head` to keep capstone runs reproducible across machines.",
+    "terminal_bench_version": "latest",
+    "github_url": "https://github.com/laude-institute/terminal-bench",
+    "dataset_path": "./tasks",
+    "branch": "main",
+    "commit_hash": "1b025c4c8177e59ee7b9a6f5938fd8adae5ec1c0",
+    "task_id_subset": null
+  }
+]

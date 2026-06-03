@@ -1,0 +1,16 @@
+slug: browsecomp
+display_name: "BrowseComp"
+harness_dataset: openai/BrowseCompLongContext
+harness_split: test
+trace_root: traces/browsecomp
+default_max_iterations: 100
+selection_n: 32
+selection_seed: 42
+default_prompt_template: default
+exclude_lite: false
+extras:
+  encrypted: true
+  id_field: _row_index
+  question_field: problem
+  answer_field: answer
+  source_urls_field: urls

@@ -1,0 +1,20 @@
+slug: terminal-bench
+display_name: "Terminal-Bench"
+trace_root: traces/terminal-bench
+default_max_iterations: 100
+selection_n: 32
+selection_seed: 42
+default_prompt_template: default
+exclude_lite: false
+extras:
+  task_source_kind: terminal_bench_registry
+  dataset_name: terminal-bench-core
+  # Pinned via local_registry_path below (commit 1b025c4c, just before
+  # upstream renamed `tasks/` -> `original-tasks/` in PR #1382 on 2026-01-21).
+  # Using a stable label keeps the cache hot across runs.
+  dataset_version: head-pinned-2025-12-04
+  global_agent_timeout_sec: 7200.0
+  llm_timeout_sec: 1800.0
+  tb_process_cleanup_grace_sec: 300.0
+  registry_url:
+  local_registry_path: configs/benchmarks/terminal_bench_registry.json

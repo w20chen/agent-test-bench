@@ -1,0 +1,6 @@
+INFO 04-20 12:00:00 model_runner.py:1006] Loading model weights took 3.32 GiB
+INFO 04-20 12:00:01 worker.py:223] # GPU blocks: 8192, # CPU blocks: 512
+INFO 04-20 12:00:02 llm_engine.py:357] GPU KV cache size: 524288 tokens, 0.5 GiB
+INFO 04-20 12:00:02 config.py:88] model=Qwen/Qwen3-1.7B
+INFO 04-20 12:00:02 config.py:89] dtype=float16
+INFO 04-20 12:00:02 config.py:90] tensor_parallel_size=1

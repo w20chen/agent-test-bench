@@ -1,0 +1,4 @@
+groups:
+  - name: "COMPARE14"
+    paths:
+      - "tmp/__gantt_compare14_empty__/*.jsonl"
