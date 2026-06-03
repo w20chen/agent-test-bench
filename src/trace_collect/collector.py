@@ -871,6 +871,18 @@ async def _run_openclaw_in_task_container(
         extra_args=list(exec_config.start_extra_args),
     )
     ctx.mark_container_ready(container_id)
+
+    # Start resource sampling directly in a thread — the asyncio watcher in
+    # run_attempt cannot make progress because the calls below block the event
+    # loop with synchronous subprocess.run().
+    from harness.container_stats_sampler import ContainerStatsSampler
+    _stats_sampler = ContainerStatsSampler(
+        container_id=container_id,
+        interval_s=1.0,
+        executable=container_executable,
+    )
+    _stats_sampler.start()
+
     try:
         exec_config = resolve_running_container_exec_config(
             container_id=container_id,
@@ -964,6 +976,7 @@ async def _run_openclaw_in_task_container(
             generation_config=generation_config,
         )
     finally:
+        ctx.samples = _stats_sampler.stop()
         container_logs = stop_task_container(
             container_id,
             executable=container_executable,

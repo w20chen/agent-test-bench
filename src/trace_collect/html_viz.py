@@ -39,9 +39,11 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _parse_iso(ts_str: str) -> float:
-    """Parse ISO datetime string to epoch seconds."""
+    """Parse ISO datetime string to UTC epoch seconds."""
     try:
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except (ValueError, TypeError):
         return 0.0
@@ -57,6 +59,42 @@ def _ts_to_str(ts: float) -> str:
 def _esc(text: Any) -> str:
     """HTML-escape a value."""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _safe_float(val: Any) -> float:
+    """Convert a possibly-string float to float, stripping % and whitespace."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().rstrip("%").strip()
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _parse_mem_mb(mem_usage: str) -> float:
+    """Parse Docker mem_usage like '1.2GiB / 4GiB' → MB."""
+    if not mem_usage:
+        return 0.0
+    left = mem_usage.split("/")[0].strip()
+    try:
+        if left.endswith("GiB"):
+            return float(left[:-3]) * 1024
+        if left.endswith("MiB"):
+            return float(left[:-3])
+        if left.endswith("KiB"):
+            return float(left[:-3]) / 1024
+        if left.endswith("GB"):
+            return float(left[:-2]) * 1000
+        if left.endswith("MB"):
+            return float(left[:-2])
+        if left.endswith("KB"):
+            return float(left[:-2]) / 1000
+        if left.endswith("B"):
+            return float(left[:-1]) / (1024 * 1024)
+    except ValueError:
+        pass
+    return 0.0
 
 
 def generate_html(attempt_dir: Path) -> str:
@@ -82,12 +120,22 @@ def generate_html(attempt_dir: Path) -> str:
         if rec.get("type") == "action":
             actions.append(rec)
 
-    # Determine time origin (first action's ts_start)
+    # ── Resource samples ──────────────────────────────────────────
+    resource_samples = resources.get("samples", [])
+    resource_summary = resources.get("summary", {})
+
+    # Determine time origin: earliest of (first action ts_start, first resource epoch)
     t0 = 0.0
     for a in actions:
         ts = a.get("ts_start", 0)
         if ts > 0:
             t0 = ts
+            break
+    for s in resource_samples:
+        epoch = s.get("epoch", 0)
+        if isinstance(epoch, (int, float)) and epoch > 0:
+            if t0 == 0 or epoch < t0:
+                t0 = epoch
             break
     if t0 == 0:
         for a in actions:
@@ -102,10 +150,6 @@ def generate_html(attempt_dir: Path) -> str:
         if rec.get("type") == "summary":
             summary = rec
             break
-
-    # ── Resource samples ──────────────────────────────────────────
-    resource_samples = resources.get("samples", [])
-    resource_summary = resources.get("summary", {})
 
     # ── Build Gantt data ──────────────────────────────────────────
     gantt_items: list[dict[str, Any]] = []
@@ -162,16 +206,24 @@ def generate_html(attempt_dir: Path) -> str:
         "disk_w": [],
     }
     for s in resource_samples:
-        ts_val = s.get("timestamp", 0)
+        ts_val = s.get("epoch", s.get("timestamp", 0))
         if isinstance(ts_val, str):
             ts_val = _parse_iso(ts_val)
-        res_data["timestamps"].append(ts_val - t0 if t0 else 0)
-        res_data["cpu"].append(float(s.get("cpu_percent", 0)))
-        res_data["mem"].append(float(s.get("memory_mb", 0)))
-        res_data["net_rx"].append(float(s.get("net_rx", 0)))
-        res_data["net_tx"].append(float(s.get("net_tx", 0)))
-        res_data["disk_r"].append(float(s.get("disk_read", 0)))
-        res_data["disk_w"].append(float(s.get("disk_write", 0)))
+        elif not isinstance(ts_val, (int, float)):
+            ts_val = 0.0
+        res_data["timestamps"].append(float(ts_val) - t0)
+        res_data["cpu"].append(_safe_float(s.get("cpu_percent", 0)))
+        res_data["mem"].append(_parse_mem_mb(str(s.get("mem_usage", ""))))
+        # Network: net_rx_bytes / net_tx_bytes → MB
+        rx = s.get("net_rx_bytes", 0)
+        tx = s.get("net_tx_bytes", 0)
+        res_data["net_rx"].append(float(rx) / 1e6 if rx else 0.0)
+        res_data["net_tx"].append(float(tx) / 1e6 if tx else 0.0)
+        # Disk: disk_read_bytes / disk_write_bytes → MB
+        dr = s.get("disk_read_bytes", 0)
+        dw = s.get("disk_write_bytes", 0)
+        res_data["disk_r"].append(float(dr) / 1e6 if dr else 0.0)
+        res_data["disk_w"].append(float(dw) / 1e6 if dw else 0.0)
 
     # ── Serialize data as JSON for JavaScript ─────────────────────
     gantt_json = json.dumps(gantt_items, ensure_ascii=False)
@@ -320,7 +372,8 @@ var RES_COUNT = {resource_count};
             '<div class="gantt-label" title="' + it.label + '">' + it.label + '</div>' +
             '<div class="gantt-track">' +
                 '<div class="gantt-bar" style="left:' + left + '%;width:' + width + '%;background:' + it.color +
-                '" data-info="' + it.label + '&nbsp;|&nbsp;' + it.duration.toFixed(2) + 's" ' +
+                '" data-info="' + it.label + ' | ' + it.duration.toFixed(2) + 's | t=' +
+                it.x_start.toFixed(2) + 's \u2192 ' + it.x_end.toFixed(2) + 's" ' +
                 'onmouseenter="showTT(event,this)" onmouseleave="hideTT()"></div>' +
             '</div>' +
         '</div>';
@@ -375,7 +428,7 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'CPU %', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0.3, yAxisID:'y' }},
+                    {{ label:'CPU % (all cores)', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0.3, yAxisID:'y' }},
                     {{ label:'Memory (MB)', data:RES_DATA.mem, borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true, tension:0.3, yAxisID:'y1' }}
                 ]
             }},
@@ -383,7 +436,7 @@ document.addEventListener('mousemove', function(e) {{
                 responsive:true, maintainAspectRatio:false,
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
-                    y:{{ type:'linear', position:'left', title:{{display:true,text:'CPU %'}}, min:0 }},
+                    y:{{ type:'linear', position:'left', title:{{display:true,text:'CPU % (all cores)'}}, min:0 }},
                     y1:{{ type:'linear', position:'right', title:{{display:true,text:'Memory MB'}}, min:0, grid:{{drawOnChartArea:false}} }},
                     x:{{ title:{{display:true,text:'Time (relative)'}} }}
                 }}

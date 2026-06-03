@@ -135,6 +135,12 @@ curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-你的ke
 # 测 API 通不通
 ```
 
+### 结果可视化
+
+```bash
+PYTHONPATH=src python -m trace_collect.html_viz traces/swe-rebench/deepseek-chat/20260603T030206/12rambau__sepal_ui-411/attempt_1
+```
+
 ### Recording Internals
 
 `--record-internals` switches OpenClaw model calls to a host-side HuggingFace

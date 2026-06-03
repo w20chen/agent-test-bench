@@ -70,6 +70,7 @@ class AttemptContext:
     execution_environment: str = "container"
     fixed_image: str | None = None
     container_id: str | None = None
+    samples: list[dict[str, Any]] | None = None
     attempt_dir: Path = field(init=False)
     start_time: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     end_time: datetime | None = None
@@ -366,6 +367,8 @@ async def run_attempt(
                 sampler = None
         if sampler is not None:
             samples = sampler.stop()
+        elif ctx.samples is not None:
+            samples = ctx.samples
         if process_sampler is not None:
             process_samples = process_sampler.stop()
             if not samples:
