@@ -941,7 +941,7 @@ async def _run_openclaw_in_task_container(
     from harness.container_stats_sampler import ContainerStatsSampler
     _stats_sampler = ContainerStatsSampler(
         container_id=container_id,
-        interval_s=1.0,
+        interval_s=0.5,
         executable=container_executable,
     )
     _stats_sampler.start()

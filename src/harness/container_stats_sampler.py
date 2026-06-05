@@ -265,6 +265,63 @@ def _parse_pipe_stats(raw: str) -> dict[str, Any] | None:
     return sample
 
 
+# ---------------------------------------------------------------------------
+#  Cgroup v2 direct stat reading (zero-overhead, no Docker daemon round-trip)
+# ---------------------------------------------------------------------------
+
+def _read_cgroup_cpu_usec(cgroup_path: Path) -> int | None:
+    """Read cumulative CPU usage in microseconds from cgroup v2 cpu.stat."""
+    try:
+        text = (cgroup_path / "cpu.stat").read_text(encoding="utf-8")
+    except (PermissionError, FileNotFoundError, OSError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("usage_usec "):
+            try:
+                return int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+    return None
+
+
+def _read_cgroup_memory(cgroup_path: Path) -> tuple[int, int | None]:
+    """Return ``(current_bytes, max_bytes_or_None)`` from cgroup v2 memory."""
+    try:
+        current = int((cgroup_path / "memory.current").read_text(encoding="utf-8").strip())
+    except (PermissionError, FileNotFoundError, OSError, ValueError):
+        current = 0
+    try:
+        raw_max = (cgroup_path / "memory.max").read_text(encoding="utf-8").strip()
+        mem_max: int | None = int(raw_max) if raw_max != "max" else None
+    except (PermissionError, FileNotFoundError, OSError, ValueError):
+        mem_max = None
+    return current, mem_max
+
+
+def _read_host_ncpus() -> int:
+    """Return number of online CPUs (default 1 on error)."""
+    try:
+        return len(
+            (Path("/sys/devices/system/cpu/online"))
+            .read_text(encoding="utf-8")
+            .strip()
+            .split(",")
+        )
+    except Exception:
+        import os
+        return os.cpu_count() or 1
+
+
+_NCPUS: int | None = None  # cached after first read
+
+
+def _ncpus() -> int:
+    global _NCPUS
+    if _NCPUS is None:
+        _NCPUS = _read_host_ncpus()
+    return _NCPUS
+
+
 def _parse_memory_mb(mem_usage: str) -> float | None:
     if not mem_usage:
         return None
@@ -483,25 +540,23 @@ class ContainerStatsSampler(threading.Thread):
         # High-water marks for exec-mode disk I/O (non-monotonic source)
         self._io_hwm_read: int = 0
         self._io_hwm_write: int = 0
+        # Cgroup-based CPU tracking (deltas between consecutive samples).
+        self._prev_cpu_usec: int | None = None
+        self._prev_cpu_ts: float | None = None
+        self._nproc: int = _ncpus()
 
     def _ensure_io_source(self) -> None:
-        """Resolve and cache the I/O data source on first call.
+        """Resolve the I/O data source on first call.
 
         Tries cgroup v2 io.stat first (host-side, zero overhead).
         Falls back to exec-based aggregation if cgroup unavailable.
         """
         if self._io_mode is not None:
             return
-        pid = _resolve_container_pid(self.container_id, executable=self.executable)
-        if pid is None:
-            logger.debug("Could not resolve host PID for %s", self.container_id[:12])
-            self._io_mode = "exec"
-            return
-        cgroup_path = _resolve_cgroup_path(pid)
-        if cgroup_path is not None:
+        self._resolve_cgroup_path()
+        if self._cgroup_path is not None:
             try:
-                (cgroup_path / "io.stat").read_text(encoding="utf-8")
-                self._cgroup_path = cgroup_path
+                (self._cgroup_path / "io.stat").read_text(encoding="utf-8")
                 self._io_mode = "cgroup"
                 return
             except (PermissionError, FileNotFoundError, OSError):
@@ -511,6 +566,15 @@ class ContainerStatsSampler(threading.Thread):
             self.container_id[:12],
         )
         self._io_mode = "exec"
+
+    def _resolve_cgroup_path(self) -> None:
+        """Resolve and cache the cgroup v2 path for this container's init PID."""
+        if self._cgroup_path is not None:
+            return
+        pid = _resolve_container_pid(self.container_id, executable=self.executable)
+        if pid is None:
+            return
+        self._cgroup_path = _resolve_cgroup_path(pid)
 
     def _sample_io(self, sample: dict[str, Any]) -> None:
         """Attach disk I/O and context switch data to a sample dict."""
@@ -571,35 +635,93 @@ class ContainerStatsSampler(threading.Thread):
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
 
     def run(self) -> None:
+        # Resolve cgroup path once at start.
+        self._resolve_cgroup_path()
+
         while not self._stop_event.is_set():
             tick_start = time.monotonic()
-            try:
-                result = subprocess.run(
-                    [
-                        self.executable,
-                        "stats",
-                        "--no-stream",
-                        "--format",
-                        _STATS_FORMAT,
-                        self.container_id,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.subprocess_timeout_s,
-                    check=False,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                break
-            if result.returncode != 0:
-                break
-            sample = _parse_pipe_stats(result.stdout)
+
+            if self._cgroup_path is not None:
+                # Cgroup path available: read CPU + memory directly
+                # (microsecond overhead, no Docker daemon round-trip).
+                sample = self._sample_via_cgroup(tick_start)
+            else:
+                # Fallback to docker stats (slower, for non-cgroup-v2 hosts).
+                sample = self._sample_via_docker()
+
             if sample is not None:
                 self._sample_io(sample)
                 self._samples.append(sample)
+
             elapsed = time.monotonic() - tick_start
             remainder = max(0.0, self.interval_s - elapsed)
             if self._stop_event.wait(remainder):
                 break
+
+    def _sample_via_cgroup(self, tick_start: float) -> dict[str, Any] | None:
+        """Build a sample from cgroup v2 files (sub-millisecond)."""
+        assert self._cgroup_path is not None
+        now = datetime.now(tz=timezone.utc)
+        cpu_usec = _read_cgroup_cpu_usec(self._cgroup_path)
+        mem_bytes, mem_max = _read_cgroup_memory(self._cgroup_path)
+
+        # Compute CPU % from delta between consecutive samples.
+        if (
+            cpu_usec is not None
+            and self._prev_cpu_usec is not None
+            and self._prev_cpu_ts is not None
+        ):
+            delta_usec = cpu_usec - self._prev_cpu_usec
+            delta_sec = now.timestamp() - self._prev_cpu_ts
+            cpu_percent = (
+                (delta_usec / (delta_sec * 1_000_000 * self._nproc)) * 100
+                if delta_sec > 0
+                else 0.0
+            )
+        else:
+            cpu_percent = 0.0
+
+        self._prev_cpu_usec = cpu_usec
+        self._prev_cpu_ts = now.timestamp()
+
+        mem_mb = mem_bytes / (1024 * 1024) if mem_bytes else 0.0
+        mem_limit_mb = mem_max / (1024 * 1024) if mem_max else 0.0
+
+        return {
+            "timestamp": now.isoformat().replace("+00:00", ""),
+            "epoch": now.timestamp(),
+            "mem_usage": f"{mem_mb:.2f}MiB / {mem_limit_mb:.1f}MiB",
+            "mem_percent": (
+                f"{(mem_bytes / mem_max * 100):.2f}%"
+                if mem_max and mem_bytes
+                else "0.00%"
+            ),
+            "cpu_percent": f"{cpu_percent:.2f}%",
+            "net_io": "0B / 0B",
+        }
+
+    def _sample_via_docker(self) -> dict[str, Any] | None:
+        """Fallback: sample via ``docker stats --no-stream``."""
+        try:
+            result = subprocess.run(
+                [
+                    self.executable,
+                    "stats",
+                    "--no-stream",
+                    "--format",
+                    _STATS_FORMAT,
+                    self.container_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.subprocess_timeout_s,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        if result.returncode != 0:
+            return None
+        return _parse_pipe_stats(result.stdout)
 
     def stop(self) -> list[dict[str, Any]]:
         self._stop_event.set()

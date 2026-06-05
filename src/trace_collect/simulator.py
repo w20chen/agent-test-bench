@@ -1248,7 +1248,7 @@ async def simulate(
                 continue
             sampler = ContainerStatsSampler(
                 container_id=prepared.container.container_id,
-                interval_s=1.0,
+                interval_s=0.5,
                 executable=prepared.container.container_executable,
             )
             sampler.start()

@@ -258,7 +258,7 @@ async def _watch_for_container_ready(
             ):
                 sampler = ContainerStatsSampler(
                     container_id=ctx.container_id,
-                    interval_s=1.0,
+                    interval_s=0.5,
                     executable=container_executable,
                 )
                 sampler.start()
@@ -394,7 +394,7 @@ async def run_attempt(
 
     process_sampler: ProcessStatsSampler | None = None
     if ctx.execution_environment == "host":
-        process_sampler = ProcessStatsSampler(pid=os.getpid(), interval_s=1.0)
+        process_sampler = ProcessStatsSampler(pid=os.getpid(), interval_s=0.5)
         process_sampler.start()
     if recording_provider is not None:
         recording_provider.start_attempt(ctx.attempt_dir / "recordings")

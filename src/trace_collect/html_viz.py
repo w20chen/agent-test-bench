@@ -204,14 +204,25 @@ def generate_html(attempt_dir: Path) -> str:
         "net_tx": [],
         "disk_r": [],
         "disk_w": [],
+        "disk_r_rate": [],
+        "disk_w_rate": [],
+        "ctx_switches": [],
+        "mem_bw_total": [],
+        "mem_bw_read": [],
+        "mem_bw_write": [],
     }
+    prev_dr: float = 0.0
+    prev_dw: float = 0.0
+    prev_ts: float = 0.0
+    first: bool = True
     for s in resource_samples:
         ts_val = s.get("epoch", s.get("timestamp", 0))
         if isinstance(ts_val, str):
             ts_val = _parse_iso(ts_val)
         elif not isinstance(ts_val, (int, float)):
             ts_val = 0.0
-        res_data["timestamps"].append(float(ts_val) - t0)
+        rel_ts = float(ts_val) - t0
+        res_data["timestamps"].append(rel_ts)
         res_data["cpu"].append(_safe_float(s.get("cpu_percent", 0)))
         res_data["mem"].append(_parse_mem_mb(str(s.get("mem_usage", ""))))
         # Network: net_rx_bytes / net_tx_bytes → MB
@@ -219,11 +230,34 @@ def generate_html(attempt_dir: Path) -> str:
         tx = s.get("net_tx_bytes", 0)
         res_data["net_rx"].append(float(rx) / 1e6 if rx else 0.0)
         res_data["net_tx"].append(float(tx) / 1e6 if tx else 0.0)
-        # Disk: disk_read_bytes / disk_write_bytes → MB
-        dr = s.get("disk_read_bytes", 0)
-        dw = s.get("disk_write_bytes", 0)
-        res_data["disk_r"].append(float(dr) / 1e6 if dr else 0.0)
-        res_data["disk_w"].append(float(dw) / 1e6 if dw else 0.0)
+        # Disk: absolute MB
+        dr = s.get("disk_read_bytes", 0) or 0
+        dw = s.get("disk_write_bytes", 0) or 0
+        dr_mb = float(dr) / 1e6
+        dw_mb = float(dw) / 1e6
+        res_data["disk_r"].append(dr_mb)
+        res_data["disk_w"].append(dw_mb)
+        # Disk rate (MB/s) from deltas
+        if not first:
+            dt = rel_ts - prev_ts
+            dr_rate = (dr_mb - prev_dr) / dt if dt > 0 else 0.0
+            dw_rate = (dw_mb - prev_dw) / dt if dt > 0 else 0.0
+        else:
+            dr_rate = 0.0
+            dw_rate = 0.0
+            first = False
+        res_data["disk_r_rate"].append(dr_rate)
+        res_data["disk_w_rate"].append(dw_rate)
+        prev_dr = dr_mb
+        prev_dw = dw_mb
+        prev_ts = rel_ts
+        # Context switches
+        ctx = s.get("context_switches")
+        res_data["ctx_switches"].append(float(ctx) if ctx is not None else 0.0)
+        # Host memory bandwidth (MB/s)
+        res_data["mem_bw_total"].append(_safe_float(s.get("memory_total_mb_s", 0)))
+        res_data["mem_bw_read"].append(_safe_float(s.get("memory_read_mb_s", 0)))
+        res_data["mem_bw_write"].append(_safe_float(s.get("memory_write_mb_s", 0)))
 
     # ── Serialize data as JSON for JavaScript ─────────────────────
     gantt_json = json.dumps(gantt_items, ensure_ascii=False)
@@ -416,8 +450,10 @@ document.addEventListener('mousemove', function(e) {{
     }} else {{
         parent.innerHTML =
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🖥 CPU & Memory</h3><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🧠 Memory Bandwidth (host)</h3><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (cumulative)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O (rate)</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }}
 
@@ -443,6 +479,27 @@ document.addEventListener('mousemove', function(e) {{
             }}
         }});
 
+        // Memory Bandwidth (host)
+        new Chart(document.getElementById('chart-mem-bw'), {{
+            type: 'line',
+            data: {{
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                datasets: [
+                    {{ label:'Total (MB/s)', data:RES_DATA.mem_bw_total, borderColor:'#8e44ad', tension:0.3 }},
+                    {{ label:'Read (MB/s)', data:RES_DATA.mem_bw_read, borderColor:'#2980b9', tension:0.3 }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.mem_bw_write, borderColor:'#c0392b', tension:0.3 }}
+                ]
+            }},
+            options: {{
+                responsive:true, maintainAspectRatio:false,
+                interaction:{{mode:'index',intersect:false}},
+                scales: {{
+                    y:{{ title:{{display:true,text:'MB/s'}}, min:0 }},
+                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                }}
+            }}
+        }});
+
         // Network
         new Chart(document.getElementById('chart-net'), {{
             type: 'line',
@@ -463,21 +520,40 @@ document.addEventListener('mousemove', function(e) {{
             }}
         }});
 
-        // Disk
+        // Disk (rate MB/s)
         new Chart(document.getElementById('chart-disk'), {{
             type: 'line',
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'Read (MB)', data:RES_DATA.disk_r, borderColor:'#f39c12', tension:0.3 }},
-                    {{ label:'Write (MB)', data:RES_DATA.disk_w, borderColor:'#e67e22', tension:0.3 }}
+                    {{ label:'Read (MB/s)', data:RES_DATA.disk_r_rate, borderColor:'#2ecc71', tension:0.3 }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.disk_w_rate, borderColor:'#e67e22', tension:0.3 }}
                 ]
             }},
             options: {{
                 responsive:true, maintainAspectRatio:false,
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
-                    y:{{ title:{{display:true,text:'MB'}}, min:0 }},
+                    y:{{ title:{{display:true,text:'MB/s'}}, min:0 }},
+                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                }}
+            }}
+        }});
+
+        // Context Switches
+        new Chart(document.getElementById('chart-ctx'), {{
+            type: 'line',
+            data: {{
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                datasets: [
+                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0.3 }}
+                ]
+            }},
+            options: {{
+                responsive:true, maintainAspectRatio:false,
+                interaction:{{mode:'index',intersect:false}},
+                scales: {{
+                    y:{{ title:{{display:true,text:'Count'}}, min:0 }},
                     x:{{ title:{{display:true,text:'Time (relative)'}} }}
                 }}
             }}
