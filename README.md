@@ -94,6 +94,20 @@ target still exists for x86_64-on-ARM QEMU emulation if required.
 
 ### Step 2 — Run
 
+Check valid `instance_id`s.
+
+```bash
+python -c "
+import json
+tasks = json.load(open('data/swe-rebench/tasks.json'))
+for t in tasks[:20]:
+    print(t['instance_id'], '|', t.get('repo',''))
+print(f'... ({len(tasks)} total)')
+"
+```
+
+Run a specific test case.
+
 ```bash
 DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \

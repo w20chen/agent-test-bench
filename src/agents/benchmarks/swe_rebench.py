@@ -24,7 +24,7 @@ def _install_config_to_commands(ic: dict[str, Any]) -> list[str]:
     commands: list[str] = []
 
     # apt packages — consolidate into a single apt-get call.
-    packages = ic.get("packages", "")
+    packages = ic.get("packages") or ""
     if packages:
         if isinstance(packages, str):
             packages = [packages]
@@ -35,13 +35,13 @@ def _install_config_to_commands(ic: dict[str, Any]) -> list[str]:
             )
 
     # Pre-install scripts (apt or shell commands to run before pip).
-    pre_install = ic.get("pre_install", [])
+    pre_install = ic.get("pre_install") or []
     if isinstance(pre_install, str):
         pre_install = [pre_install]
     commands.extend(str(s).strip() for s in pre_install if str(s).strip())
 
     # pip packages.
-    pip_packages = ic.get("pip_packages", [])
+    pip_packages = ic.get("pip_packages") or []
     if isinstance(pip_packages, str):
         pip_packages = [pip_packages]
     pip_list = [str(p).strip() for p in pip_packages if str(p).strip()]
@@ -49,7 +49,7 @@ def _install_config_to_commands(ic: dict[str, Any]) -> list[str]:
         commands.append(f"pip install {' '.join(pip_list)}")
 
     # Main install command (e.g. ``pip install -e .``).
-    install_cmd = ic.get("install", "")
+    install_cmd = ic.get("install") or ""
     if install_cmd:
         commands.append(str(install_cmd).strip())
 
