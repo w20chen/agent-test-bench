@@ -563,6 +563,26 @@ async def _run_scaffold_tasks(
                     results[-1].success,
                     results[-1].elapsed_s,
                 )
+
+                # Generate per-task HTML visualization.
+                try:
+                    from trace_collect.html_viz import generate_html
+
+                    viz_path = attempt_ctx.attempt_dir / "trace_viz.html"
+                    viz_path.write_text(
+                        generate_html(attempt_ctx.attempt_dir),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "viz %s → %s (%.1f KB)",
+                        instance_id,
+                        viz_path,
+                        viz_path.stat().st_size / 1024,
+                    )
+                except Exception:
+                    logger.warning(
+                        "viz %s failed (non-fatal)", instance_id, exc_info=True
+                    )
             finally:
                 _cleanup_task_images(
                     instance_id=instance_id,

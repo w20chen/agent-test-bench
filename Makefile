@@ -3,7 +3,7 @@ UV ?= uv
 TRACE_COLLECT = PYTHONPATH=src $(PYTHON) -m trace_collect.cli --provider $(PROVIDER)
 GANTT_VIEWER_FRONTEND = demo/gantt_viewer/frontend
 
-.PHONY: help pull test lint serve-vllm run-smoke run-sweep collect-results setup-swebench-repos build-swebench-images download-swebench-verified download-swe-rebench setup-swe-rebench-repos setup-swe-rebench build-arm-base setup-arm-host smoke-swe-rebench-openclaw gantt-viewer-install gantt-viewer-dev gantt-viewer-build gantt-viewer-test gantt-viewer-smoke gantt-viewer-clean
+.PHONY: help pull test lint serve-vllm run-smoke run-sweep collect-results setup-swebench-repos build-swebench-images download-swebench-verified download-swe-rebench setup-swe-rebench-repos setup-swe-rebench build-arm-base setup-arm-host pull-swe-rebench-images smoke-swe-rebench-openclaw gantt-viewer-install gantt-viewer-dev gantt-viewer-build gantt-viewer-test gantt-viewer-smoke gantt-viewer-clean
 
 help:
 	@printf "Targets:\n"
@@ -24,6 +24,7 @@ help:
 	@printf "  build-arm-base              Build the ARM-native base image (containers/Containerfile.arm-base)\n"
 	@printf "  setup-arm-native            Full ARM-native setup: build-arm-base + setup-swe-rebench\n"
 	@printf "  smoke-swe-rebench-openclaw  Run $(SMOKE_N) SWE-rebench tasks through openclaw\n"
+	@printf "  pull-swe-rebench-images     Pre-pull all SWE-rebench Docker images (background-friendly)\n"
 	@printf "  gantt-viewer-install        Install frontend dependencies with npm\n"
 	@printf "  gantt-viewer-dev            Launch the dynamic Gantt viewer in dev mode\n"
 	@printf "  gantt-viewer-build          Build the frontend bundle\n"
@@ -75,6 +76,16 @@ build-arm-base:
 	docker build -f containers/Containerfile.arm-base -t swe-arm-base:latest .
 
 setup-arm-native: build-arm-base setup-swe-rebench
+
+# ── Image pre-pull ────────────────────────────────────────────────────
+# Override PULL_SAMPLE (default: all) and PULL_PARALLEL (default: 1).
+PULL_SAMPLE ?=
+PULL_PARALLEL ?= 1
+
+pull-swe-rebench-images:
+	./scripts/setup/pull_swe_rebench_images.sh data/swe-rebench/tasks.json \
+		$(if $(PULL_SAMPLE),--sample $(PULL_SAMPLE)) \
+		$(if $(PULL_PARALLEL),--parallel $(PULL_PARALLEL))
 
 setup-arm-host:
 	@echo "[setup-arm-host] This target configures QEMU-based x86_64 emulation."

@@ -92,6 +92,8 @@ sudo tee /etc/docker/daemon.json <<'EOF'
 }
 EOF
 sudo systemctl restart docker
+
+export KEEP_IMAGES_ABOVE_GB=30
 ```
 
 ### Step 1 — One-time environment setup
@@ -107,6 +109,30 @@ conda activate ML
 ARM hosts auto-detect and use the native `swe-arm-base` image with local
 repo mirrors — no QEMU emulation needed.  The legacy `make setup-arm-host`
 target still exists for x86_64-on-ARM QEMU emulation if required.
+
+### Step 1b — Pre-pull images (recommended)
+
+Each SWE-rebench task uses its own ~2 GB Docker image
+(``swerebench/sweb.eval.x86_64.<task>:latest``).  Pulling them ahead of
+time avoids network stalls during the run.
+
+```bash
+# Pull images for the first 16 tasks (match --sample 16)
+make pull-swe-rebench-images PULL_SAMPLE=16
+
+# Pull for specific tasks
+./scripts/setup/pull_swe_rebench_images.sh \
+    --instance-ids "12rambau__sepal_ui-411,0b01001001__spectree-64"
+
+# Concurrent pulls (4 at a time)
+make pull-swe-rebench-images PULL_SAMPLE=16 PULL_PARALLEL=4
+
+# Pull everything (6,500+ images — use with care!)
+make pull-swe-rebench-images
+```
+
+Already-pulled images are re-used across runs and only removed when disk
+runs low (set ``KEEP_IMAGES_ABOVE_GB`` to raise the threshold; see Step 0).
 
 ### Step 2 — Run
 
