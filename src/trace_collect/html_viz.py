@@ -162,12 +162,35 @@ def generate_html(attempt_dir: Path) -> str:
         iteration = a.get("iteration", 0)
         label = ""
         color = ""
+        tooltip_extra = ""
         if atype == "llm_call":
             label = f"LLM #{iteration}"
             color = "#4a90d9"
         elif atype == "tool_exec":
-            tool_name = (a.get("data") or {}).get("tool_name", "?")
+            tdata = a.get("data") or {}
+            tool_name = tdata.get("tool_name", "?")
             label = f"{tool_name} #{iteration}"
+            # Extract a short preview of tool arguments for the tooltip.
+            tooltip_extra = ""
+            tool_args_raw = tdata.get("tool_args", "")
+            if tool_args_raw:
+                try:
+                    args_dict = json.loads(tool_args_raw) if isinstance(tool_args_raw, str) else tool_args_raw
+                    if isinstance(args_dict, dict):
+                        # Show the first meaningful value (command, path, query, etc.)
+                        preview_keys = ("command", "path", "query", "url", "text", "content", "pattern", "name")
+                        for k in preview_keys:
+                            if k in args_dict and args_dict[k]:
+                                val = str(args_dict[k])
+                                tooltip_extra = f" | {val[:200]}"
+                                break
+                        if not tooltip_extra:
+                            # Fallback: first key-value pair
+                            first_kv = next(iter(args_dict.items()), None)
+                            if first_kv:
+                                tooltip_extra = f" | {first_kv[0]}={str(first_kv[1])[:60]}"
+                except (json.JSONDecodeError, TypeError, StopIteration):
+                    pass
             # Distinct colors per tool type
             tool_colors = {
                 "exec": "#e67e22",
@@ -191,6 +214,7 @@ def generate_html(attempt_dir: Path) -> str:
             "x_start": ts_s - t0,
             "x_end": ts_e - t0,
             "duration": ts_e - ts_s,
+            "tooltip_extra": tooltip_extra,
         })
 
     total_span = max((it["x_end"] for it in gantt_items), default=1)
@@ -326,7 +350,7 @@ body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .gantt-legend {{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;font-size:10px}}
 .gantt-legend span {{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:3px;vertical-align:middle}}
 /* Tooltips */
-.tooltip {{position:fixed;background:#222;color:#fff;padding:6px 10px;border-radius:4px;font-size:11px;pointer-events:none;z-index:999;display:none;max-width:300px;word-break:break-all}}
+.tooltip {{position:fixed;background:#222;color:#fff;padding:6px 10px;border-radius:4px;font-size:11px;pointer-events:none;z-index:999;display:none;max-width:500px;word-break:break-all}}
 .footer {{text-align:center;padding:16px;font-size:11px;color:#aaa}}
 </style>
 </head>
@@ -402,12 +426,13 @@ var RES_COUNT = {resource_count};
     var rowsHtml = GANTT.map(function(it, idx) {{
         var left = (it.x_start / total) * 100;
         var width = Math.max((it.duration / total) * 100, 0.3);
+        var info = it.label + (it.tooltip_extra || '') + ' | ' + it.duration.toFixed(2) + 's | t=' +
+            it.x_start.toFixed(2) + 's \u2192 ' + it.x_end.toFixed(2) + 's';
         return '<div class="gantt-row">' +
             '<div class="gantt-label" title="' + it.label + '">' + it.label + '</div>' +
             '<div class="gantt-track">' +
                 '<div class="gantt-bar" style="left:' + left + '%;width:' + width + '%;background:' + it.color +
-                '" data-info="' + it.label + ' | ' + it.duration.toFixed(2) + 's | t=' +
-                it.x_start.toFixed(2) + 's \u2192 ' + it.x_end.toFixed(2) + 's" ' +
+                '" data-info="' + info.replace(/"/g, '&quot;') + '" ' +
                 'onmouseenter="showTT(event,this)" onmouseleave="hideTT()"></div>' +
             '</div>' +
         '</div>';
