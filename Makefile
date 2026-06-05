@@ -3,7 +3,7 @@ UV ?= uv
 TRACE_COLLECT = PYTHONPATH=src $(PYTHON) -m trace_collect.cli --provider $(PROVIDER)
 GANTT_VIEWER_FRONTEND = demo/gantt_viewer/frontend
 
-.PHONY: help pull test lint serve-vllm run-smoke run-sweep collect-results setup-swebench-repos build-swebench-images download-swebench-verified download-swe-rebench setup-swe-rebench-repos setup-swe-rebench setup-arm-host smoke-swe-rebench-openclaw gantt-viewer-install gantt-viewer-dev gantt-viewer-build gantt-viewer-test gantt-viewer-smoke gantt-viewer-clean
+.PHONY: help pull test lint serve-vllm run-smoke run-sweep collect-results setup-swebench-repos build-swebench-images download-swebench-verified download-swe-rebench setup-swe-rebench-repos setup-swe-rebench build-arm-base setup-arm-host smoke-swe-rebench-openclaw gantt-viewer-install gantt-viewer-dev gantt-viewer-build gantt-viewer-test gantt-viewer-smoke gantt-viewer-clean
 
 help:
 	@printf "Targets:\n"
@@ -20,7 +20,9 @@ help:
 	@printf "  download-swe-rebench        Download SWE-rebench (nebius/SWE-rebench) filtered split\n"
 	@printf "  setup-swe-rebench-repos     Clone repos referenced by SWE-rebench tasks\n"
 	@printf "  setup-swe-rebench           Shortcut: download-swe-rebench + setup-swe-rebench-repos\n"
-	@printf "  setup-arm-host              Enable amd64 container execution on ARM Docker hosts (uses sudo if needed)\n"
+	@printf "  setup-arm-host              Enable amd64 emulation on ARM Docker hosts (legacy QEMU path)\n"
+	@printf "  build-arm-base              Build the ARM-native base image (containers/Containerfile.arm-base)\n"
+	@printf "  setup-arm-native            Full ARM-native setup: build-arm-base + setup-swe-rebench\n"
 	@printf "  smoke-swe-rebench-openclaw  Run $(SMOKE_N) SWE-rebench tasks through openclaw\n"
 	@printf "  gantt-viewer-install        Install frontend dependencies with npm\n"
 	@printf "  gantt-viewer-dev            Launch the dynamic Gantt viewer in dev mode\n"
@@ -67,7 +69,16 @@ setup-swe-rebench-repos:
 
 setup-swe-rebench: download-swe-rebench setup-swe-rebench-repos
 
+# ── ARM-native targets ─────────────────────────────────────────────────
+
+build-arm-base:
+	docker build -f containers/Containerfile.arm-base -t swe-arm-base:latest .
+
+setup-arm-native: build-arm-base setup-swe-rebench
+
 setup-arm-host:
+	@echo "[setup-arm-host] This target configures QEMU-based x86_64 emulation."
+	@echo "[setup-arm-host] For native ARM performance, use: make setup-arm-native"
 	@if [ "$$(id -u)" -eq 0 ]; then \
 		./scripts/setup/arm_setup.sh install; \
 	else \

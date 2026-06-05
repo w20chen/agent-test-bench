@@ -6,11 +6,16 @@ writeable for agent runs.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import time
+from pathlib import Path
+from typing import Any
 
 from harness.container_runtime import image_exists_command
+
+logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE: dict[str, tuple[str, float]] = {}
 _PULL_ATTEMPTS = 3
@@ -297,3 +302,221 @@ def clear_image_cache() -> None:
 def drop_cached_fixed_image(source_image: str) -> None:
     """Forget any cached fixed-image lookup for ``source_image``."""
     _IMAGE_CACHE.pop(normalize_image_reference(source_image), None)
+
+
+# ---------------------------------------------------------------------------
+# ARM-native image preparation
+# ---------------------------------------------------------------------------
+
+import platform as _platform
+
+#: Default ARM base image tag.  Override via ``ARM_BASE_IMAGE`` env var or
+#: the benchmark YAML ``arm_base_image`` field.
+_ARM_BASE_IMAGE_DEFAULT = "swe-arm-base:latest"
+
+#: Name prefix for cached ARM derivative images (docker commit).
+_ARM_FIXED_PREFIX = "swe-arm-fixed-"
+
+
+def _detect_host_arch() -> str:
+    """Return ``"arm64"`` or ``"amd64"`` based on the host machine."""
+    machine = _platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    return "amd64"
+
+
+def is_arm_host() -> bool:
+    """True when the current host is an ARM64/AArch64 machine."""
+    return _detect_host_arch() == "arm64"
+
+
+def resolve_arm_base_image(benchmark_config: Any | None = None) -> str:
+    """Return the ARM base image to use.
+
+    Resolution order:
+    1. ``ARM_BASE_IMAGE`` environment variable.
+    2. ``benchmark_config.extras.get("arm_base_image")``.
+    3. Built-in default ``swe-arm-base:latest``.
+    """
+    env_val = os.environ.get("ARM_BASE_IMAGE", "").strip()
+    if env_val:
+        return normalize_image_reference(env_val)
+    if benchmark_config is not None:
+        extras = getattr(benchmark_config, "extras", {}) or {}
+        yaml_val = extras.get("arm_base_image")
+        if yaml_val:
+            return normalize_image_reference(str(yaml_val))
+    return normalize_image_reference(_ARM_BASE_IMAGE_DEFAULT)
+
+
+def _arm_fixed_name_for(instance_id: str) -> str:
+    """Return the cached ARM derivative image name for *instance_id*."""
+    safe = instance_id.replace("/", "_").replace(":", "_").replace("@", "_")
+    return f"{_ARM_FIXED_PREFIX}{safe}"
+
+
+def ensure_arm_fixed_image(
+    instance_id: str,
+    *,
+    base_image: str,
+    repo_path: Path,
+    base_commit: str,
+    install_config: list[str] | None,
+    container_executable: str,
+    host_uid: int | None = None,
+    host_gid: int | None = None,
+) -> tuple[str, float]:
+    """Prepare a cached ARM-native container image for a task.
+
+    The image is built once per *instance_id* and reused across attempts:
+    1. Mount *repo_path* into a container started from *base_image*.
+    2. ``git checkout <base_commit>``.
+    3. Execute *install_config* steps (apt/pip/scripts).
+    4. ``docker commit`` the result as ``swe-arm-fixed-<instance_id>``.
+
+    Returns:
+        ``(fixed_image_name, elapsed_seconds)``.  Zero elapsed when a
+        cached image already exists.
+    """
+    fixed_name = _arm_fixed_name_for(instance_id)
+
+    if _image_exists(fixed_name, container_executable):
+        return (fixed_name, 0.0)
+
+    base_image = normalize_image_reference(base_image)
+    ensure_source_image(
+        base_image,
+        container_executable=container_executable,
+    )
+
+    uid = host_uid if host_uid is not None else os.getuid()
+    gid = host_gid if host_gid is not None else os.getgid()
+
+    t0 = time.time()
+
+    repo_abs = str(repo_path.resolve())
+    bare_name = repo_path.name  # e.g. "django__django.git"
+    mirror_mount = f"/mirror/{bare_name}"
+
+    run_cmd = [
+        container_executable,
+        "run",
+        "-d",
+        "--rm",
+        "-v",
+        f"{repo_abs}:{mirror_mount}:ro",
+        "-w",
+        "/",
+        base_image,
+        "sleep",
+        "infinity",
+    ]
+    start = _run(run_cmd, check=True, timeout=180)
+    container_id = start.stdout.strip()
+
+    try:
+        # 1. Clone from the local bare mirror into /testbed.
+        _run(
+            [
+                container_executable,
+                "exec",
+                container_id,
+                "git",
+                "clone",
+                "--quiet",
+                mirror_mount,
+                "/testbed",
+            ],
+            check=True,
+            timeout=300,
+        )
+
+        # 2. Checkout the correct base commit.
+        _run(
+            [
+                container_executable,
+                "exec",
+                container_id,
+                "git",
+                "-C",
+                "/testbed",
+                "checkout",
+                "--quiet",
+                base_commit,
+            ],
+            check=True,
+            timeout=120,
+        )
+
+        # 3. Run install_config steps (if provided).
+        if install_config:
+            for step in install_config:
+                step = step.strip()
+                if not step:
+                    continue
+                logger.info(
+                    "arm-fixed %s: install step: %.120s",
+                    instance_id,
+                    step,
+                )
+                _run(
+                    [
+                        container_executable,
+                        "exec",
+                        "-w",
+                        "/testbed",
+                        container_id,
+                        "bash",
+                        "-lc",
+                        step,
+                    ],
+                    check=True,
+                    timeout=600,
+                )
+
+        # 4. Fix /testbed ownership so the host user can write.
+        _run(
+            [
+                container_executable,
+                "exec",
+                container_id,
+                "chown",
+                "-R",
+                f"{uid}:{gid}",
+                "/testbed",
+            ],
+            check=True,
+            timeout=120,
+        )
+
+        # 5. Commit the prepared container as a reusable image.
+        _run(
+            [container_executable, "commit", container_id, fixed_name],
+            check=True,
+            timeout=240,
+        )
+    finally:
+        _run(
+            [container_executable, "stop", container_id],
+            check=False,
+            timeout=30,
+        )
+        _run(
+            [container_executable, "rm", "-f", container_id],
+            check=False,
+            timeout=30,
+        )
+
+    elapsed = time.time() - t0
+    return (fixed_name, elapsed)
+
+
+def drop_cached_arm_fixed_image(instance_id: str) -> None:
+    """No-op: ARM images are managed by Docker, not the in-memory cache.
+
+    Unlike x86_64 images which are cached in ``_IMAGE_CACHE``, ARM fixed
+    images persist as docker-committed images and are removed via
+    :func:`remove_image`.  This function exists for API symmetry.
+    """
+    pass

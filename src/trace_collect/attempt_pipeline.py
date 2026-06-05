@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from harness.container_image_prep import ensure_fixed_image
+from harness.container_image_prep import (
+    ensure_fixed_image,
+    ensure_arm_fixed_image,
+    is_arm_host,
+    _inspect_image_platform,
+)
 from harness.container_runtime import container_run_user_args
 from harness.container_stats_sampler import (
     ContainerStatsSampler,
@@ -76,6 +81,11 @@ class AttemptContext:
     end_time: datetime | None = None
     container_stdout: str = ""
     permission_fix_time_s: float = 0.0
+    # ARM-native fields (ignored on x86_64 hosts).
+    arm_repo: str | None = None
+    arm_base_commit: str | None = None
+    arm_install_config: list[str] | None = None
+    arm_repos_root: Path | None = None
 
     def __post_init__(self) -> None:
         self.attempt_dir = self.run_dir / self.instance_id / f"attempt_{self.attempt}"
@@ -100,6 +110,30 @@ class AttemptContext:
     def end_time_iso(self) -> str:
         end = self.end_time or datetime.now(tz=timezone.utc)
         return end.isoformat().replace("+00:00", "")
+
+
+def _resolve_arm_repo_path(
+    repo: str,
+    *,
+    repos_root: Path | None = None,
+) -> Path:
+    """Resolve the local bare-repo mirror path for *repo*.
+
+    Returns the directory path to use as a Docker volume mount.
+    """
+    if repos_root is None:
+        raise ValueError(
+            "ARM host requires repos_root. "
+            "Add repos_root to benchmark YAML or run: make setup-swe-rebench-repos"
+        )
+    bare_name = f"{repo.replace('/', '__')}.git"
+    bare_path = repos_root / bare_name
+    if not bare_path.exists():
+        raise FileNotFoundError(
+            f"Repo {repo!r} not found at {bare_path}. "
+            f"Run: make setup-swe-rebench-repos"
+        )
+    return bare_path
 
 
 def start_task_container(
@@ -136,6 +170,12 @@ def start_task_container(
     cmd.extend(container_run_user_args(executable))
     if extra_args:
         cmd.extend(extra_args)
+    # Explicitly pin the container platform to the image's native arch.
+    # On ARM hosts running x86_64 images this ensures Docker selects the
+    # correct QEMU binfmt handler rather than relying on auto-detection.
+    image_platform = _inspect_image_platform(fixed_image, executable)
+    if image_platform:
+        cmd.extend(["--platform", image_platform])
     cmd.extend([fixed_image, "sleep", "infinity"])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if result.returncode != 0:
@@ -303,10 +343,29 @@ async def run_attempt(
         if container_executable is None:
             raise ValueError("container_executable is required for container tasks")
         try:
-            fixed_name, fix_elapsed = ensure_fixed_image(
-                ctx.source_image,
-                container_executable=container_executable,
-            )
+            if is_arm_host() and ctx.arm_repo and ctx.arm_base_commit:
+                # ARM-native: build fixed image from base + cloned repo.
+                if ctx.arm_repos_root is None:
+                    raise ValueError(
+                        f"ARM host but arm_repos_root not set for {ctx.instance_id}"
+                    )
+                repo_path = _resolve_arm_repo_path(
+                    ctx.arm_repo,
+                    repos_root=ctx.arm_repos_root,
+                )
+                fixed_name, fix_elapsed = ensure_arm_fixed_image(
+                    ctx.instance_id,
+                    base_image=ctx.source_image,
+                    repo_path=repo_path,
+                    base_commit=ctx.arm_base_commit,
+                    install_config=ctx.arm_install_config,
+                    container_executable=container_executable,
+                )
+            else:
+                fixed_name, fix_elapsed = ensure_fixed_image(
+                    ctx.source_image,
+                    container_executable=container_executable,
+                )
             ctx.fixed_image = fixed_name
             ctx.permission_fix_time_s = fix_elapsed
             logger.info(

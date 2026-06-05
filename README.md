@@ -1,4 +1,4 @@
-# agent-sched-bench
+# AT-Bench
 
 Benchmark environment for studying agent scheduling and KV-cache management on
 multi-step LLM workloads. The repo ships three top-level capabilities:
@@ -74,43 +74,25 @@ registry, checkpointing behaviour, and trace schema v5 layout.
 
 ## Quick Test
 
-这里给出跑一个 SWE-rebench case 的完整流程。   
+End-to-end walkthrough for running a single SWE-rebench task.
 
-环境：ARM 服务器 + DeepSeek API + Docker   
+Prerequisites: ARM server + DeepSeek API + Docker
 
-### 第一步：一次性环境配置
+### Step 1 — One-time environment setup
 
 ```bash
-# 1. 启用 ARM 上 x86_64 容器支持
-make setup-arm-host
+# Build the ARM-native base image and download SWE-rebench data + repos
+make setup-arm-native
 
-# 2. 配置 Docker Hub 镜像加速
-sudo tee /etc/docker/daemon.json <<'EOF'
-{
-  "registry-mirrors": [
-    "https://docker.1panel.live",
-    "https://dockerpull.org"
-  ]
-}
-EOF
-sudo systemctl restart docker
-
-# 3. 激活 conda 环境
+# Activate the conda environment
 conda activate ML
 ```
 
-### 第二步：下载数据 + 拉镜像
+ARM hosts auto-detect and use the native `swe-arm-base` image with local
+repo mirrors — no QEMU emulation needed.  The legacy `make setup-arm-host`
+target still exists for x86_64-on-ARM QEMU emulation if required.
 
-```bash
-# 下载 SWE-rebench 任务列表
-export HF_ENDPOINT=https://hf-mirror.com
-make download-swe-rebench
-
-# 手动拉取 Docker 镜像（提前拉避免运行时超时）
-docker pull swerebench/sweb.eval.x86_64.12rambau_1776_sepal_ui-411:latest
-```
-
-### 第三步：运行
+### Step 2 — Run
 
 ```bash
 DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
@@ -124,18 +106,22 @@ DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli 
     --container docker
 ```
 
-### 如果卡住时排查
+The first run on a task builds a cached ARM derivative image
+(``swe-arm-fixed-<instance_id>``).  Subsequent runs skip the build step
+and start immediately.
+
+### Troubleshooting
 
 ```bash
 docker ps
-# 看容器是否在跑
-ls -lt traces/swe-rebench/deepseek-chat/最近目录/12rambau__sepal_ui-411/attempt_1/_task_container_runtime/
-# 看进度
-curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-你的key" | tail -1
-# 测 API 通不通
+# Check whether the task container is running
+ls -lt traces/swe-rebench/deepseek-chat/<run-timestamp>/12rambau__sepal_ui-411/attempt_1/_task_container_runtime/
+# Check run progress
+curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-your-key" | tail -1
+# Verify API connectivity
 ```
 
-### 结果可视化
+### Visualise results
 
 ```bash
 PYTHONPATH=src python -m trace_collect.html_viz traces/swe-rebench/deepseek-chat/20260603T030206/12rambau__sepal_ui-411/attempt_1

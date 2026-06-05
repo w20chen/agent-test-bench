@@ -25,9 +25,11 @@ from agents.openclaw.runtime_deps import OPENCLAW_MCP_RUNTIME_REQUIREMENTS
 from harness.container_image_prep import (
     drop_cached_fixed_image,
     ensure_source_image,
+    is_arm_host,
     normalize_image_reference,
     prune_dangling_images,
     remove_image,
+    resolve_arm_base_image,
 )
 from trace_collect.attempt_pipeline import (
     AttemptContext,
@@ -243,6 +245,14 @@ def _select_tasks(
 
 
 def _task_source_image(benchmark: "Benchmark", task: dict[str, Any]) -> str | None:
+    """Return the source image for *task*.
+
+    On ARM hosts this returns the shared ARM base image (the per-task
+    x86_64 images do not exist for arm64).  The actual repo checkout
+    and install steps are handled by ``ensure_arm_fixed_image``.
+    """
+    if is_arm_host():
+        return resolve_arm_base_image(benchmark.config)
     image_name = benchmark.image_name_for(task)
     if not image_name:
         return None
@@ -308,6 +318,9 @@ def _cleanup_task_images(
 ) -> None:
     """Best-effort cleanup that keeps only the current/next-image budget.
 
+    On ARM hosts the base image is shared across all tasks and is never
+    removed.  Only per-task fixed derivative images are cleaned up.
+
     Set env ``KEEP_IMAGES_ABOVE_GB`` (e.g. ``30``) to skip image removal
     when free disk exceeds the threshold.  Default: always clean up.
     """
@@ -315,6 +328,10 @@ def _cleanup_task_images(
         return
     if container_executable is None:
         raise ValueError("container_executable is required for image cleanup")
+
+    # Never remove the shared ARM base image.
+    if is_arm_host():
+        source_image = None
 
     keep_gb_str = os.environ.get("KEEP_IMAGES_ABOVE_GB", "")
     if keep_gb_str and run_dir is not None:
@@ -429,6 +446,21 @@ async def _run_scaffold_tasks(
 
             logger.info("[%d/%d] START %s (%s)", i + 1, total, instance_id, scaffold)
             t0 = time.monotonic()
+
+            # ARM host: validate repo mirrors exist before attempting tasks.
+            if is_arm_host():
+                repos_root = benchmark.config.repos_root
+                if repos_root is None:
+                    raise ValueError(
+                        "ARM host requires repos_root in benchmark config. "
+                        "Add repos_root to swe-rebench.yaml"
+                    )
+                if not repos_root.exists():
+                    raise ValueError(
+                        f"ARM repos_root does not exist: {repos_root}. "
+                        f"Run: make setup-swe-rebench-repos"
+                    )
+
             source_image = _task_source_image(benchmark, task)
             next_source_image = _next_pending_source_image(
                 benchmark,
@@ -452,6 +484,11 @@ async def _run_scaffold_tasks(
                     "execution_environment",
                     "container",
                 ),
+                # ARM-native fields (ignored on x86 hosts).
+                arm_repo=task.get("repo"),
+                arm_base_commit=task.get("base_commit"),
+                arm_install_config=task.get("install_config"),
+                arm_repos_root=benchmark.config.repos_root,
             )
 
             _inner = inner_factory(task)

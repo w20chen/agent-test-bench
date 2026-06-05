@@ -1,0 +1,55 @@
+# ARM-native base image for SWE-bench task execution.
+#
+# This image provides a minimal Python + build-toolchain environment that
+# individual task ``install_config`` steps extend at runtime.  The repo
+# code is mounted from the host — it is NOT baked into this image.
+#
+# Build:
+#   docker build -f containers/Containerfile.arm-base -t swe-arm-base:latest .
+#
+# The ``python:3.11-slim`` base is multi-arch (linux/amd64 + linux/arm64),
+# so this Dockerfile works on both x86 and ARM hosts.
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        gcc \
+        g++ \
+        gfortran \
+        make \
+        curl \
+        wget \
+        ca-certificates \
+        build-essential \
+        python3-dev \
+        libffi-dev \
+        libssl-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        pkg-config \
+        # Common test/binary dependencies
+        libfreetype6-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        # Database client libs (needed by Django, SQLAlchemy, etc.)
+        libpq-dev \
+        libmysqlclient-dev \
+        # Autotools for repos that build from source
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install common Python packages used across most SWE-bench repos.
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-xdist \
+    hypothesis \
+    setuptools \
+    wheel \
+    pip \
+    cython \
+    numpy
+
+WORKDIR /testbed

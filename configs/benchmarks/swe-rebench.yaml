@@ -16,3 +16,6 @@ default_prompt_template: cc_aligned
 # tuning". Flip to true (with a prose rationale here) only if you have
 # a documented research reason to drop single-file lite tasks.
 exclude_lite: false
+# ARM-native: shared base image used on aarch64 hosts (overridable via
+# the ARM_BASE_IMAGE env var).  Built from containers/Containerfile.arm-base.
+arm_base_image: swe-arm-base:latest

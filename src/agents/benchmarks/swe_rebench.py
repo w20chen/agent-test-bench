@@ -13,6 +13,49 @@ from typing import Any, ClassVar
 
 from agents.benchmarks.base import Benchmark
 
+
+def _install_config_to_commands(ic: dict[str, Any]) -> list[str]:
+    """Convert a dict-style install_config into a list of shell commands.
+
+    Handles the common SWE-bench schema fields: ``pre_install``,
+    ``packages``, ``pip_packages``, ``install``.
+    Unknown keys are ignored.
+    """
+    commands: list[str] = []
+
+    # apt packages — consolidate into a single apt-get call.
+    packages = ic.get("packages", "")
+    if packages:
+        if isinstance(packages, str):
+            packages = [packages]
+        pkg_list = [str(p).strip() for p in packages if str(p).strip()]
+        if pkg_list:
+            commands.append(
+                f"apt-get update && apt-get install -y {' '.join(pkg_list)}"
+            )
+
+    # Pre-install scripts (apt or shell commands to run before pip).
+    pre_install = ic.get("pre_install", [])
+    if isinstance(pre_install, str):
+        pre_install = [pre_install]
+    commands.extend(str(s).strip() for s in pre_install if str(s).strip())
+
+    # pip packages.
+    pip_packages = ic.get("pip_packages", [])
+    if isinstance(pip_packages, str):
+        pip_packages = [pip_packages]
+    pip_list = [str(p).strip() for p in pip_packages if str(p).strip()]
+    if pip_list:
+        commands.append(f"pip install {' '.join(pip_list)}")
+
+    # Main install command (e.g. ``pip install -e .``).
+    install_cmd = ic.get("install", "")
+    if install_cmd:
+        commands.append(str(install_cmd).strip())
+
+    return commands
+
+
 class SWERebenchBenchmark(Benchmark):
     """Benchmark plugin for ``nebius/SWE-rebench`` (filtered or test split).
 
@@ -40,6 +83,21 @@ class SWERebenchBenchmark(Benchmark):
 
     def normalize_task(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Normalize a SWE-rebench row and preserve its dataset-specific fields."""
+        instance_id = raw.get("instance_id", "?")
+
+        # ARM-native: validate required fields early to avoid confusing
+        # downstream errors in ensure_arm_fixed_image().
+        repo = raw.get("repo")
+        if not repo or not isinstance(repo, str):
+            raise ValueError(
+                f"Task {instance_id}: 'repo' must be a non-empty string"
+            )
+        base_commit = raw.get("base_commit")
+        if not base_commit or not isinstance(base_commit, str):
+            raise ValueError(
+                f"Task {instance_id}: 'base_commit' must be a non-empty string"
+            )
+
         task = dict(raw)
 
         # Quirk 2: pin explicit docker image so the harness uses the pre-built
@@ -51,6 +109,15 @@ class SWERebenchBenchmark(Benchmark):
         # Derive test_cmd. The base helper handles native lists directly;
         # no conversion needed to avoid a lossy round-trip.
         task["test_cmd"] = self.derive_test_cmd(task)
+
+        # ARM-native: normalise install_config into a list of shell commands.
+        # The upstream dataset stores this as either a list of strings or a
+        # dict with pre_install/packages/pip_packages/install keys.
+        raw_ic = raw.get("install_config")
+        if isinstance(raw_ic, list):
+            task["install_config"] = raw_ic
+        elif isinstance(raw_ic, dict):
+            task["install_config"] = _install_config_to_commands(raw_ic)
         return task
 
     # Override: opt-in ``meta.is_lite`` filter via YAML knob
