@@ -78,6 +78,22 @@ End-to-end walkthrough for running a single SWE-rebench task.
 
 Prerequisites: ARM server + DeepSeek API + Docker
 
+### Step 0
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.1panel.live",
+    "https://dockerpull.org"
+  ]
+}
+EOF
+sudo systemctl restart docker
+```
+
 ### Step 1 — One-time environment setup
 
 ```bash
@@ -111,7 +127,7 @@ Run a specific test case.
 ```bash
 DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
-    --model deepseek-chat \
+    --model deepseek-v4-flash \
     --benchmark swe-rebench \
     --scaffold openclaw \
     --instance-ids "12rambau__sepal_ui-411" \

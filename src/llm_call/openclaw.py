@@ -34,6 +34,7 @@ _ALLOWED_MSG_KEYS = frozenset(
         "tool_calls",
         "tool_call_id",
         "name",
+        "reasoning_content",
     }
 )
 _ALNUM = string.ascii_letters + string.digits

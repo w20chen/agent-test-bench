@@ -694,6 +694,12 @@ async def collect_traces(
             sample=sample,
         )
 
+        logger.info(
+            "Selected %d task(s): %s",
+            len(tasks),
+            ", ".join(t["instance_id"] for t in tasks),
+        )
+
         def make_inner(task: dict[str, Any]):
             async def inner(ctx: AttemptContext) -> AttemptResult:
                 if ctx.agent_runtime_mode == "task_container_agent":
