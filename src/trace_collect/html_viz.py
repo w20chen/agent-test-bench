@@ -464,8 +464,8 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'CPU % (all cores)', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0.3, yAxisID:'y' }},
-                    {{ label:'Memory (MB)', data:RES_DATA.mem, borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true, tension:0.3, yAxisID:'y1' }}
+                    {{ label:'CPU % (all cores)', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0.3, yAxisID:'y', pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
+                    {{ label:'Memory (MB)', data:RES_DATA.mem, borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true, tension:0.3, yAxisID:'y1', pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -485,9 +485,9 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'Total (MB/s)', data:RES_DATA.mem_bw_total, borderColor:'#8e44ad', tension:0.3 }},
-                    {{ label:'Read (MB/s)', data:RES_DATA.mem_bw_read, borderColor:'#2980b9', tension:0.3 }},
-                    {{ label:'Write (MB/s)', data:RES_DATA.mem_bw_write, borderColor:'#c0392b', tension:0.3 }}
+                    {{ label:'Total (MB/s)', data:RES_DATA.mem_bw_total, borderColor:'#8e44ad', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
+                    {{ label:'Read (MB/s)', data:RES_DATA.mem_bw_read, borderColor:'#2980b9', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.mem_bw_write, borderColor:'#c0392b', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -506,8 +506,8 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'RX (MB)', data:RES_DATA.net_rx, borderColor:'#2ecc71', tension:0.3 }},
-                    {{ label:'TX (MB)', data:RES_DATA.net_tx, borderColor:'#9b59b6', tension:0.3 }}
+                    {{ label:'RX (MB)', data:RES_DATA.net_rx, borderColor:'#2ecc71', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
+                    {{ label:'TX (MB)', data:RES_DATA.net_tx, borderColor:'#9b59b6', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -526,8 +526,8 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'Read (MB/s)', data:RES_DATA.disk_r_rate, borderColor:'#2ecc71', tension:0.3 }},
-                    {{ label:'Write (MB/s)', data:RES_DATA.disk_w_rate, borderColor:'#e67e22', tension:0.3 }}
+                    {{ label:'Read (MB/s)', data:RES_DATA.disk_r_rate, borderColor:'#2ecc71', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.disk_w_rate, borderColor:'#e67e22', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -546,7 +546,7 @@ document.addEventListener('mousemove', function(e) {{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
                 datasets: [
-                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0.3 }}
+                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
                 ]
             }},
             options: {{

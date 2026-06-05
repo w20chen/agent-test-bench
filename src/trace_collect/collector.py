@@ -259,6 +259,42 @@ def _task_source_image(benchmark: "Benchmark", task: dict[str, Any]) -> str | No
     return normalize_image_reference(str(image_name))
 
 
+def _log_image_status(
+    tasks: list[dict[str, Any]],
+    benchmark: "Benchmark",
+    container_executable: str,
+) -> None:
+    """Log which task images are already pulled (✅) vs missing (⬇)."""
+    import subprocess as _sp
+
+    unique_images: dict[str, str] = {}
+    for t in tasks:
+        img = _task_source_image(benchmark, t)
+        if img:
+            unique_images.setdefault(img, t["instance_id"])
+
+    ready: list[str] = []
+    missing: list[str] = []
+    for img, instance_id in unique_images.items():
+        if not img:
+            continue
+        result = _sp.run(
+            [container_executable, "image", "inspect", img],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if result.returncode == 0:
+            ready.append(instance_id)
+        else:
+            missing.append(instance_id)
+
+    if ready:
+        logger.info("Images ready (%d): %s", len(ready), ", ".join(ready))
+    if missing:
+        logger.info("Images need pull (%d): %s", len(missing), ", ".join(missing))
+    if not ready and not missing:
+        logger.info("Images: no container images needed")
+
+
 def _next_pending_source_image(
     benchmark: "Benchmark",
     tasks: list[dict[str, Any]],
@@ -719,6 +755,10 @@ async def collect_traces(
             len(tasks),
             ", ".join(t["instance_id"] for t in tasks),
         )
+
+        # Report which images are already pulled.
+        if container_executable:
+            _log_image_status(tasks, benchmark, container_executable)
 
         def make_inner(task: dict[str, Any]):
             async def inner(ctx: AttemptContext) -> AttemptResult:
