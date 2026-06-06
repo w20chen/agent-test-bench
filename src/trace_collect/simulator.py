@@ -659,6 +659,14 @@ async def _run_local_model_simulation(
     failed_iters = 0
     sorted_iters = sorted(iterations.keys())
 
+    # Accumulate aggregate metrics from *simulated* actions for the
+    # summary (and HTML viz header).
+    sim_total_tokens = 0
+    sim_total_llm_ms = 0.0
+    sim_total_tool_ms = 0.0
+    sim_llm_call_count = 0
+    sim_tool_ms_by_name: dict[str, float] = {}
+
     try:
         for i, it_num in enumerate(sorted_iters):
             it_group = iterations[it_num]
@@ -761,6 +769,10 @@ async def _run_local_model_simulation(
                     },
                 )
                 trace_logger.log_trace_action(loaded.agent_id, llm_record)
+                sim_llm_call_count += 1
+                sim_total_tokens += int(llm_data.get("prompt_tokens") or 0)
+                sim_total_tokens += int(llm_data.get("completion_tokens") or 0)
+                sim_total_llm_ms += llm_latency_ms
 
             if iter_failed:
                 failed_iters += 1
@@ -832,6 +844,10 @@ async def _run_local_model_simulation(
                     },
                 )
                 trace_logger.log_trace_action(loaded.agent_id, tool_record)
+                sim_total_tool_ms += tool_duration_ms
+                sim_tool_ms_by_name[_classified_name] = (
+                    sim_tool_ms_by_name.get(_classified_name, 0.0) + tool_duration_ms
+                )
 
             succeeded_iters += 1
 
@@ -860,6 +876,11 @@ async def _run_local_model_simulation(
                 "local_api_base": api_base,
                 "succeeded_iterations": succeeded_iters,
                 "failed_iterations": failed_iters,
+                "total_tokens": sim_total_tokens,
+                "total_llm_ms": sim_total_llm_ms,
+                "total_tool_ms": sim_total_tool_ms,
+                "tool_ms_by_name": sim_tool_ms_by_name,
+                "llm_call_time_count": sim_llm_call_count,
             },
         )
         trace_logger.log_summary(loaded.agent_id, simulate_summary)
@@ -943,6 +964,15 @@ async def _replay_cloud_model_session(
     succeeded_actions = 0
     failed_actions = 0
 
+    # Accumulate aggregate metrics from *replayed* actions so the
+    # summary (and HTML viz header) reflects actual replay timing,
+    # not the source trace durations.
+    total_tokens = 0
+    total_llm_ms = 0.0
+    total_tool_ms = 0.0
+    tool_ms_by_name: dict[str, float] = {}
+    llm_call_time_count = 0
+
     for action in loaded.actions:
         action_id = str(action.get("action_id", ""))
         action_type = str(action.get("action_type", ""))
@@ -995,6 +1025,10 @@ async def _replay_cloud_model_session(
                 )
                 trace_logger.log_trace_action(loaded.agent_id, record)
                 succeeded_actions += 1
+                llm_call_time_count += 1
+                total_tokens += int(data.get("prompt_tokens") or 0)
+                total_tokens += int(data.get("completion_tokens") or 0)
+                total_llm_ms += (record_ts_end - record_ts_start) * 1000
                 continue
 
             if action_type != "tool_exec":
@@ -1077,6 +1111,10 @@ async def _replay_cloud_model_session(
             )
             trace_logger.log_trace_action(loaded.agent_id, tool_record)
             succeeded_actions += 1
+            total_tool_ms += duration_ms
+            tool_ms_by_name[_classified_name] = (
+                tool_ms_by_name.get(_classified_name, 0.0) + duration_ms
+            )
         except Exception as exc:
             logger.error(
                 "Replay action failed for %s action=%s: %s",
@@ -1087,26 +1125,6 @@ async def _replay_cloud_model_session(
             failed_actions += 1
 
     wall_end = time.time()
-    # Compute aggregate metrics from source actions so the viz (html_viz,
-    # Gantt viewer) can display token counts, timing breakdowns, etc.
-    total_tokens = 0
-    total_llm_ms = 0.0
-    total_tool_ms = 0.0
-    tool_ms_by_name: dict[str, float] = {}
-    llm_call_time_count = 0
-    for action in loaded.actions:
-        atype = str(action.get("action_type", ""))
-        adata = action.get("data") or {}
-        if atype == "llm_call":
-            llm_call_time_count += 1
-            total_tokens += int(adata.get("prompt_tokens") or 0)
-            total_tokens += int(adata.get("completion_tokens") or 0)
-            total_llm_ms += float(adata.get("llm_latency_ms") or 0)
-        elif atype == "tool_exec":
-            dur_ms = float(adata.get("duration_ms") or 0)
-            total_tool_ms += dur_ms
-            tool_name = str(adata.get("tool_name") or "unknown")
-            tool_ms_by_name[tool_name] = tool_ms_by_name.get(tool_name, 0.0) + dur_ms
 
     trace_logger.log_summary(
         loaded.agent_id,
