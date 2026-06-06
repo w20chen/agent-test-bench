@@ -550,6 +550,7 @@ def _log_trace_metadata(
         metadata["source_model"] = (
             source_models[0] if len(set(source_models)) == 1 else "multiple"
         )
+        metadata["model"] = metadata["source_model"]
         metadata["replay_target"] = "cloud_replay"
     trace_logger.log_metadata(**metadata)
 
@@ -925,15 +926,9 @@ async def _replay_cloud_model_session(
     loaded = prepared_session.loaded
     ctr = prepared_session.container
     source_model = (loaded.summary or {}).get("model", "unknown")
-    source_zero = _coerce_timestamp(
-        loaded.actions[0].get("ts_start"),
-        field="ts_start",
-        source_trace=loaded.source_trace,
-        action_id=str(loaded.actions[0].get("action_id", "")),
-    )
 
     logger.info(
-        "Replaying %s [scaffold=%s]: %d actions from %s at %.2fx",
+        "Replaying %s [scaffold=%s]: %d actions from %s at %.2fx (event-driven)",
         loaded.agent_id,
         loaded.scaffold,
         len(loaded.actions),
@@ -964,11 +959,9 @@ async def _replay_cloud_model_session(
         )
         source_duration_s = max(0.0, action_ts_end - action_ts_start)
 
-        await _sleep_until_offset(
-            replay_zero_monotonic=replay_zero_monotonic,
-            target_offset_s=(action_ts_start - source_zero) / replay_speed,
-        )
-
+        # Event-driven: each action starts immediately after the previous
+        # one completes.  Tool execution may be faster or slower than the
+        # original trace — we don't wait for the original ts_start.
         try:
             if action_type == "llm_call":
                 record_ts_start = time.time()
@@ -1090,6 +1083,27 @@ async def _replay_cloud_model_session(
             failed_actions += 1
 
     wall_end = time.time()
+    # Compute aggregate metrics from source actions so the viz (html_viz,
+    # Gantt viewer) can display token counts, timing breakdowns, etc.
+    total_tokens = 0
+    total_llm_ms = 0.0
+    total_tool_ms = 0.0
+    tool_ms_by_name: dict[str, float] = {}
+    llm_call_time_count = 0
+    for action in loaded.actions:
+        atype = str(action.get("action_type", ""))
+        adata = action.get("data") or {}
+        if atype == "llm_call":
+            llm_call_time_count += 1
+            total_tokens += int(adata.get("prompt_tokens") or 0)
+            total_tokens += int(adata.get("completion_tokens") or 0)
+            total_llm_ms += float(adata.get("llm_latency_ms") or 0)
+        elif atype == "tool_exec":
+            dur_ms = float(adata.get("duration_ms") or 0)
+            total_tool_ms += dur_ms
+            tool_name = str(adata.get("tool_name") or "unknown")
+            tool_ms_by_name[tool_name] = tool_ms_by_name.get(tool_name, 0.0) + dur_ms
+
     trace_logger.log_summary(
         loaded.agent_id,
         _make_trace_summary(
@@ -1102,6 +1116,11 @@ async def _replay_cloud_model_session(
                 "replay_speed": replay_speed,
                 "succeeded_actions": succeeded_actions,
                 "failed_actions": failed_actions,
+                "total_tokens": total_tokens,
+                "total_llm_ms": total_llm_ms,
+                "total_tool_ms": total_tool_ms,
+                "tool_ms_by_name": tool_ms_by_name,
+                "llm_call_time_count": llm_call_time_count,
             },
         ),
     )

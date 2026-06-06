@@ -168,6 +168,35 @@ The first run on a task builds a cached ARM derivative image
 (``swe-arm-fixed-<instance_id>``).  Subsequent runs skip the build step
 and start immediately.
 
+### Step 2 — Replay
+
+```bash
+PYTHONPATH=src python -c "
+import json
+from pathlib import Path
+from agents.benchmarks.swe_bench_verified import SweBenchVerified
+from agents.benchmarks.base import BenchmarkConfig
+
+config = BenchmarkConfig.from_yaml(Path('configs/benchmarks/swe-bench-verified.yaml'))
+plugin = SweBenchVerified(config)
+tasks = plugin.load_tasks()  # load all 500 tasks without select_subset
+Path('data/swebench_verified/tasks_full.json').write_text(
+    json.dumps(tasks, indent=2, ensure_ascii=False, default=str) + '\n',
+    encoding='utf-8',
+)
+print(f'Wrote {len(tasks)} tasks')
+"
+```
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli simulate \
+    --source-trace traces/swebench_verified/deepseek-v4-flash/20260605T182234/astropy__astropy-12907/attempt_1/trace.jsonl \
+    --mode cloud_model \
+    --replay-speed 1 \
+    --task-source data/swebench_verified/tasks_full.json \
+    --container docker
+```
+
 ### Troubleshooting
 
 ```bash
