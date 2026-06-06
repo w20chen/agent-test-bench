@@ -22,6 +22,7 @@ from harness.trace_logger import TraceLogger
 from llm_call import create_async_openai_client
 from trace_collect import attempt_layout
 from trace_collect.attempt_pipeline import start_task_container, stop_task_container
+from trace_collect.html_viz import generate_html, _normalize_simulate_events
 
 logger = logging.getLogger(__name__)
 
@@ -1368,4 +1369,38 @@ async def simulate(
 
     trace_file = output_path / f"{run_id}.jsonl"
     logger.info("Simulate complete [%s] -> %s", mode, trace_file)
+
+    # ── Normalize simulate trace + auto-generate HTML viz ────────
+    for prepared in prepared_sessions:
+        task_dir = prepared.task_output_dir
+        if task_dir is None or not task_dir.is_dir():
+            continue
+        trace_jsonl = task_dir / "trace.jsonl"
+        if not trace_jsonl.exists():
+            continue
+        try:
+            # Read -> normalize -> write back (adds events + enriches fields)
+            raw_lines = trace_jsonl.read_text(encoding="utf-8").splitlines()
+            raw_records = [json.loads(l) for l in raw_lines if l.strip()]
+            norm_records = _normalize_simulate_events(raw_records)
+            if len(norm_records) != len(raw_records):
+                # Only rewrite if normalization actually changed something
+                trace_jsonl.write_text(
+                    "\n".join(json.dumps(r, ensure_ascii=False) for r in norm_records) + "\n",
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "Normalized trace written -> %s  (%d -> %d records)",
+                    trace_jsonl, len(raw_records), len(norm_records),
+                )
+            # Generate HTML (normalize is no-op now since events already present)
+            html = generate_html(task_dir)
+            viz_path = task_dir / "trace_viz.html"
+            viz_path.write_text(html, encoding="utf-8")
+            logger.info("HTML viz written -> %s", viz_path)
+        except Exception:
+            logger.warning(
+                "Failed to normalize/generate HTML viz for %s", task_dir, exc_info=True,
+            )
+
     return trace_file
