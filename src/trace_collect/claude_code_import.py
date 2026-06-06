@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from trace_collect.exec_classifier import classify_exec_tool_name
+
 logger = logging.getLogger(__name__)
 
 SCAFFOLD_LABEL = "claude-code"
@@ -446,7 +448,7 @@ def _convert_session_records(
                         )
 
                     tool_data: dict[str, Any] = {
-                        "tool_name": tool_name,
+                        "tool_name": classify_exec_tool_name(tool_name, tool_args),
                         "tool_args": tool_args,
                         "tool_result": result_text,
                         "duration_ms": round(duration_ms, 2),
@@ -485,7 +487,7 @@ def _convert_session_records(
                         "type": "action",
                         "action_type": "tool_exec",
                         "action_id": (
-                            f"tool_{tool_iteration}_{tool_name}_{tu_id_suffix}"
+                            f"tool_{tool_iteration}_{tool_data['tool_name']}_{tu_id_suffix}"
                         ),
                         "agent_id": lane_id,
                         "iteration": tool_iteration,
@@ -508,7 +510,8 @@ def _convert_session_records(
                 "type": "action",
                 "action_type": "tool_exec",
                 "action_id": (
-                    f"tool_{pending['iteration']}_{pending['tool_name']}"
+                    f"tool_{pending['iteration']}_"
+                    f"{classify_exec_tool_name(pending['tool_name'], pending['tool_args'])}"
                     f"_{orphan_id_suffix}_orphan"
                 ),
                 "agent_id": lane_id,
@@ -516,7 +519,7 @@ def _convert_session_records(
                 "ts_start": orphan_ts,
                 "ts_end": orphan_ts,
                 "data": {
-                    "tool_name": pending["tool_name"],
+                    "tool_name": classify_exec_tool_name(pending["tool_name"], pending["tool_args"]),
                     "tool_args": pending["tool_args"],
                     "tool_result": "",
                     "duration_ms": 0.0,

@@ -22,6 +22,7 @@ from harness.trace_logger import TraceLogger
 from llm_call import create_async_openai_client
 from trace_collect import attempt_layout
 from trace_collect.attempt_pipeline import start_task_container, stop_task_container
+from trace_collect.exec_classifier import classify_exec_tool_name
 from trace_collect.html_viz import generate_html
 
 logger = logging.getLogger(__name__)
@@ -805,15 +806,16 @@ async def _run_local_model_simulation(
                     sim_provenance = "executed_in_container"
                 total_tool_ms += tool_duration_ms
 
+                _classified_name = classify_exec_tool_name(tool_name, tool_args)
                 tool_record = _make_trace_action(
                     loaded=loaded,
                     action_type="tool_exec",
-                    action_id=f"tool_{it_num}_{tool_name}",
+                    action_id=f"tool_{it_num}_{_classified_name}",
                     iteration=it_num,
                     ts_start=tool_ts_start,
                     ts_end=tool_ts_end,
                     data={
-                        "tool_name": tool_name,
+                        "tool_name": _classified_name,
                         "tool_args": tool_args,
                         "tool_result": tool_result,
                         "duration_ms": tool_duration_ms,
@@ -1045,15 +1047,16 @@ async def _replay_cloud_model_session(
                 )
                 replay_source = "executed_in_container"
             record_ts_end = time.time()
+            _classified_name = classify_exec_tool_name(tool_name, tool_args)
             tool_record = _make_trace_action(
                 loaded=loaded,
                 action_type="tool_exec",
-                action_id=action_id or f"tool_{iteration}_{tool_name}",
+                action_id=action_id or f"tool_{iteration}_{_classified_name}",
                 iteration=iteration,
                 ts_start=record_ts_start,
                 ts_end=record_ts_end,
                 data={
-                    "tool_name": tool_name,
+                    "tool_name": _classified_name,
                     "tool_args": tool_args,
                     "tool_result": tool_result,
                     "duration_ms": duration_ms,

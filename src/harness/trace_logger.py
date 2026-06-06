@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.base import TraceAction
+from trace_collect.exec_classifier import classify_exec_tool_name
 
 
 def build_run_id(
@@ -54,8 +55,26 @@ class TraceLogger:
         self._handle.flush()
 
     def log_trace_action(self, agent_id: str, action: TraceAction) -> None:
-        """Write a v4 TraceAction record."""
+        """Write a v4 TraceAction record.
+
+        Classifies ``exec`` tool names by their base command (e.g.
+        ``exec-grep``, ``exec-pip``) so traces and visualisations can
+        distinguish sub-types of shell executions without altering the
+        agent scaffold's tool dispatch logic.
+        """
         entry = action.to_dict()
+        if entry.get("action_type") == "tool_exec":
+            data = entry.get("data")
+            if isinstance(data, dict):
+                tool_name = data.get("tool_name", "")
+                tool_args = data.get("tool_args", "")
+                classified = classify_exec_tool_name(tool_name, tool_args)
+                if classified != tool_name:
+                    data["tool_name"] = classified
+                    # Keep action_id in sync so filters/match.
+                    entry["action_id"] = entry["action_id"].replace(
+                        tool_name, classified, 1
+                    )
         self._handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._handle.flush()
 

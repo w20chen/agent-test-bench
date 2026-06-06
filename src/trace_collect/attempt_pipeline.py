@@ -26,6 +26,7 @@ from harness.container_stats_sampler import (
 from harness.process_stats_sampler import ProcessStatsSampler
 from harness.disk_preflight import DiskSpaceError, preflight_disk
 from trace_collect import attempt_layout
+from trace_collect.exec_classifier import rewrite_trace_with_exec_classification
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +553,16 @@ async def run_attempt(
                 trace_path=trace_path if trace_path and trace_path.exists() else None
             )
 
+    # Classify exec tool names (exec → exec-grep, exec-pip, etc.)
+    # after the scaffold has finished writing so downstream consumers
+    # (visualisers, tool_calls.json, simulators) see classified names.
+    if copied_trace_path is not None and copied_trace_path.exists():
+        n_changed = rewrite_trace_with_exec_classification(copied_trace_path)
+        if n_changed:
+            logger.debug(
+                "Classified %d exec tool calls in %s",
+                n_changed, copied_trace_path,
+            )
 
     trace_file = ctx.attempt_dir / attempt_layout.TRACE_FILENAME
     if result is not None and result.tool_calls:

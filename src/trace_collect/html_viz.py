@@ -17,6 +17,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+from trace_collect.exec_classifier import classify_exec_tool_name
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not path.exists():
@@ -106,6 +109,35 @@ def generate_html(attempt_dir: Path) -> str:
     records = _load_jsonl(trace_path)
     resources = _load_json(resources_path)
     manifest = _load_json(manifest_path)
+
+    # ── Classify exec tool names in-memory ─────────────────────────
+    # Post-process actions and rebuild summary so Gantt bars, pie
+    # chart, and stats all reflect exec-grep / exec-find / etc.
+    # Works on both fresh traces (already processed by
+    # attempt_pipeline) and older unprocessed traces.
+    tool_ms_by_name: dict[str, float] = {}
+    tool_timeouts: dict[str, int] = {}
+    for rec in records:
+        if rec.get("type") == "action" and rec.get("action_type") == "tool_exec":
+            data = rec.get("data")
+            if isinstance(data, dict):
+                tn = data.get("tool_name", "")
+                ta = data.get("tool_args", "")
+                classified = classify_exec_tool_name(tn, ta)
+                if classified != tn:
+                    data["tool_name"] = classified
+                dur = data.get("duration_ms", 0.0) or 0.0
+                ok = data.get("success", True)
+                tool_ms_by_name[classified] = tool_ms_by_name.get(classified, 0.0) + dur
+                if not ok:
+                    tool_timeouts[classified] = tool_timeouts.get(classified, 0) + 1
+    for rec in records:
+        if rec.get("type") == "summary":
+            if tool_ms_by_name:
+                rec["tool_ms_by_name"] = tool_ms_by_name
+            if tool_timeouts:
+                rec["tool_timeouts"] = tool_timeouts
+            break
 
     # ── Extract metadata ──────────────────────────────────────────
     meta: dict[str, Any] = {}
@@ -203,7 +235,11 @@ def generate_html(attempt_dir: Path) -> str:
                 "message": "#7f8c8d",
                 "spawn": "#d35400",
             }
-            color = tool_colors.get(tool_name, "#95a5a6")
+            color = tool_colors.get(tool_name)
+            if color is None and tool_name.startswith("exec-"):
+                color = tool_colors["exec"]
+            if color is None:
+                color = "#95a5a6"
         else:
             continue
         gantt_items.append({
@@ -427,17 +463,21 @@ var MEM_BW_REASON = '{mem_bw_reason}';
         tickHtml += '<div class="gantt-tick-label" style="left:' + pct + '%">' + t.toFixed(1) + 's</div>';
     }}
 
-    // Legend
-    var seenColors = {{}};
-    var legendHtml = '';
+    // Legend — group by label (tool name), not color, so that
+    // exec-grep, exec-find, exec-cd each get their own entry
+    // even though they share the same orange hue.
+    var seenLabels = {{}};
+    var legendItems = [];
     GANTT.forEach(function(it) {{
-        if (!seenColors[it.color]) {{
-            seenColors[it.color] = it.atype === 'llm_call' ? 'LLM call' : it.label.split(' #')[0];
+        var lbl = it.atype === 'llm_call' ? 'LLM call' : it.label.split(' #')[0];
+        if (!seenLabels[lbl]) {{
+            seenLabels[lbl] = true;
+            legendItems.push({{label: lbl, color: it.color}});
         }}
     }});
-    for (var c in seenColors) {{
-        legendHtml += '<span style="background:' + c + '"></span> ' + seenColors[c] + ' ';
-    }}
+    var legendHtml = legendItems.map(function(li) {{
+        return '<span style="background:' + li.color + '"></span> ' + li.label;
+    }}).join(' ');
 
     var rowsHtml = GANTT.map(function(it, idx) {{
         var left = (it.x_start / total) * 100;
@@ -709,7 +749,12 @@ Chart.register({{
     var toolNames = Object.keys(TOOL_BREAKDOWN);
     if (toolNames.length) {{
         var toolColors = {{exec:'#e67e22',read_file:'#27ae60',write_file:'#8e44ad',edit_file:'#c0392b',list_dir:'#16a085',web_search:'#2980b9',web_fetch:'#1abc9c',message:'#7f8c8d',spawn:'#d35400'}};
-        var bgColors = toolNames.map(function(n) {{ return toolColors[n] || '#95a5a6'; }});
+        var bgColors = toolNames.map(function(n) {{
+            if (toolColors[n]) return toolColors[n];
+            if (n.startsWith('exec-')) return toolColors['exec'];
+            if (n.startsWith('mcp_')) return '#8e44ad';
+            return '#95a5a6';
+        }});
         new Chart(document.getElementById('chart-tool-pie'), {{
             type: 'doughnut',
             data: {{
