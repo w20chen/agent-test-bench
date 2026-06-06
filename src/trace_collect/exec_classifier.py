@@ -167,10 +167,10 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
 # Higher number = more likely to be the "main action".  Commands not
 # listed here default to priority 1 (neutral).
 _COMMAND_PRIORITY: dict[str, int] = {
-    # Tier 3 — primary actions (build, test, install, deploy)
-    "pip": 3,
-    "pip3": 3,
-    "pytest": 3,
+    # Tier 3+ — primary actions (build, test, install, deploy)
+    "pip": 4,
+    "pip3": 4,
+    "pytest": 4,
     "python": 3,
     "python3": 3,
     "python3.12": 3,
