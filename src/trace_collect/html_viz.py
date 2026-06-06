@@ -283,6 +283,20 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["mem_bw_read"].append(_safe_float(s.get("memory_read_mb_s", 0)))
         res_data["mem_bw_write"].append(_safe_float(s.get("memory_write_mb_s", 0)))
 
+    # ── Unified time span (covers both Gantt and resource data) ────
+    res_max_ts = max(res_data["timestamps"]) if res_data["timestamps"] else 0.0
+    unified_total = max(total_span, res_max_ts, 1.0)
+
+    # ── Memory bandwidth availability ──────────────────────────────
+    mem_bw_reason = ""
+    mem_bw_all_zero = all(v == 0.0 for v in res_data["mem_bw_total"])
+    if mem_bw_all_zero:
+        for s in resource_samples:
+            reason = s.get("memory_bandwidth_reason", "")
+            if reason:
+                mem_bw_reason = reason
+                break
+
     # ── Serialize data as JSON for JavaScript ─────────────────────
     gantt_json = json.dumps(gantt_items, ensure_ascii=False)
     res_json = json.dumps(res_data, ensure_ascii=False)
@@ -291,7 +305,7 @@ def generate_html(attempt_dir: Path) -> str:
     model = meta.get("model", manifest.get("model", {}).get("name", "?"))
     benchmark = meta.get("benchmark", "?")
     scaffold = meta.get("scaffold", "?")
-    total_time = manifest.get("result_summary", {}).get("total_time", summary.get("elapsed_s", 0))
+    total_time = unified_total
     n_iterations = summary.get("n_iterations", len(set(a.get("iteration", 0) for a in actions if a.get("action_type") == "llm_call")))
 
     return _HTML_TEMPLATE.format(
@@ -310,10 +324,11 @@ def generate_html(attempt_dir: Path) -> str:
         resource_summary=json.dumps(resource_summary, ensure_ascii=False),
         resource_count=len(resource_samples),
         gantt_items=gantt_json,
-        gantt_total=total_span,
+        gantt_total=unified_total,
         res_data=res_json,
+        mem_bw_reason=_esc(mem_bw_reason),
         ts_start=_ts_to_str(t0) if t0 else "N/A",
-        ts_end=_ts_to_str(t0 + total_span) if t0 else "N/A",
+        ts_end=_ts_to_str(t0 + unified_total) if t0 else "N/A",
     )
 
 
@@ -392,6 +407,7 @@ var RES_DATA = {res_data};
 var TOOL_BREAKDOWN = {tool_breakdown};
 var RES_SUMMARY = {resource_summary};
 var RES_COUNT = {resource_count};
+var MEM_BW_REASON = '{mem_bw_reason}';
 
 // ── Gantt Chart ───────────────────────────────────────────────────
 (function() {{
@@ -466,20 +482,116 @@ document.addEventListener('mousemove', function(e) {{
     if (tt.style.display === 'block') positionTT(e);
 }});
 
+// ── Action Span Overlay Plugin ────────────────────────────────────
+// beforeDraw: tool strip (backdrop + bars) drawn first, then LLM bands,
+//   then Chart.js renders data on top – strip sits at the bottom layer.
+// afterDraw:  restores chart area, no drawing.
+Chart.register({{
+    id: 'traceActionSpans',
+    beforeDraw: function(chart) {{
+        if (!chart.scales.x || !GANTT.length) return;
+        var ctx = chart.ctx;
+        var xAxis = chart.scales.x;
+        var ca = chart.chartArea;
+
+        // ── Collect tool-exec actions & assign lanes ──────────────
+        var tools = [];
+        GANTT.forEach(function(s) {{
+            if (s.atype === 'tool_exec') tools.push({{
+                x_start: s.x_start, x_end: s.x_end,
+                color: s.color, label: s.label
+            }});
+        }});
+        tools.sort(function(a, b) {{ return a.x_start - b.x_start; }});
+        var lanes = [];
+        tools.forEach(function(t) {{
+            var lane = 0;
+            while (lane < lanes.length && lanes[lane] > t.x_start) lane++;
+            t._lane = lane;
+            if (lane >= lanes.length) lanes.push(t.x_end);
+            else lanes[lane] = t.x_end;
+        }});
+
+        var numLanes = Math.max(lanes.length, tools.length ? 1 : 0);
+        var barH = Math.min(10, Math.max(5, 34 / Math.max(numLanes, 1)));
+        var gap = 2, pad = 3;
+        var stripH = numLanes * (barH + gap) + pad * 2;
+
+        // Store original bottom for afterDraw restore
+        var origBottom = ca.bottom;
+        chart._ts_origBottom = origBottom;
+
+        // ── Shrink chart area so data curves stay above the strip ─
+        ca.bottom -= stripH;
+
+        // ── 1) Tool strip (no backdrop – just separator + bars) ────
+        var stripTop = origBottom - stripH;
+
+        // Separator line
+        ctx.strokeStyle = '#cccccc';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(ca.left, stripTop);
+        ctx.lineTo(ca.right, stripTop);
+        ctx.stroke();
+
+        // Tool bars (min 2 px so short calls never vanish)
+        ctx.save();
+        tools.forEach(function(t) {{
+            var x1 = xAxis.getPixelForValue(t.x_start);
+            var x2 = xAxis.getPixelForValue(t.x_end);
+            if (x2 < ca.left || x1 > ca.right) return;
+            x1 = Math.max(x1, ca.left + 1);
+            x2 = Math.min(x2, ca.right - 1);
+            var w = Math.max(x2 - x1, 2);
+            var y = stripTop + pad + t._lane * (barH + gap);
+            ctx.fillStyle = t.color;
+            ctx.globalAlpha = 0.88;
+            ctx.fillRect(x1, y, w, barH);
+        }});
+        ctx.restore();
+
+        // ── 2) LLM iteration bands (on top of strip, under data) ──
+        GANTT.forEach(function(span) {{
+            if (span.atype !== 'llm_call') return;
+            var x1 = xAxis.getPixelForValue(span.x_start);
+            var x2 = xAxis.getPixelForValue(span.x_end);
+            if (x2 < ca.left || x1 > ca.right) return;
+            x1 = Math.max(x1, ca.left);
+            x2 = Math.min(x2, ca.right);
+            var w = x2 - x1;
+            if (w < 1) return;
+            ctx.save();
+            ctx.fillStyle = span.color;
+            ctx.globalAlpha = 0.07;
+            ctx.fillRect(x1, ca.top, w, ca.bottom - ca.top);
+            ctx.restore();
+        }});
+    }},
+    afterDraw: function(chart) {{
+        // Restore original chart area
+        if (chart._ts_origBottom !== undefined) {{
+            chart.chartArea.bottom = chart._ts_origBottom;
+        }}
+        delete chart._ts_origBottom;
+    }}
+}});
+
 // ── Resource Charts ───────────────────────────────────────────────
 (function() {{
     var parent = document.getElementById('res-charts');
     if (!RES_COUNT) {{
         parent.innerHTML = '<div class="chart-wrap"><p style="color:#999">No resource samples collected (container stats sampling may not have been active).</p></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown (ms)</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }} else {{
         parent.innerHTML =
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🖥 CPU & Memory</h3><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🧠 Memory Bandwidth (host)</h3><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (cumulative)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O (rate)</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches (cumulative)</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown (ms)</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }}
 
     // CPU + Memory
@@ -487,10 +599,10 @@ document.addEventListener('mousemove', function(e) {{
         new Chart(document.getElementById('chart-cpu-mem'), {{
             type: 'line',
             data: {{
-                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'CPU % (all cores)', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0.3, yAxisID:'y', pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
-                    {{ label:'Memory (MB)', data:RES_DATA.mem, borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true, tension:0.3, yAxisID:'y1', pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
+                    {{ label:'CPU % (all cores)', data:RES_DATA.cpu, borderColor:'#e74c3c', backgroundColor:'rgba(231,76,60,0.1)', fill:true, tension:0, yAxisID:'y', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'Memory (MB)', data:RES_DATA.mem, borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true, tension:0, yAxisID:'y1', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -499,20 +611,27 @@ document.addEventListener('mousemove', function(e) {{
                 scales: {{
                     y:{{ type:'linear', position:'left', title:{{display:true,text:'CPU % (all cores)'}}, min:0 }},
                     y1:{{ type:'linear', position:'right', title:{{display:true,text:'Memory MB'}}, min:0, grid:{{drawOnChartArea:false}} }},
-                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
         }});
 
         // Memory Bandwidth (host)
+        var allZero = RES_DATA.mem_bw_total.every(function(v) {{ return v === 0; }});
+        if (MEM_BW_REASON && allZero) {{
+            document.getElementById('chart-mem-bw').parentNode.innerHTML =
+                '<p style="color:#c0392b;font-size:12px;padding:20px 0;text-align:center">'
+                + '⚠ Memory bandwidth unavailable: <code>' + MEM_BW_REASON + '</code>'
+                + '<br><span style="color:#888">(requires Intel IMC PMU: check <code>ls /sys/bus/event_source/devices/ | grep uncore</code>)</span></p>';
+        }} else {{
         new Chart(document.getElementById('chart-mem-bw'), {{
             type: 'line',
             data: {{
-                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'Total (MB/s)', data:RES_DATA.mem_bw_total, borderColor:'#8e44ad', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
-                    {{ label:'Read (MB/s)', data:RES_DATA.mem_bw_read, borderColor:'#2980b9', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
-                    {{ label:'Write (MB/s)', data:RES_DATA.mem_bw_write, borderColor:'#c0392b', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
+                    {{ label:'Total (MB/s)', data:RES_DATA.mem_bw_total, borderColor:'#8e44ad', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'Read (MB/s)', data:RES_DATA.mem_bw_read, borderColor:'#2980b9', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.mem_bw_write, borderColor:'#c0392b', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -520,19 +639,20 @@ document.addEventListener('mousemove', function(e) {{
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
                     y:{{ title:{{display:true,text:'MB/s'}}, min:0 }},
-                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
         }});
+        }}  // end else (mem_bw available)
 
         // Network
         new Chart(document.getElementById('chart-net'), {{
             type: 'line',
             data: {{
-                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'RX (MB)', data:RES_DATA.net_rx, borderColor:'#2ecc71', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
-                    {{ label:'TX (MB)', data:RES_DATA.net_tx, borderColor:'#9b59b6', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
+                    {{ label:'RX (MB)', data:RES_DATA.net_rx, borderColor:'#2ecc71', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'TX (MB)', data:RES_DATA.net_tx, borderColor:'#9b59b6', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -540,7 +660,7 @@ document.addEventListener('mousemove', function(e) {{
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
                     y:{{ title:{{display:true,text:'MB'}}, min:0 }},
-                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
         }});
@@ -549,10 +669,10 @@ document.addEventListener('mousemove', function(e) {{
         new Chart(document.getElementById('chart-disk'), {{
             type: 'line',
             data: {{
-                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'Read (MB/s)', data:RES_DATA.disk_r_rate, borderColor:'#2ecc71', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }},
-                    {{ label:'Write (MB/s)', data:RES_DATA.disk_w_rate, borderColor:'#e67e22', tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
+                    {{ label:'Read (MB/s)', data:RES_DATA.disk_r_rate, borderColor:'#2ecc71', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'Write (MB/s)', data:RES_DATA.disk_w_rate, borderColor:'#e67e22', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -560,7 +680,7 @@ document.addEventListener('mousemove', function(e) {{
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
                     y:{{ title:{{display:true,text:'MB/s'}}, min:0 }},
-                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
         }});
@@ -569,9 +689,9 @@ document.addEventListener('mousemove', function(e) {{
         new Chart(document.getElementById('chart-ctx'), {{
             type: 'line',
             data: {{
-                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1) + 's'; }}),
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0.3, pointRadius:2.5, pointHoverRadius:5, pointStyle:'circle' }}
+                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
@@ -579,7 +699,7 @@ document.addEventListener('mousemove', function(e) {{
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
                     y:{{ title:{{display:true,text:'Count'}}, min:0 }},
-                    x:{{ title:{{display:true,text:'Time (relative)'}} }}
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
         }});
