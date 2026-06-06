@@ -47,12 +47,20 @@ def _detect_intel_imc_backend(
 ) -> PerfEventBackend | None:
     read_specs: list[str] = []
     write_specs: list[str] = []
-    for device in sorted(root.glob("uncore_imc_*")):
+    imc_devices = sorted(
+        d for d in root.glob("uncore_imc_*") if "free_running" not in d.name
+    )
+    # First try: named events via events/ directory (older Xeons)
+    for device in imc_devices:
         aliases = _event_aliases(device)
-        if "cas_count_read" not in aliases or "cas_count_write" not in aliases:
-            continue
-        read_specs.append(f"{device.name}/cas_count_read/")
-        write_specs.append(f"{device.name}/cas_count_write/")
+        if "cas_count_read" in aliases and "cas_count_write" in aliases:
+            read_specs.append(f"{device.name}/cas_count_read/")
+            write_specs.append(f"{device.name}/cas_count_write/")
+    # Fallback: raw event codes for platforms without events/ dir
+    # (Emerald Rapids, Sapphire Rapids, etc.)
+    if not read_specs and imc_devices:
+        read_specs = [f"{d.name}/event=0x04,umask=0x03/" for d in imc_devices]
+        write_specs = [f"{d.name}/event=0x04,umask=0x0c/" for d in imc_devices]
     if not read_specs or not write_specs:
         return None
     return PerfEventBackend(
