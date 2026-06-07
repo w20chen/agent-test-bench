@@ -168,7 +168,7 @@ The first run on a task builds a cached ARM derivative image
 (``swe-arm-fixed-<instance_id>``).  Subsequent runs skip the build step
 and start immediately.
 
-### Step 2 — Replay
+### Step 2b — Replay
 
 ```bash
 PYTHONPATH=src python -c "
@@ -195,6 +195,16 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
     --replay-speed 1 \
     --task-source data/swebench_verified/tasks_full.json \
     --container docker
+```
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli simulate \
+    --source-dir /home/weitian/agent-test-bench/traces/swebench_verified/deepseek-v4-flash/20260605T182234 \
+    --mode cloud_model \
+    --replay-speed 1 \
+    --task-source data/swebench_verified/tasks_full.json \
+    --container docker
+    --serial
 ```
 
 ### Troubleshooting

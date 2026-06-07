@@ -327,6 +327,14 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         help="Path to the source API trace JSONL file.",
     )
     source_group.add_argument(
+        "--source-dir",
+        default=None,
+        help=(
+            "Directory containing trace files. All **/trace.jsonl files under "
+            "this directory will be replayed (one task_source for all)."
+        ),
+    )
+    source_group.add_argument(
         "--trace-manifest",
         default=None,
         help=(
@@ -424,6 +432,15 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=None,
         help="RNG seed for Poisson arrival offsets (for reproducibility).",
+    )
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        default=False,
+        help=(
+            "Replay traces one at a time instead of concurrently. "
+            "Useful when traces share a container or resource."
+        ),
     )
     parser.add_argument(
         "--gpu-tracking",
@@ -685,6 +702,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
 
     simulate_kwargs = {
         "source_trace": Path(args.source_trace) if args.source_trace else None,
+        "source_dir": Path(args.source_dir) if args.source_dir else None,
         "trace_manifest": Path(args.trace_manifest) if args.trace_manifest else None,
         "task_source": Path(args.task_source),
         "output_dir": _resolve_simulate_output_dir(args),
@@ -694,6 +712,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "command_timeout_s": args.command_timeout,
         "warmup_skip_iterations": args.warmup_skip_iterations,
         "replay_speed": args.replay_speed,
+        "serial": args.serial,
         "arrival_mode": args.arrival_mode,
         "arrival_rate_per_s": args.arrival_rate_per_s,
         "arrival_seed": args.arrival_seed,
@@ -714,6 +733,12 @@ def _run_simulate(args: argparse.Namespace) -> None:
     if args.trace_manifest:
         print(
             "ERROR: local_model mode accepts only --source-trace, not --trace-manifest.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.source_dir:
+        print(
+            "ERROR: local_model mode accepts only --source-trace, not --source-dir.",
             file=sys.stderr,
         )
         sys.exit(2)

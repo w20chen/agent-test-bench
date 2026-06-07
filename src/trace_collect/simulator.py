@@ -370,6 +370,19 @@ def _load_trace_manifest(
     return entries
 
 
+def _discover_traces(
+    source_dir: Path,
+    default_task_source: Path,
+) -> list[tuple[Path, Path, str | None]]:
+    """Discover all ``trace.jsonl`` files under *source_dir*.
+
+    Each discovered trace is paired with the default task source and no
+    docker-image override.  Files are sorted for deterministic ordering.
+    """
+    found = sorted(source_dir.rglob("trace.jsonl"))
+    return [(p, default_task_source, None) for p in found]
+
+
 def _resolve_docker_image(loaded: LoadedTraceSession) -> str | None:
     """Resolve docker image: manifest override > task[image_name] > task[docker_image]."""
     return (
@@ -515,6 +528,7 @@ def _log_trace_metadata(
     sessions: list[LoadedTraceSession],
     replay_speed: float,
     source_trace: Path | None,
+    source_dir: Path | None,
     trace_manifest: Path | None,
     api_base: str | None,
     model: str | None,
@@ -540,6 +554,8 @@ def _log_trace_metadata(
     }
     if source_trace is not None:
         metadata["source_trace"] = str(source_trace)
+    if source_dir is not None:
+        metadata["source_dir"] = str(source_dir)
     if trace_manifest is not None:
         metadata["trace_manifest"] = str(trace_manifest)
         metadata["source_traces"] = [str(session.source_trace) for session in sessions]
@@ -918,13 +934,15 @@ async def _run_cloud_model_replay(
     replay_speed: float,
     command_timeout_s: float,
     warmup_skip_iterations: int,
+    serial: bool = False,
     arrival_offsets: list[float] | None = None,
 ) -> None:
     replay_zero_monotonic = time.monotonic()
     offsets = arrival_offsets or [0.0] * len(prepared_sessions)
-    await asyncio.gather(
-        *[
-            _delayed_replay(
+
+    if serial:
+        for i in range(len(prepared_sessions)):
+            await _delayed_replay(
                 offsets[i],
                 prepared_sessions[i],
                 trace_logger=trace_logger,
@@ -933,9 +951,21 @@ async def _run_cloud_model_replay(
                 command_timeout_s=command_timeout_s,
                 warmup_skip_iterations=warmup_skip_iterations,
             )
-            for i in range(len(prepared_sessions))
-        ]
-    )
+    else:
+        await asyncio.gather(
+            *[
+                _delayed_replay(
+                    offsets[i],
+                    prepared_sessions[i],
+                    trace_logger=trace_logger,
+                    replay_zero_monotonic=replay_zero_monotonic,
+                    replay_speed=replay_speed,
+                    command_timeout_s=command_timeout_s,
+                    warmup_skip_iterations=warmup_skip_iterations,
+                )
+                for i in range(len(prepared_sessions))
+            ]
+        )
 
 
 async def _replay_cloud_model_session(
@@ -1001,6 +1031,13 @@ async def _replay_cloud_model_session(
                 if source_duration_s > 0:
                     await asyncio.sleep(source_duration_s / replay_speed)
                 record_ts_end = time.time()
+                prompt_tokens = int(data.get("prompt_tokens") or 0)
+                completion_tokens = int(data.get("completion_tokens") or 0)
+                print(
+                    f"  [{iteration}] llm_call: {prompt_tokens} prompt + "
+                    f"{completion_tokens} completion tokens "
+                    f"({source_duration_s:.1f}s source)"
+                )
                 record = _make_trace_action(
                     loaded=loaded,
                     action_type="llm_call",
@@ -1026,8 +1063,8 @@ async def _replay_cloud_model_session(
                 trace_logger.log_trace_action(loaded.agent_id, record)
                 succeeded_actions += 1
                 llm_call_time_count += 1
-                total_tokens += int(data.get("prompt_tokens") or 0)
-                total_tokens += int(data.get("completion_tokens") or 0)
+                total_tokens += prompt_tokens
+                total_tokens += completion_tokens
                 total_llm_ms += (record_ts_end - record_ts_start) * 1000
                 continue
 
@@ -1081,6 +1118,10 @@ async def _replay_cloud_model_session(
                 )
                 replay_source = "executed_in_container"
             record_ts_end = time.time()
+            print(
+                f"  [{iteration}] tool_exec: {tool_name} "
+                f"({duration_ms:.0f}ms, {replay_source})"
+            )
             _classified_name = classify_exec_tool_name(tool_name, tool_args)
             tool_record = _make_trace_action(
                 loaded=loaded,
@@ -1151,8 +1192,11 @@ async def _replay_cloud_model_session(
 def _split_trace_by_agent(
     combined_path: Path,
     sessions: list[PreparedTraceSession],
-) -> None:
-    """Write per-task trace.jsonl from the combined JSONL, filtered by agent_id."""
+) -> int:
+    """Write per-task trace.jsonl from the combined JSONL, filtered by agent_id.
+
+    Returns the number of per-task trace files written.
+    """
     agent_dirs = {
         s.loaded.agent_id: s.task_output_dir
         for s in sessions
@@ -1160,7 +1204,7 @@ def _split_trace_by_agent(
     }
     sessions_by_agent = {s.loaded.agent_id: s for s in sessions}
     if not agent_dirs:
-        return
+        return 0
 
     per_agent: dict[str, list[str]] = {aid: [] for aid in agent_dirs}
     metadata_line: str | None = None
@@ -1181,7 +1225,7 @@ def _split_trace_by_agent(
                     per_agent[agent_id].append(stripped)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to split trace %s: %s", combined_path, exc)
-        return
+        return 0
 
     for agent_id, lines in per_agent.items():
         out_dir = agent_dirs[agent_id]
@@ -1198,15 +1242,81 @@ def _split_trace_by_agent(
             for ln in lines:
                 fh.write(ln + "\n")
         logger.info("Wrote per-task trace (%d records) → %s", len(lines), out_path)
+    return len(per_agent)
+
+
+def _flush_session_trace(
+    combined_path: Path,
+    prepared: PreparedTraceSession,
+) -> None:
+    """Write per-task ``trace.jsonl`` and HTML viz for a single finished session.
+
+    Called after each serial replay so the output is visible immediately,
+    not just at the end of a batch run.
+    """
+    agent_id = prepared.loaded.agent_id
+    out_dir = prepared.task_output_dir
+    if out_dir is None:
+        return
+
+    metadata_line: str | None = None
+    lines: list[str] = []
+
+    try:
+        with combined_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = json.loads(stripped)
+                rtype = record.get("type")
+                if rtype == "trace_metadata":
+                    metadata_line = stripped
+                    continue
+                if record.get("agent_id") == agent_id:
+                    lines.append(stripped)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Failed to flush trace for %s: %s", agent_id, exc
+        )
+        return
+
+    # Write per-task trace.jsonl
+    out_path = out_dir / "trace.jsonl"
+    with out_path.open("w", encoding="utf-8") as fh:
+        if metadata_line:
+            metadata = json.loads(metadata_line)
+            metadata["scaffold"] = prepared.loaded.scaffold
+            metadata["instance_id"] = agent_id
+            metadata["source_trace"] = str(prepared.loaded.source_trace)
+            fh.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+        for ln in lines:
+            fh.write(ln + "\n")
+    logger.info(
+        "Wrote per-task trace (%d records) → %s", len(lines), out_path
+    )
+
+    # Auto-generate HTML viz
+    try:
+        html = generate_html(out_dir)
+        viz_path = out_dir / "trace_viz.html"
+        viz_path.write_text(html, encoding="utf-8")
+        logger.info("HTML viz written -> %s", viz_path)
+    except Exception:
+        logger.warning(
+            "Failed to generate HTML viz for %s", out_dir, exc_info=True,
+        )
 
 
 async def simulate(
     *,
     source_trace: Path | None = None,
+    source_dir: Path | None = None,
     trace_manifest: Path | None = None,
     task_source: Path,
     output_dir: Path,
     mode: str = "local_model",
+    serial: bool = False,
     container_executable: str | None = None,
     network_mode: str = "host",
     api_base: str | None = None,
@@ -1226,8 +1336,12 @@ async def simulate(
 ) -> Path:
     if source_trace is not None and trace_manifest is not None:
         raise ValueError("source_trace and trace_manifest are mutually exclusive")
-    if source_trace is None and trace_manifest is None:
-        raise ValueError("simulate requires source_trace or trace_manifest")
+    if source_trace is not None and source_dir is not None:
+        raise ValueError("source_trace and source_dir are mutually exclusive")
+    if source_dir is not None and trace_manifest is not None:
+        raise ValueError("source_dir and trace_manifest are mutually exclusive")
+    if source_trace is None and trace_manifest is None and source_dir is None:
+        raise ValueError("simulate requires source_trace, source_dir, or trace_manifest")
     if mode not in {"local_model", "cloud_model"}:
         raise ValueError(f"Unsupported simulate mode: {mode}")
 
@@ -1236,6 +1350,12 @@ async def simulate(
             trace_manifest,
             default_task_source=task_source.resolve(),
         )
+    elif source_dir is not None:
+        trace_inputs = _discover_traces(source_dir, task_source.resolve())
+        if not trace_inputs:
+            raise ValueError(
+                f"No trace.jsonl files found under {source_dir}"
+            )
     else:
         assert source_trace is not None
         trace_inputs = [(source_trace, task_source, None)]
@@ -1262,66 +1382,100 @@ async def simulate(
     trace_logger: TraceLogger | None = None
     output_path.mkdir(parents=True, exist_ok=True)
 
-    try:
-        for loaded in loaded_sessions:
-            if _is_host_mode(loaded):
-                prepared_sessions.append(await _prepare_host_session(loaded))
-                continue
-            if container_executable is None:
-                raise ValueError(
-                    "container_executable is required for container-mode traces"
-                )
-            prepared_sessions.append(
-                await _prepare_container_session(
-                    loaded,
-                    container_executable=container_executable,
-                    network_mode=network_mode,
-                )
+    # ── Helpers for session lifecycle ──────────────────────────────
+    async def _prepare_one(loaded: LoadedTraceSession) -> PreparedTraceSession:
+        if _is_host_mode(loaded):
+            return await _prepare_host_session(loaded)
+        if container_executable is None:
+            raise ValueError(
+                "container_executable is required for container-mode traces"
             )
-
-        for prepared in prepared_sessions:
-            instance_dir = output_path / prepared.loaded.agent_id
-            attempt_n = _next_attempt_number(instance_dir)
-            task_dir = instance_dir / f"attempt_{attempt_n}"
-            task_dir.mkdir(parents=True, exist_ok=True)
-            prepared.task_output_dir = task_dir
-            if prepared.container is None:
-                continue
-            sampler = ContainerStatsSampler(
-                container_id=prepared.container.container_id,
-                interval_s=0.5,
-                executable=prepared.container.container_executable,
-            )
-            sampler.start()
-            prepared.sampler = sampler
-
-        run_id = _build_run_id(mode=mode, model=model)
-        trace_logger = TraceLogger(output_path, run_id)
-        _log_trace_metadata(
-            trace_logger=trace_logger,
-            mode=mode,
-            sessions=loaded_sessions,
-            replay_speed=replay_speed,
-            source_trace=source_trace,
-            trace_manifest=trace_manifest,
-            api_base=api_base,
-            model=model,
+        return await _prepare_container_session(
+            loaded,
+            container_executable=container_executable,
             network_mode=network_mode,
         )
 
+    async def _setup_one(prepared: PreparedTraceSession) -> None:
+        instance_dir = output_path / prepared.loaded.agent_id
+        attempt_n = _next_attempt_number(instance_dir)
+        task_dir = instance_dir / f"attempt_{attempt_n}"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        prepared.task_output_dir = task_dir
+        if prepared.container is None:
+            return
+        sampler = ContainerStatsSampler(
+            container_id=prepared.container.container_id,
+            interval_s=0.5,
+            executable=prepared.container.container_executable,
+        )
+        sampler.start()
+        prepared.sampler = sampler
+
+    async def _teardown_one(prepared: PreparedTraceSession) -> None:
+        if prepared.sampler is not None:
+            samples = prepared.sampler.stop()
+            prepared.sampler = None  # mark torn down
+            if prepared.task_output_dir is not None:
+                summary = summarize_samples(samples)
+                attempt_layout.write_resources_json(
+                    prepared.task_output_dir, samples, summary,
+                )
+                logger.info(
+                    "Wrote %d resource samples → %s",
+                    len(samples),
+                    prepared.task_output_dir / "resources.json",
+                )
+        elif prepared.task_output_dir is not None:
+            attempt_layout.write_resources_json(
+                prepared.task_output_dir,
+                samples=[],
+                summary=summarize_samples([]),
+            )
+        ctr = prepared.container
+        if ctr is None:
+            return
+        if ctr.agent is not None:
+            await ctr.agent.stop()
+        await asyncio.to_thread(
+            stop_task_container,
+            ctr.container_id,
+            executable=ctr.container_executable,
+        )
+        prepared.container = None  # mark torn down
+
+    run_id = _build_run_id(mode=mode, model=model)
+    trace_logger = TraceLogger(output_path, run_id)
+    _log_trace_metadata(
+        trace_logger=trace_logger,
+        mode=mode,
+        sessions=loaded_sessions,
+        replay_speed=replay_speed,
+        source_trace=source_trace,
+        source_dir=source_dir,
+        trace_manifest=trace_manifest,
+        api_base=api_base,
+        model=model,
+        network_mode=network_mode,
+    )
+
+    try:
         if mode == "local_model":
-            assert trace_logger is not None
+            # ── Single trace: batch prepare then local-model replay ──
+            prepared = await _prepare_one(loaded_sessions[0])
+            await _setup_one(prepared)
+            prepared_sessions.append(prepared)
+
             assert api_base is not None
             assert api_key is not None
             assert model is not None
-            # Compute gpu_output_path from the single session's attempt dir
             gpu_output_path: Path | None = None
             if gpu_baseline is not None and vllm_pid is not None and metrics_url:
-                task_dir = prepared_sessions[0].task_output_dir
+                task_dir = prepared.task_output_dir
                 if task_dir is not None:
                     gpu_output_path = task_dir / "gpu_resources.json"
             await _run_local_model_simulation(
-                prepared_sessions[0],
+                prepared,
                 trace_logger=trace_logger,
                 replay_speed=replay_speed,
                 api_base=api_base,
@@ -1335,8 +1489,42 @@ async def simulate(
                 gpu_sample_hz=gpu_sample_hz,
                 gpu_output_path=gpu_output_path,
             )
+        elif serial:
+            # ── Serial cloud-model: prepare → replay → cleanup one at a time ──
+            offsets = build_arrival_offsets(
+                len(loaded_sessions),
+                arrival_mode=arrival_mode,
+                arrival_rate_per_s=arrival_rate_per_s,
+                arrival_seed=arrival_seed,
+            )
+            for i, loaded in enumerate(loaded_sessions):
+                logger.info(
+                    "Serial replay [%d/%d]: preparing %s",
+                    i + 1, len(loaded_sessions), loaded.agent_id,
+                )
+                prepared = await _prepare_one(loaded)
+                await _setup_one(prepared)
+                prepared_sessions.append(prepared)
+                try:
+                    await _replay_cloud_model_session(
+                        prepared,
+                        trace_logger=trace_logger,
+                        replay_zero_monotonic=time.monotonic(),
+                        replay_speed=replay_speed,
+                        command_timeout_s=command_timeout_s,
+                        warmup_skip_iterations=warmup_skip_iterations,
+                    )
+                finally:
+                    await _teardown_one(prepared)
+                    # Immediately write per-task trace for this session
+                    _flush_session_trace(trace_logger.path, prepared)
         else:
-            assert trace_logger is not None
+            # ── Concurrent cloud-model: batch prepare → concurrent replay ──
+            for loaded in loaded_sessions:
+                prepared = await _prepare_one(loaded)
+                await _setup_one(prepared)
+                prepared_sessions.append(prepared)
+
             offsets = build_arrival_offsets(
                 len(prepared_sessions),
                 arrival_mode=arrival_mode,
@@ -1354,39 +1542,15 @@ async def simulate(
     finally:
         if trace_logger is not None:
             trace_logger.close()
-            _split_trace_by_agent(trace_logger.path, prepared_sessions)
+            print(f"  [debug] combined trace -> {trace_logger.path}")
+            n = _split_trace_by_agent(trace_logger.path, prepared_sessions)
+            print(f"  [debug] split: {n} per-task trace files written")
+        # Teardown any sessions that weren't cleaned up inline
+        # (in serial mode these have already been torn down; in concurrent
+        # mode they haven't).
         for prepared in prepared_sessions:
-            if prepared.sampler is not None:
-                samples = prepared.sampler.stop()
-                if prepared.task_output_dir is not None:
-                    summary = summarize_samples(samples)
-                    attempt_layout.write_resources_json(
-                        prepared.task_output_dir, samples, summary,
-                    )
-                    logger.info(
-                        "Wrote %d resource samples → %s",
-                        len(samples),
-                        prepared.task_output_dir / "resources.json",
-                    )
-            elif prepared.task_output_dir is not None:
-                # Host-mode replay has no container sampler; emit a canonical
-                # empty resources.json so downstream consumers can rely on
-                # the file always existing.
-                attempt_layout.write_resources_json(
-                    prepared.task_output_dir,
-                    samples=[],
-                    summary=summarize_samples([]),
-                )
-            ctr = prepared.container
-            if ctr is None:
-                continue
-            if ctr.agent is not None:
-                await ctr.agent.stop()
-            await asyncio.to_thread(
-                stop_task_container,
-                ctr.container_id,
-                executable=ctr.container_executable,
-            )
+            if prepared.sampler is not None or prepared.container is not None:
+                await _teardown_one(prepared)
 
     trace_file = output_path / f"{run_id}.jsonl"
     logger.info("Simulate complete [%s] -> %s", mode, trace_file)
