@@ -44,6 +44,41 @@ def _read_proc_io(pid: int) -> dict[str, int] | None:
     }
 
 
+def _read_proc_net_dev(pid: int) -> dict[str, int] | None:
+    """Read cumulative network RX/TX bytes from ``/proc/<pid>/net/dev``.
+
+    Skips the loopback interface (lo). Returns total bytes across all
+    real (non-loopback) interfaces, matching the ``net_rx_bytes`` /
+    ``net_tx_bytes`` field names used by ``ContainerStatsSampler``.
+    """
+    try:
+        text = Path(f"/proc/{pid}/net/dev").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    rx_total = 0
+    tx_total = 0
+    found = False
+    for line in text.splitlines():
+        # Skip header lines (contain "|" or start with "Inter-")
+        if "|" in line or line.startswith("Inter-"):
+            continue
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        iface = parts[0].strip()
+        if iface == "lo":
+            continue
+        fields = parts[1].split()
+        if len(fields) >= 9:
+            try:
+                rx_total += int(fields[0])
+                tx_total += int(fields[8])
+                found = True
+            except ValueError:
+                continue
+    return {"net_rx_bytes": rx_total, "net_tx_bytes": tx_total} if found else None
+
+
 def _read_proc_context_switches(pid: int) -> int | None:
     try:
         text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
@@ -240,6 +275,10 @@ class ProcessStatsSampler(threading.Thread):
         ctxt = _read_proc_context_switches(self.pid)
         if ctxt is not None and "context_switches" not in sample:
             sample["context_switches"] = ctxt
+        net = _read_proc_net_dev(self.pid)
+        if net is not None:
+            sample["net_rx_bytes"] = net["net_rx_bytes"]
+            sample["net_tx_bytes"] = net["net_tx_bytes"]
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
         return sample
 
