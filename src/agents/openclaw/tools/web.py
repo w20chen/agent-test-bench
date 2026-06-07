@@ -91,7 +91,7 @@ class WebSearchTool(Tool):
         return True
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        provider = self.config.provider.strip().lower() or "brave"
+        provider = (os.environ.get("WEB_SEARCH_PROVIDER") or self.config.provider).strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
 
         if provider == "duckduckgo":

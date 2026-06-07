@@ -96,6 +96,8 @@ sudo systemctl restart docker
 export KEEP_IMAGES_ABOVE_GB=30
 
 sudo sysctl -w kernel.perf_event_paranoid=-1
+
+export WEB_SEARCH_PROVIDER=tavily
 ```
 
 ### Step 1 — One-time environment setup
