@@ -483,18 +483,18 @@ async def _run_scaffold_tasks(
             logger.info("[%d/%d] START %s (%s)", i + 1, total, instance_id, scaffold)
             t0 = time.monotonic()
 
-            # ARM host: validate repo mirrors exist before attempting tasks.
-            if is_arm_host():
+            # ARM host: validate repo mirrors exist before attempting container tasks.
+            if is_arm_host() and benchmark.execution_environment == "container":
                 repos_root = benchmark.config.repos_root
                 if repos_root is None:
                     raise ValueError(
-                        "ARM host requires repos_root in benchmark config. "
-                        "Add repos_root to swe-rebench.yaml"
+                        f"ARM host requires repos_root in benchmark config. "
+                        f"Add repos_root to {benchmark.config.slug}.yaml"
                     )
                 if not repos_root.exists():
                     raise ValueError(
                         f"ARM repos_root does not exist: {repos_root}. "
-                        f"Run: make setup-swe-rebench-repos"
+                        f"Run: make setup-{benchmark.config.slug.replace('-', '_')}-repos"
                     )
 
             source_image = _task_source_image(benchmark, task)
