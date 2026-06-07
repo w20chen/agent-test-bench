@@ -34,8 +34,8 @@ def _read_proc_io(pid: int) -> dict[str, int] | None:
             values[key.strip()] = int(value.strip())
         except ValueError:
             continue
-    read_bytes = values.get("read_bytes")
-    write_bytes = values.get("write_bytes")
+    read_bytes = values.get("rchar")
+    write_bytes = values.get("wchar")
     if read_bytes is None and write_bytes is None:
         return None
     return {
@@ -265,11 +265,7 @@ class ProcessStatsSampler(threading.Thread):
         if sample is None:
             sample = _fallback_sample()
         proc_io = _read_proc_io(self.pid)
-        if (
-            proc_io is not None
-            and "disk_read_bytes" not in sample
-            and "disk_write_bytes" not in sample
-        ):
+        if proc_io is not None:
             sample["disk_read_bytes"] = proc_io["read_bytes"]
             sample["disk_write_bytes"] = proc_io["write_bytes"]
         ctxt = _read_proc_context_switches(self.pid)

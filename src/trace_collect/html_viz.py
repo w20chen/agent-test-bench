@@ -262,17 +262,23 @@ def generate_html(attempt_dir: Path) -> str:
         "mem": [],
         "net_rx": [],
         "net_tx": [],
+        "net_rx_rate": [],
+        "net_tx_rate": [],
         "disk_r": [],
         "disk_w": [],
         "disk_r_rate": [],
         "disk_w_rate": [],
         "ctx_switches": [],
+        "ctx_switches_rate": [],
         "mem_bw_total": [],
         "mem_bw_read": [],
         "mem_bw_write": [],
     }
     prev_dr: float = 0.0
     prev_dw: float = 0.0
+    prev_rx: float = 0.0
+    prev_tx: float = 0.0
+    prev_ctx: float = 0.0
     prev_ts: float = 0.0
     first: bool = True
     for s in resource_samples:
@@ -285,11 +291,30 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["timestamps"].append(rel_ts)
         res_data["cpu"].append(_safe_float(s.get("cpu_percent", 0)))
         res_data["mem"].append(_parse_mem_mb(str(s.get("mem_usage", ""))))
-        # Network: net_rx_bytes / net_tx_bytes → MB
-        rx = s.get("net_rx_bytes", 0)
-        tx = s.get("net_tx_bytes", 0)
-        res_data["net_rx"].append(float(rx) / 1e6 if rx else 0.0)
-        res_data["net_tx"].append(float(tx) / 1e6 if tx else 0.0)
+
+        # Compute dt once per sample — shared by all rate calculations.
+        if not first:
+            dt = rel_ts - prev_ts
+        else:
+            dt = 0.0
+
+        # Network: net_rx_bytes / net_tx_bytes → cumulative MB + rate MB/s
+        raw_rx = float(s.get("net_rx_bytes", 0) or 0)
+        raw_tx = float(s.get("net_tx_bytes", 0) or 0)
+        rx_mb = raw_rx / 1e6
+        tx_mb = raw_tx / 1e6
+        res_data["net_rx"].append(rx_mb)
+        res_data["net_tx"].append(tx_mb)
+        if not first:
+            rx_rate = (rx_mb - prev_rx) / dt if dt > 0 else 0.0
+            tx_rate = (tx_mb - prev_tx) / dt if dt > 0 else 0.0
+        else:
+            rx_rate = 0.0
+            tx_rate = 0.0
+        res_data["net_rx_rate"].append(rx_rate)
+        res_data["net_tx_rate"].append(tx_rate)
+        prev_rx = rx_mb
+        prev_tx = tx_mb
         # Disk: absolute MB
         dr = s.get("disk_read_bytes", 0) or 0
         dw = s.get("disk_write_bytes", 0) or 0
@@ -299,7 +324,6 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["disk_w"].append(dw_mb)
         # Disk rate (MB/s) from deltas
         if not first:
-            dt = rel_ts - prev_ts
             dr_rate = (dr_mb - prev_dr) / dt if dt > 0 else 0.0
             dw_rate = (dw_mb - prev_dw) / dt if dt > 0 else 0.0
         else:
@@ -313,7 +337,14 @@ def generate_html(attempt_dir: Path) -> str:
         prev_ts = rel_ts
         # Context switches
         ctx = s.get("context_switches")
-        res_data["ctx_switches"].append(float(ctx) if ctx is not None else 0.0)
+        ctx_val = float(ctx) if ctx is not None else 0.0
+        res_data["ctx_switches"].append(ctx_val)
+        if not first:
+            ctx_rate = (ctx_val - prev_ctx) / dt if dt > 0 else 0.0
+        else:
+            ctx_rate = 0.0
+        res_data["ctx_switches_rate"].append(ctx_rate)
+        prev_ctx = ctx_val
         # Host memory bandwidth (MB/s)
         res_data["mem_bw_total"].append(_safe_float(s.get("memory_total_mb_s", 0)))
         res_data["mem_bw_read"].append(_safe_float(s.get("memory_read_mb_s", 0)))
@@ -628,9 +659,9 @@ Chart.register({{
         parent.innerHTML =
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🖥 CPU & Memory</h3><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🧠 Memory Bandwidth (host)</h3><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (cumulative)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (rate)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O (rate)</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches (cumulative)</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches (rate)</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown (ms)</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }}
 
@@ -691,15 +722,15 @@ Chart.register({{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'RX (MB)', data:RES_DATA.net_rx, borderColor:'#2ecc71', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
-                    {{ label:'TX (MB)', data:RES_DATA.net_tx, borderColor:'#9b59b6', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
+                    {{ label:'RX (MB/s)', data:RES_DATA.net_rx_rate, borderColor:'#2ecc71', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }},
+                    {{ label:'TX (MB/s)', data:RES_DATA.net_tx_rate, borderColor:'#9b59b6', tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
                 responsive:true, maintainAspectRatio:false,
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
-                    y:{{ title:{{display:true,text:'MB'}}, min:0 }},
+                    y:{{ title:{{display:true,text:'MB/s'}}, min:0 }},
                     x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
@@ -731,14 +762,14 @@ Chart.register({{
             data: {{
                 labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
                 datasets: [
-                    {{ label:'Context Switches', data:RES_DATA.ctx_switches, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
+                    {{ label:'Context Switches/s', data:RES_DATA.ctx_switches_rate, borderColor:'#1abc9c', backgroundColor:'rgba(26,188,156,0.1)', fill:true, tension:0, borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle' }}
                 ]
             }},
             options: {{
                 responsive:true, maintainAspectRatio:false,
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
-                    y:{{ title:{{display:true,text:'Count'}}, min:0 }},
+                    y:{{ title:{{display:true,text:'Count/s'}}, min:0 }},
                     x:{{ type:'linear', title:{{display:true,text:'Time (s)'}} , min:0, max:GANTT_TOTAL }}
                 }}
             }}
