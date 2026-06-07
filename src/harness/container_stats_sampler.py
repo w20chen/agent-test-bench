@@ -322,6 +322,39 @@ def _ncpus() -> int:
     return _NCPUS
 
 
+def _read_proc_net_dev(pid: int) -> dict[str, int] | None:
+    """Read cumulative network RX/TX bytes from ``/proc/<pid>/net/dev``.
+
+    Skips the loopback interface (lo). Returns total bytes across all
+    real (non-loopback) interfaces.
+    """
+    try:
+        text = Path(f"/proc/{pid}/net/dev").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    rx_total = 0
+    tx_total = 0
+    found = False
+    for line in text.splitlines():
+        if "|" in line or line.startswith("Inter-"):
+            continue
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        iface = parts[0].strip()
+        if iface == "lo":
+            continue
+        fields = parts[1].split()
+        if len(fields) >= 9:
+            try:
+                rx_total += int(fields[0])
+                tx_total += int(fields[8])
+                found = True
+            except ValueError:
+                continue
+    return {"net_rx_bytes": rx_total, "net_tx_bytes": tx_total} if found else None
+
+
 def _parse_memory_mb(mem_usage: str) -> float | None:
     if not mem_usage:
         return None
@@ -534,6 +567,7 @@ class ContainerStatsSampler(threading.Thread):
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._cgroup_path: Path | None = None
+        self._container_pid: int | None = None
         self._io_mode: str | None = None  # "cgroup", "exec", or None
         # Context switches keyed by (pid, starttime) for stable identity across PID reuse
         self._pid_ctxt: dict[tuple[int, int], int] = {}
@@ -574,6 +608,7 @@ class ContainerStatsSampler(threading.Thread):
         pid = _resolve_container_pid(self.container_id, executable=self.executable)
         if pid is None:
             return
+        self._container_pid = pid
         self._cgroup_path = _resolve_cgroup_path(pid)
 
     def _sample_io(self, sample: dict[str, Any]) -> None:
@@ -687,7 +722,15 @@ class ContainerStatsSampler(threading.Thread):
         mem_mb = mem_bytes / (1024 * 1024) if mem_bytes else 0.0
         mem_limit_mb = mem_max / (1024 * 1024) if mem_max else 0.0
 
-        return {
+        net: dict[str, int] | None = None
+        net_io_val: str = ""
+        if self._container_pid is not None:
+            net = _read_proc_net_dev(self._container_pid)
+        if net is not None:
+            net_rx = net["net_rx_bytes"]
+            net_tx = net["net_tx_bytes"]
+            net_io_val = f"{net_rx}B / {net_tx}B"
+        sample: dict[str, Any] = {
             "timestamp": now.isoformat().replace("+00:00", ""),
             "epoch": now.timestamp(),
             "mem_usage": f"{mem_mb:.2f}MiB / {mem_limit_mb:.1f}MiB",
@@ -697,8 +740,12 @@ class ContainerStatsSampler(threading.Thread):
                 else "0.00%"
             ),
             "cpu_percent": f"{cpu_percent:.2f}%",
-            "net_io": "0B / 0B",
+            "net_io": net_io_val,
         }
+        if net is not None:
+            sample["net_rx_bytes"] = net["net_rx_bytes"]
+            sample["net_tx_bytes"] = net["net_tx_bytes"]
+        return sample
 
     def _sample_via_docker(self) -> dict[str, Any] | None:
         """Fallback: sample via ``docker stats --no-stream``."""
