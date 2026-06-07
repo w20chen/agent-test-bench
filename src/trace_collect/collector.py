@@ -248,14 +248,16 @@ def _task_source_image(benchmark: "Benchmark", task: dict[str, Any]) -> str | No
     """Return the source image for *task*.
 
     On ARM hosts this returns the shared ARM base image (the per-task
-    x86_64 images do not exist for arm64).  The actual repo checkout
-    and install steps are handled by ``ensure_arm_fixed_image``.
+    x86_64 images do not exist for arm64), but only for benchmarks that
+    actually need container images (``image_name_for`` returns non-None).
+    The actual repo checkout and install steps are handled by
+    ``ensure_arm_fixed_image``.
     """
-    if is_arm_host():
-        return resolve_arm_base_image(benchmark.config)
     image_name = benchmark.image_name_for(task)
     if not image_name:
         return None
+    if is_arm_host():
+        return resolve_arm_base_image(benchmark.config)
     return normalize_image_reference(str(image_name))
 
 
