@@ -206,7 +206,7 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "wget": 3,
     "su": 3,
     "sudo": 3,
-    # Tier 2 — inspection / search / processing
+    # Tier 2 — real work (search, transform, file ops, system)
     "grep": 2,
     "egrep": 2,
     "fgrep": 2,
@@ -218,13 +218,6 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "diff": 2,
     "patch": 2,
     "cat": 2,
-    "head": 2,
-    "tail": 2,
-    "less": 2,
-    "more": 2,
-    "sort": 2,
-    "uniq": 2,
-    "wc": 2,
     "tar": 2,
     "gzip": 2,
     "gunzip": 2,
@@ -253,8 +246,15 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "whereis": 2,
     "man": 2,
     "watch": 2,
+    # Tier 1 — output post-processing / navigation / trivial / setup
     "xargs": 1,  # plumbing — the command it runs is the real action
-    # Tier 1 — navigation / trivial / setup
+    "head": 1,
+    "tail": 1,
+    "less": 1,
+    "more": 1,
+    "sort": 1,
+    "uniq": 1,
+    "wc": 1,
     "cd": 1,
     "pushd": 1,
     "popd": 1,
@@ -332,6 +332,17 @@ def _tokenize_segment(segment: str) -> str:
             if not p.startswith("-"):
                 token = p
                 break
+
+    # ``python -m <module>`` — redirect to the module name so that
+    # ``python -m pytest`` is classified as exec-pytest, not exec-python.
+    _PYTHON_INTERPS = frozenset({
+        "python", "python3", "python3.9", "python3.10", "python3.11", "python3.12",
+    })
+    if token in _PYTHON_INTERPS and len(parts) >= 4 and parts[1] == "-m":
+        module_token = parts[2]
+        # Only redirect if the module is known — unknown modules stay as python.
+        if module_token in _COMMAND_CATEGORY_MAP:
+            token = module_token
 
     return token
 
