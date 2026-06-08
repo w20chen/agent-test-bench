@@ -222,12 +222,100 @@ def _parse_trace_session_file(
     return first_agent_id, metadata, actions, summaries.get(first_agent_id)
 
 
+_BENCHMARK_TASK_SOURCES: dict[str, str] = {
+    "swe-rebench": "data/swe-rebench/tasks.json",
+    "swe-bench-verified": "data/swebench_verified/tasks.json",
+    "deep-research-bench": "data/deep-research-bench/tasks.json",
+    "browsecomp": "data/browsecomp/tasks.json",
+    "terminal-bench": "data/terminal-bench/tasks.json",
+}
+
+
+def _resolve_task_source(
+    metadata: dict[str, Any] | None,
+    task_source: Path,
+    source_trace: Path,
+) -> Path:
+    """Resolve the canonical task-source path for *source_trace*.
+
+    When *task_source* is the CLI default (or otherwise unreachable) the
+    trace metadata's ``benchmark`` field is used to select the
+    benchmark-appropriate tasks file.  Falls back to the original
+    *task_source* when no metadata is available.
+    """
+    if task_source.exists():
+        return task_source
+
+    benchmark = (metadata or {}).get("benchmark", "")
+    if not benchmark:
+        return task_source
+
+    mapped = _BENCHMARK_TASK_SOURCES.get(benchmark)
+    if mapped:
+        candidate = Path(mapped)
+        if candidate.exists():
+            logger.info(
+                "%s: auto-detected task_source %s (benchmark=%s)",
+                source_trace.name,
+                candidate,
+                benchmark,
+            )
+            return candidate
+        # For host-mode benchmarks the tasks file may not exist yet;
+        # the caller will synthesise a minimal task record.
+        logger.warning(
+            "%s: benchmark=%s but %s not found; will synthesise task from metadata",
+            source_trace.name,
+            benchmark,
+            candidate,
+        )
+
+    return task_source
+
+
 def _find_task(task_source: Path, agent_id: str) -> dict[str, Any]:
     tasks = json.loads(task_source.read_text(encoding="utf-8"))
     for task in tasks:
         if task["instance_id"] == agent_id:
             return task
     raise SimulateError(f"Task {agent_id!r} not found in {task_source}")
+
+
+def _find_or_synthesize_task(
+    task_source: Path,
+    agent_id: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the task record for *agent_id*, synthesising one when needed.
+
+    Host-mode benchmarks (deep-research-bench, browsecomp) may not have a
+    static tasks JSON file.  When *task_source* does not exist and the
+    metadata declares a host benchmark, we build a minimal task dict from
+    the trace metadata.
+    """
+    if task_source.exists():
+        return _find_task(task_source, agent_id)
+
+    benchmark = (metadata or {}).get("benchmark", "")
+    execution_env = (metadata or {}).get("execution_environment", "")
+    if benchmark and execution_env == "host":
+        logger.info(
+            "Synthesising task record for %s (benchmark=%s, host mode)",
+            agent_id,
+            benchmark,
+        )
+        return {
+            "instance_id": agent_id,
+            "repo": None,
+            "image_name": None,
+            "docker_image": None,
+        }
+
+    raise SimulateError(
+        f"Task source {task_source} not found and cannot synthesise "
+        f"task for benchmark={benchmark!r} env={execution_env!r}. "
+        f"Pass --task-source explicitly."
+    )
 
 
 def _iteration_count(actions: list[dict[str, Any]]) -> int:
@@ -321,10 +409,11 @@ def _load_trace_session(
 ) -> LoadedTraceSession:
     agent_id, metadata, actions, summary = _parse_trace_session_file(source_trace)
     scaffold = metadata.get("scaffold", "unknown") if metadata else "unknown"
-    task = _find_task(task_source, agent_id)
+    resolved_source = _resolve_task_source(metadata, task_source, source_trace)
+    task = _find_or_synthesize_task(resolved_source, agent_id, metadata)
     return LoadedTraceSession(
         source_trace=source_trace,
-        task_source=task_source,
+        task_source=resolved_source,
         agent_id=agent_id,
         scaffold=scaffold,
         metadata=metadata,
