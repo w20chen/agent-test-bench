@@ -257,13 +257,18 @@ class TraceCollectorHook(AgentHook):
         tool_results_from_messages = self._extract_tool_results(context.messages)
         if tool_results_from_messages:
             # Per-tool wall timings from _execute_tools (records each tool's
-            # actual completion time even when tools run concurrently).
+            # actual start time and completion time even when tools run
+            # concurrently).
             tool_wall_ms_by_id: dict[str, float] = {}
+            tool_start_mono_by_id: dict[str, float] = {}
             for ev in context.tool_events:
                 tc_id = ev.get("tc_id")
                 wall_ms = ev.get("wall_ms")
+                start_mono = ev.get("start_mono")
                 if isinstance(tc_id, str) and isinstance(wall_ms, (int, float)):
                     tool_wall_ms_by_id[tc_id] = float(wall_ms)
+                if isinstance(tc_id, str) and isinstance(start_mono, (int, float)):
+                    tool_start_mono_by_id[tc_id] = float(start_mono)
 
             tool_args_by_id: dict[str, str] = {}
             tool_name_by_id: dict[str, str] = {}
@@ -319,10 +324,23 @@ class TraceCollectorHook(AgentHook):
                         iteration=context.iteration,
                     )
 
-                tool_ts_end = time.time()
-                tool_ts_start = (
-                    tool_ts_end - duration_ms / 1000 if duration_ms else tool_ts_end
-                )
+                per_tool_start_mono = tool_start_mono_by_id.get(tc_id)
+                if per_tool_start_mono is not None and duration_ms > 0:
+                    # Convert monotonic start time to approximate epoch so
+                    # concurrent tools share the same ts_start (they all
+                    # began at roughly the same moment).
+                    mono_now = time.monotonic()
+                    epoch_now = time.time()
+                    tool_ts_start = epoch_now - (mono_now - per_tool_start_mono)
+                    tool_ts_end = tool_ts_start + duration_ms / 1000.0
+                else:
+                    # Fallback: back-compute from current time.
+                    tool_ts_end = time.time()
+                    tool_ts_start = (
+                        tool_ts_end - duration_ms / 1000
+                        if duration_ms
+                        else tool_ts_end
+                    )
                 action_id_suffix = tc_id if tc_id else tool_name
                 tool_action = TraceAction(
                     action_type="tool_exec",

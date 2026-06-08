@@ -552,6 +552,7 @@ class AgentRunner:
                     result, event, error = r
                     event["tc_id"] = tc.id
                     event["wall_ms"] = wall_ms
+                    event["start_mono"] = t0
                     return result, event, error
 
                 tool_results.extend(
@@ -567,6 +568,7 @@ class AgentRunner:
                     result, event, error = r
                     event["tc_id"] = tool_call.id
                     event["wall_ms"] = wall_ms
+                    event["start_mono"] = t0
                     tool_results.append(r)
 
         results: list[Any] = []
