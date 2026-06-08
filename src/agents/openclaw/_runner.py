@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -543,19 +544,30 @@ class AgentRunner:
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
             if spec.concurrent_tools and len(batch) > 1:
+
+                async def _timed(tc: ToolCallRequest):
+                    t0 = time.monotonic()
+                    r = await self._run_tool(spec, tc, external_lookup_counts)
+                    wall_ms = (time.monotonic() - t0) * 1000
+                    result, event, error = r
+                    event["tc_id"] = tc.id
+                    event["wall_ms"] = wall_ms
+                    return result, event, error
+
                 tool_results.extend(
-                    await asyncio.gather(
-                        *(
-                            self._run_tool(spec, tool_call, external_lookup_counts)
-                            for tool_call in batch
-                        )
-                    )
+                    await asyncio.gather(*(_timed(tc) for tc in batch))
                 )
             else:
                 for tool_call in batch:
-                    tool_results.append(
-                        await self._run_tool(spec, tool_call, external_lookup_counts)
+                    t0 = time.monotonic()
+                    r = await self._run_tool(
+                        spec, tool_call, external_lookup_counts
                     )
+                    wall_ms = (time.monotonic() - t0) * 1000
+                    result, event, error = r
+                    event["tc_id"] = tool_call.id
+                    event["wall_ms"] = wall_ms
+                    tool_results.append(r)
 
         results: list[Any] = []
         events: list[dict[str, str]] = []

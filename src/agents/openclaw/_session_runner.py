@@ -256,6 +256,15 @@ class TraceCollectorHook(AgentHook):
 
         tool_results_from_messages = self._extract_tool_results(context.messages)
         if tool_results_from_messages:
+            # Per-tool wall timings from _execute_tools (records each tool's
+            # actual completion time even when tools run concurrently).
+            tool_wall_ms_by_id: dict[str, float] = {}
+            for ev in context.tool_events:
+                tc_id = ev.get("tc_id")
+                wall_ms = ev.get("wall_ms")
+                if isinstance(tc_id, str) and isinstance(wall_ms, (int, float)):
+                    tool_wall_ms_by_id[tc_id] = float(wall_ms)
+
             tool_args_by_id: dict[str, str] = {}
             tool_name_by_id: dict[str, str] = {}
             if context.tool_calls:
@@ -271,11 +280,17 @@ class TraceCollectorHook(AgentHook):
                 ):
                     continue
                 tool_start_mono = self._tool_start_ts.pop(tc_id, None)
-                duration_ms = (
-                    (time.monotonic() - tool_start_mono) * 1000
-                    if tool_start_mono
-                    else 0.0
-                )
+                # Prefer per-tool wall timing captured inside _execute_tools,
+                # which records each tool's actual completion time even when
+                # tools run concurrently. Fall back to iteration-level
+                # timing when per-tool data is unavailable.
+                per_tool_timing = tool_wall_ms_by_id.get(tc_id)
+                if per_tool_timing is not None:
+                    duration_ms = per_tool_timing
+                elif tool_start_mono is not None:
+                    duration_ms = (time.monotonic() - tool_start_mono) * 1000
+                else:
+                    duration_ms = 0.0
                 self._tool_times[tool_name] = (
                     self._tool_times.get(tool_name, 0.0) + duration_ms
                 )
