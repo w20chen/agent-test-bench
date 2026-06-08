@@ -278,6 +278,120 @@ production throughput.
 Terminal-Bench requires Python 3.12+ (upstream `tb` CLI dependency) and only
 supports `--scaffold openclaw` with the Docker runtime in phase 1.
 
+## Resource Monitoring
+
+The harness ships five resource monitors that activate depending on the
+runtime mode (container, host process, local GPU serving, or deep-profile).
+Each sample carries a UTC timestamp and an epoch; monitors run on background
+threads or asyncio tasks at a configurable interval.
+
+### Monitors by Runtime Mode
+
+| Runtime Mode | Active Monitor(s) | Key Source Files |
+|---|---|---|
+| **container** (Docker/Podman) | `ContainerStatsSampler` | `src/harness/container_stats_sampler.py` |
+| **host** (no container) | `ProcessStatsSampler` | `src/harness/process_stats_sampler.py` |
+| **local_model** (vLLM GPU replay) | `VLLMMetricsClient` + `GpuResourceSampler` | `src/harness/metrics_client.py`, `src/harness/gpu_resource_sampler.py` |
+| **deep-profile** (PyTorch hooks) | `ComponentMemoryProfiler` | `src/harness/component_memory_profiler.py` |
+
+### 1. ContainerStatsSampler — container CPU / memory / I/O
+
+Reads Linux cgroup v2 counters directly (sub-millisecond overhead, no Docker
+daemon round-trip). Falls back to `docker stats --no-stream` +
+`docker exec python3` on non-cgroup-v2 hosts.
+
+| Metric | Source | Isolation |
+|--------|--------|-----------|
+| CPU % | cgroup v2 `cpu.stat` `usage_usec` delta between consecutive samples, divided by `ncpus` | ✅ container-scoped |
+| Memory | cgroup v2 `memory.current` / `memory.max` | ✅ container-scoped |
+| Disk I/O (read/write bytes) | cgroup v2 `io.stat` aggregated across all devices; fallback: sum `/proc/*/io` inside container via `docker exec` | ✅ container-scoped |
+| Context switches | sum of `voluntary_ctxt_switches` + `nonvoluntary_ctxt_switches` across all PIDs in the container's `cgroup.procs`, with per-(pid, starttime) high-water marks so exited processes are not lost | ✅ container-scoped |
+| Network I/O (rx/tx bytes) | `/proc/<pid>/net/dev` of the container init PID (loopback excluded) | ✅ container-scoped |
+| Memory bandwidth | `perf stat -a` reading Intel IMC CAS counters (system-wide); requires `kernel.perf_event_paranoid=-1` | ⚠️ host-wide |
+
+### 2. ProcessStatsSampler — host process CPU / memory / I/O
+
+Uses `psutil` (fallback: `ps`) to sample the target PID and its recursive
+children. Complements with `/proc/<pid>/{io,status,net/dev}` reads where
+available.
+
+| Metric | Source | Isolation |
+|--------|--------|-----------|
+| CPU % | `psutil.Process.cpu_percent()` + recursive children; fallback: `ps -o %cpu=` | ✅ process-tree scoped |
+| Memory (RSS) | `psutil.Process.memory_info().rss` + children RSS summed; fallback: `ps -o rss=` | ✅ process-tree scoped |
+| Disk I/O | `psutil.Process.io_counters()` (read_bytes, write_bytes) + children; also reads `/proc/<pid>/io` | ✅ process-tree scoped |
+| Context switches | `/proc/<pid>/status` (`voluntary_ctxt_switches` + `nonvoluntary_ctxt_switches`) | ✅ process-tree scoped |
+| Network I/O | `/proc/<pid>/net/dev` (loopback excluded) | ✅ process-tree scoped |
+| Memory bandwidth | same `perf stat -a` as ContainerStatsSampler | ⚠️ host-wide |
+
+### 3. VLLMMetricsClient — vLLM scheduler Prometheus metrics
+
+Polls the vLLM Prometheus endpoint (`/metrics`) and parses gauge/counter
+values. All metrics are vLLM-internal — naturally isolated to the vLLM
+process.
+
+| Metric | Prometheus Gauge |
+|--------|-----------------|
+| Running / waiting requests | `vllm:num_requests_running`, `vllm:num_requests_waiting` |
+| GPU / CPU KV cache usage | `vllm:gpu_cache_usage_perc` (or `vllm:kv_cache_usage_perc` in vLLM 0.10+), `vllm:cpu_cache_usage_perc` |
+| Preemption count | `vllm:num_preemptions_total` |
+| Prefix cache hit rates | `vllm:gpu_prefix_cache_hit_rate`, `vllm:cpu_prefix_cache_hit_rate` |
+| Throughput | `vllm:avg_prompt_throughput_toks_per_s`, `vllm:avg_generation_throughput_toks_per_s` |
+| Latency | `vllm:e2e_request_latency_seconds` (sum + count), `vllm:time_to_first_token_seconds` |
+
+### 4. GpuResourceSampler — GPU memory breakdown (local_model only)
+
+Combines three data sources at a configurable rate (default 10 Hz) to produce
+a `GpuMemoryBreakdown` time series:
+
+| Component | Source | Description |
+|-----------|--------|-------------|
+| `weights_mib` | `GpuBaseline` parsed from vLLM startup log | One-shot; model weights resident in GPU memory |
+| `kv_cache_total_mib` | `GpuBaseline` parsed from vLLM startup log | Total GPU memory budget for KV cache |
+| `kv_cache_used_mib` | vLLM Prometheus `gpu_cache_usage_perc` × `kv_cache_total_mib` | How much of the KV budget is currently occupied |
+| `total_pid_mib` | `nvidia-smi --query-compute-apps=pid,gpu_serial,used_memory` filtered by vLLM PID | Total GPU memory held by the vLLM process |
+| `activations_mib` | residual: `total_pid_mib - weights_mib - kv_cache_used_mib` | Estimated activation memory (clamped ≥ 0) |
+
+All GPU memory readings are per-PID, so other users' GPU processes do not
+affect them. Fails fast with `GpuPidNotFoundError` if the vLLM PID disappears
+mid-run.
+
+### 5. ComponentMemoryProfiler — per-layer activation memory (deep-profile)
+
+Attaches PyTorch forward hooks to attention and MLP submodules (detected by
+class-name pattern matching: `attention|attn`, `mlp|feedforward|ffn`). Uses
+`torch.cuda.memory_allocated()` pre/post delta to estimate per-component
+activation memory. Outputs `GpuComponentBreakdown` records per generate step.
+This is entirely in-process and not affected by other users.
+
+### Output Format
+
+All monitors emit samples that feed into `summarize_samples()` producing a
+`resources.json` with min/max/avg for every metric plus deltas for monotonic
+counters (disk, network, context switches). The HTML viz renders these as
+time-series overlays on the Gantt chart.
+
+### Multi-Tenant Safety Summary
+
+| Monitoring Layer | Affected by other users on the same machine? |
+|---|---|
+| Container cgroup (CPU, memory, disk I/O, ctxt switches) | ❌ No |
+| Container network I/O (init PID `/proc/net/dev`) | ❌ No |
+| Process-level (psutil, `/proc/<pid>/*`, ps) | ❌ No |
+| GPU memory per PID (`nvidia-smi --query-compute-apps`) | ❌ No |
+| vLLM Prometheus internal metrics | ❌ No |
+| PyTorch `torch.cuda.memory_allocated()` | ❌ No |
+| **Host memory bandwidth (`perf stat -a`)** | ⚠️ **Yes — system-wide PMC counters** |
+
+> **Note on memory bandwidth:** `perf stat -a` monitors all CPUs and IMCs on
+> the host. If other users are running memory-intensive workloads on the same
+> physical machine, `memory_total_mb_s` / `memory_read_mb_s` /
+> `memory_write_mb_s` in the output will include their traffic. For clean
+> measurements, run on a dedicated node or treat these as upper-bound
+> estimates. Set `sudo sysctl -w kernel.perf_event_paranoid=-1` before
+> starting the harness, otherwise bandwidth sampling will report
+> `permission_denied` and all bandwidth fields will be 0.
+
 ### Adding a New Benchmark
 
 Benchmarks live in `src/agents/benchmarks/<slug>.py` with a matching
