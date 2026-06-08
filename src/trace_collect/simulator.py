@@ -24,6 +24,7 @@ from trace_collect import attempt_layout
 from trace_collect.attempt_pipeline import start_task_container, stop_task_container
 from trace_collect.exec_classifier import classify_exec_tool_name
 from trace_collect.html_viz import generate_html
+from trace_collect.openclaw_tools import HostAgent
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class PreparedTraceSession:
 
     loaded: LoadedTraceSession
     container: PreparedContainer | None = None
+    host_agent: HostAgent | None = None
     sampler: ContainerStatsSampler | None = None
     task_output_dir: Path | None = None
 
@@ -606,8 +608,16 @@ async def _prepare_container_session(
 async def _prepare_host_session(
     loaded: LoadedTraceSession,
 ) -> PreparedTraceSession:
-    """Prepare a host-mode replay session without Docker/Podman."""
-    return PreparedTraceSession(loaded=loaded, container=None)
+    """Prepare a host-mode replay session without Docker/Podman.
+
+    Creates a :class:`HostAgent` that executes tools directly on the host
+    so that cloud_model replay re-runs tool calls instead of skipping them.
+    """
+    # Derive workspace from the source trace directory — the parent of
+    # the trace file is the attempt dir, its parent is the instance dir.
+    workspace = loaded.source_trace.parent.parent
+    host_agent = HostAgent(workspace=workspace)
+    return PreparedTraceSession(loaded=loaded, host_agent=host_agent)
 
 
 def _log_trace_metadata(
@@ -1068,6 +1078,7 @@ async def _replay_cloud_model_session(
 ) -> None:
     loaded = prepared_session.loaded
     ctr = prepared_session.container
+    host_agent = prepared_session.host_agent
     source_model = (loaded.summary or {}).get("model", "unknown")
 
     logger.info(
@@ -1176,21 +1187,29 @@ async def _replay_cloud_model_session(
 
             record_ts_start = time.time()
             source_duration_ms = float(data.get("duration_ms") or 0.0)
-            if ctr is None:
-                logger.info(
-                    "Skipping host-mode tool action for %s action=%s tool=%s",
-                    loaded.agent_id,
-                    action_id,
+
+            # ── Resolve which agent executes the tool ──────────────
+            # Prefer host-agent (host-mode benchmarks) over
+            # container-agent (container-mode benchmarks).  Fall back
+            # to trace replay for MCP tools (not supported by either).
+            agent_for_tool: Any = host_agent if host_agent is not None else (
+                ctr.agent if ctr is not None else None
+            )
+
+            if agent_for_tool is not None and (
+                tool_name is None or not tool_name.startswith("mcp_")
+            ):
+                tool_result, duration_ms, tool_success = await _exec_tool(
+                    agent_for_tool,
                     tool_name,
+                    tool_args,
+                    command_timeout_s,
                 )
-                replay_source = "skipped_host_mode"
-                tool_result = data.get("tool_result", data.get("result", ""))
-                # Research-agent tools don't emit "success"; fall back to
-                # absence-of-error so successful runs aren't mislabeled.
-                tool_success = bool(data.get("success", not data.get("error")))
-                if source_duration_ms > 0:
-                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
-                duration_ms = (time.time() - record_ts_start) * 1000
+                replay_source = (
+                    "executed_on_host"
+                    if host_agent is not None
+                    else "executed_in_container"
+                )
             elif tool_name is not None and tool_name.startswith("mcp_"):
                 if source_duration_ms > 0:
                     await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
@@ -1198,14 +1217,19 @@ async def _replay_cloud_model_session(
                 tool_success = bool(data.get("success", True))
                 duration_ms = (time.time() - record_ts_start) * 1000
                 replay_source = "replayed_from_trace"
-            elif ctr is not None:
-                tool_result, duration_ms, tool_success = await _exec_tool(
-                    ctr.agent,
+            else:
+                logger.warning(
+                    "No agent available for %s action=%s tool=%s; replaying from trace",
+                    loaded.agent_id,
+                    action_id,
                     tool_name,
-                    tool_args,
-                    command_timeout_s,
                 )
-                replay_source = "executed_in_container"
+                replay_source = "replayed_from_trace"
+                tool_result = data.get("tool_result", data.get("result", ""))
+                tool_success = bool(data.get("success", not data.get("error")))
+                if source_duration_ms > 0:
+                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
+                duration_ms = (time.time() - record_ts_start) * 1000
             record_ts_end = time.time()
             print(
                 f"  [{iteration}] tool_exec: {tool_name} "
@@ -1233,9 +1257,11 @@ async def _replay_cloud_model_session(
                     "sim_metrics": {
                         "warmup": iteration < warmup_skip_iterations,
                         "source": replay_source,
-                        "sim_tool_format": replay_source
-                        if replay_source == "skipped_host_mode"
-                        else "container_exec",
+                        "sim_tool_format": (
+                            "host_exec" if replay_source == "executed_on_host"
+                            else "container_exec" if replay_source == "executed_in_container"
+                            else "trace_replay"
+                        ),
                     },
                 },
             )
@@ -1523,6 +1549,8 @@ async def simulate(
             )
         ctr = prepared.container
         if ctr is None:
+            if prepared.host_agent is not None:
+                await prepared.host_agent.stop()
             return
         if ctr.agent is not None:
             await ctr.agent.stop()

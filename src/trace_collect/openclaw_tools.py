@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import textwrap
+import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -423,8 +425,172 @@ def _resolve_tool_request(
     if tool_name == "list_dir":
         return {"tool": "list_dir", "args": {"path": params.get("path", ".")}}, command_timeout_s
 
+    # ── Host-mode tools (web, spawn, message) ──────────────────────
+    if tool_name == "web_search":
+        return {
+            "tool": "web_search",
+            "args": {
+                "query": params.get("query", ""),
+                "count": int(params.get("count", 5)),
+            },
+        }, command_timeout_s
+
+    if tool_name == "web_fetch":
+        return {
+            "tool": "web_fetch",
+            "args": {
+                "url": params.get("url", ""),
+                "max_length": int(params.get("max_length", 5000)),
+            },
+        }, command_timeout_s
+
+    if tool_name == "spawn":
+        return {
+            "tool": "spawn",
+            "args": {
+                "task": params.get("task", ""),
+                "label": params.get("label", "subagent"),
+            },
+        }, command_timeout_s
+
+    if tool_name == "message":
+        return {
+            "tool": "message",
+            "args": {
+                "channel": params.get("channel", "cli"),
+                "text": params.get("text", ""),
+            },
+        }, command_timeout_s
+
     return None, command_timeout_s  # unsupported tool
 
+
+class HostAgent:
+    """Execute tools directly on the host (no container) for cloud_model replay.
+
+    Mirrors :class:`ContainerAgent` execute/start/stop interface so that
+    ``_replay_cloud_model_session`` works for host-mode benchmarks.
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        web_search_config: Any = None,
+        web_proxy: str | None = None,
+        exec_timeout: float = 600.0,
+    ) -> None:
+        from agents.openclaw.tools.filesystem import (
+            EditFileTool,
+            ListDirTool,
+            ReadFileTool,
+            WriteFileTool,
+        )
+        from agents.openclaw.tools.shell import ExecTool
+        from agents.openclaw.tools.web import WebFetchTool, WebSearchTool
+
+        self._tools: dict[str, Any] = {
+            "exec": ExecTool(
+                working_dir=str(workspace),
+                timeout=exec_timeout,
+            ),
+            "commands": ExecTool(
+                working_dir=str(workspace),
+                timeout=exec_timeout,
+            ),
+            "read_file": ReadFileTool(workspace=workspace, allowed_dir=workspace),
+            "write_file": WriteFileTool(workspace=workspace, allowed_dir=workspace),
+            "edit_file": EditFileTool(workspace=workspace, allowed_dir=workspace),
+            "list_dir": ListDirTool(workspace=workspace, allowed_dir=workspace),
+            "web_search": WebSearchTool(config=web_search_config, proxy=web_proxy),
+            "web_fetch": WebFetchTool(proxy=web_proxy),
+        }
+        self._workspace = workspace
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    @property
+    def alive(self) -> bool:
+        return True
+
+    async def execute(
+        self,
+        request: dict[str, Any],
+        *,
+        timeout_s: float = 600.0,
+    ) -> dict[str, Any]:
+        """Execute *request* on the host and return ``{ok, result, inner_duration_ms}``."""
+        tool_name = request.get("tool", "")
+        args: dict[str, Any] = request.get("args", {}) or {}
+
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            if tool_name in ("spawn", "message"):
+                return {
+                    "ok": True,
+                    "result": json.dumps(args, ensure_ascii=False),
+                    "inner_duration_ms": 0.0,
+                }
+            return {"ok": False, "result": f"Error: Unsupported tool {tool_name!r}"}
+
+        try:
+            t0 = time.monotonic()
+            if tool_name in ("exec", "commands"):
+                # ExecTool.execute expects command as kwarg or commands as kwarg
+                result: Any
+                if tool_name == "commands" and "commands" in args:
+                    result = await tool.execute(commands=args["commands"])
+                else:
+                    result = await tool.execute(
+                        command=args.get("command", ""),
+                        timeout=args.get("timeout"),
+                    )
+            elif tool_name == "read_file":
+                result = await tool.execute(
+                    path=args.get("path", ""),
+                    offset=int(args.get("offset", 0)),
+                    limit=int(args.get("limit", 2000)),
+                )
+            elif tool_name == "write_file":
+                result = await tool.execute(
+                    path=args.get("path", ""),
+                    content=args.get("content", ""),
+                )
+            elif tool_name == "edit_file":
+                result = await tool.execute(
+                    path=args.get("path", ""),
+                    old_text=args.get("old_text", ""),
+                    new_text=args.get("new_text", ""),
+                    replace_all=bool(args.get("replace_all", False)),
+                )
+            elif tool_name == "list_dir":
+                result = await tool.execute(path=args.get("path", "."))
+            elif tool_name == "web_search":
+                result = await tool.execute(
+                    query=args.get("query", ""),
+                    count=int(args.get("count", 5)),
+                )
+            elif tool_name == "web_fetch":
+                result = await tool.execute(
+                    url=args.get("url", ""),
+                    max_length=int(args.get("max_length", 5000)),
+                )
+            else:
+                result = await tool.execute(**args)
+            inner_duration_ms = (time.monotonic() - t0) * 1000.0
+            return {
+                "ok": True,
+                "result": str(result) if result is not None else "",
+                "inner_duration_ms": inner_duration_ms,
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {"ok": False, "result": f"Error: {exc}", "returncode": 1}
 
 async def execute_trace_tool(
     *,
