@@ -275,7 +275,7 @@ class BFCLOpenClawRunner:
         from bfcl_eval.eval_checker.multi_turn_eval.multi_turn_utils import (
             execute_multi_turn_func_call,
         )
-        from bfcl_eval.utils import is_memory
+        from bfcl_eval.utils import is_memory, is_web_search
 
         entry: dict[str, Any] = task["_bfcl_entry"]
         category: str = task["_bfcl_category"]
@@ -296,6 +296,14 @@ class BFCLOpenClawRunner:
         # tasks of one run, so we derive it from the shared run_dir.
         if is_memory(category):
             self._populate_memory_initial_config(entry, attempt_ctx)
+        elif is_web_search(category):
+            # WebSearchAPI reads show_snippet from initial_config; base -> True,
+            # no_snippet -> False (derived from the entry id by BFCL's helper).
+            from bfcl_eval.utils import (
+                populate_initial_settings_for_web_search_test_cases,
+            )
+
+            populate_initial_settings_for_web_search_test_cases([entry])
 
         initial_config: dict[str, Any] = entry.get("initial_config", {})
 
