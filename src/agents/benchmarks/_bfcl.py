@@ -566,6 +566,12 @@ class BFCLBenchmark(Benchmark):
     def image_name_for(self, task: dict[str, Any]) -> str | None:
         return None
 
+    def viz_filename(self, instance_id: str) -> str:
+        # "<slug>__<instance_id>.html" so a full run's HTMLs are uniquely
+        # identifiable and collectible into one folder.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", instance_id)
+        return f"{self.config.slug}__{safe}.html"
+
     def load_tasks(self) -> list[dict[str, Any]]:
         ensure_bfcl_importable(self.config.extras)
         from bfcl_eval.utils import load_dataset_entry

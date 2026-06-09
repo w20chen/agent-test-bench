@@ -219,6 +219,14 @@ class Benchmark(ABC):
     def image_name_for(self, task: dict[str, Any]) -> str | None:
         return task.get("image_name")
 
+    def viz_filename(self, instance_id: str) -> str:
+        """Filename for the per-task HTML report written by the collector.
+
+        Defaults to ``trace_viz.html`` (unchanged for all existing benchmarks).
+        Subclasses may override to embed identifying info in the name.
+        """
+        return "trace_viz.html"
+
     def runtime_mode_for(self, scaffold: str) -> str:
         """Return the runtime strategy label for the given scaffold."""
         return "host_controller"
