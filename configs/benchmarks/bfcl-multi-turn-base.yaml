@@ -6,7 +6,7 @@ selection_n: 200
 selection_seed: 42
 default_prompt_template: default
 extras:
-  # BFCL is an external read-only repo. Root comes from the BFCL_REPO_PATH env
-  # var (default /home/huanqi/projects/gorilla); the package lives under this
-  # subdir. Override bfcl_repo_path here only if the env var is unset.
+  # BFCL is an external read-only repo. Set BFCL_REPO_PATH to your gorilla
+  # checkout; its package lives under this subdir. As a fallback you may set
+  # bfcl_repo_path here instead of the env var (no machine-specific default).
   bfcl_package_subdir: berkeley-function-call-leaderboard

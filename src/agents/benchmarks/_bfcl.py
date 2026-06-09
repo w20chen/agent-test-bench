@@ -1,8 +1,8 @@
 """Shared helpers for BFCL host-mode benchmark plugins.
 
 BFCL (Berkeley Function Calling Leaderboard) is an external, read-only repo
-located via the ``BFCL_REPO_PATH`` env var (default
-``/home/huanqi/projects/gorilla``); its Python package lives under
+located via the ``BFCL_REPO_PATH`` env var (or ``extras.bfcl_repo_path`` in the
+benchmark YAML); its Python package lives under
 ``<root>/berkeley-function-call-leaderboard``.  We never modify BFCL code.  We
 import its dataset loader, its function-doc -> tool-schema converter, its
 stateful backend instantiation helper, and the backend implementations
@@ -44,7 +44,6 @@ from agents.benchmarks.base import Benchmark
 from agents.openclaw.tools.base import Tool
 from trace_collect.attempt_pipeline import AttemptContext, AttemptResult
 
-DEFAULT_BFCL_REPO_PATH = "/home/huanqi/projects/gorilla"
 DEFAULT_BFCL_PACKAGE_SUBDIR = "berkeley-function-call-leaderboard"
 
 # Channel constant mirroring OpenClaw's SessionRunner: a "system"-channel inbound
@@ -60,11 +59,16 @@ _AGENT_CHANNEL = "collect"
 
 
 def _resolve_bfcl_package_root(extras: dict[str, Any]) -> Path:
-    root = (
-        os.environ.get("BFCL_REPO_PATH")
-        or extras.get("bfcl_repo_path")
-        or DEFAULT_BFCL_REPO_PATH
-    )
+    # No machine-specific default: the BFCL checkout location must be supplied
+    # explicitly (env var preferred, YAML extras as fallback).
+    root = os.environ.get("BFCL_REPO_PATH") or extras.get("bfcl_repo_path")
+    if not root:
+        raise FileNotFoundError(
+            "BFCL repo path is not configured. Set the BFCL_REPO_PATH environment "
+            "variable to your gorilla checkout (the directory containing "
+            f"{DEFAULT_BFCL_PACKAGE_SUBDIR}/), or set extras.bfcl_repo_path in the "
+            "benchmark YAML."
+        )
     subdir = extras.get("bfcl_package_subdir", DEFAULT_BFCL_PACKAGE_SUBDIR)
     return Path(root).expanduser() / subdir
 

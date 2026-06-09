@@ -6,6 +6,6 @@ selection_n: 200
 selection_seed: 42
 default_prompt_template: default
 extras:
-  # BFCL root comes from BFCL_REPO_PATH (default /home/huanqi/projects/gorilla);
-  # package lives under this subdir. Override bfcl_repo_path if the env is unset.
+  # Set BFCL_REPO_PATH to your gorilla checkout; package lives under this subdir.
+  # Fallback: set bfcl_repo_path here (no machine-specific default).
   bfcl_package_subdir: berkeley-function-call-leaderboard

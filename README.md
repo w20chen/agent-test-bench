@@ -278,6 +278,97 @@ production throughput.
 Terminal-Bench requires Python 3.12+ (upstream `tb` CLI dependency) and only
 supports `--scaffold openclaw` with the Docker runtime in phase 1.
 
+## BFCL via OpenClaw (host-mode)
+
+Four BFCL (Berkeley Function Calling Leaderboard) datasets are wired as
+host-mode benchmarks driven by the OpenClaw scaffold. BFCL runs as a read-only
+external environment: its dataset loader, tool-doc → schema converter, stateful
+backend instantiation, and backend implementations (simulated filesystem,
+booking, web search, vector/kv/rec_sum memory) are reused unmodified; OpenClaw
+issues the LLM calls and runs the multi-turn loop. Each BFCL conversation turn
+is delivered one at a time, so the agent only ever sees the current and past
+turns. Traces, `resources.json`, and `trace_viz.html` come from the standard
+host pipeline — BFCL's own evaluation/scoring is **not** run.
+
+| Slug | BFCL categories | Notes |
+|---|---|---|
+| `bfcl-multi-turn-base` | `multi_turn_base` | stateful file/booking/etc. tools |
+| `bfcl-multi-turn-long-context` | `multi_turn_long_context` | large injected backend state |
+| `bfcl-web-search` | `web_search_base`, `web_search_no_snippet` | needs a web-search API key |
+| `bfcl-memory` | `memory_vector`, `memory_kv`, `memory_rec_sum` | prereq conversations run first |
+
+### Full run on a fresh machine
+
+**1. Get both repos.** Clone this repo and the BFCL (`gorilla`) repo anywhere:
+
+```bash
+git clone <this-repo> agent-test-bench
+git clone https://github.com/ShishirPatil/gorilla.git gorilla
+```
+
+**2. Create the Python env** (uv, Python 3.12) at this repo root:
+
+```bash
+cd agent-test-bench
+uv venv --python 3.12
+uv pip install -e ".[dev]"
+```
+
+**3. Install the BFCL runtime deps** these four datasets need (pins match
+BFCL's `pyproject.toml`):
+
+```bash
+uv pip install \
+  "tree_sitter==0.21.3" "tree-sitter-java==0.21.0" "tree-sitter-javascript==0.21.4" \
+  "faiss-cpu==1.11.0" "sentence-transformers" "rank_bm25" "overrides" \
+  "google-search-results" "html2text" "beautifulsoup4"
+```
+
+**4. Point at the BFCL checkout** (no machine-specific default is baked in):
+
+```bash
+export BFCL_REPO_PATH=/abs/path/to/gorilla   # dir containing berkeley-function-call-leaderboard/
+```
+
+**5. Provide API keys / model assets:**
+
+- LLM provider key for `--provider/--model` (e.g. `DASHSCOPE_API_KEY`,
+  `OPENAI_API_KEY`, `OPENROUTER_API_KEY`).
+- `bfcl-web-search`: a SerpAPI key — `export SERPAPI_API_KEY=...`.
+- `bfcl-memory` (vector): first run downloads `all-MiniLM-L6-v2` from
+  HuggingFace; on a restricted network set `export HF_ENDPOINT=https://hf-mirror.com`.
+- For host memory-bandwidth sampling: `sudo sysctl -w kernel.perf_event_paranoid=-1`
+  (otherwise the bandwidth fields read 0; everything else still works).
+
+**6. Run the full test set** (omit `--sample` for all entries; `--mcp-config none`
+disables MCP). Examples — repeat per slug:
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider <provider> --model <model> \
+    --benchmark bfcl-multi-turn-base \
+    --scaffold openclaw --mcp-config none
+
+PYTHONPATH=src python -m trace_collect.cli --provider <provider> --model <model> \
+    --benchmark bfcl-multi-turn-long-context --scaffold openclaw --mcp-config none
+
+PYTHONPATH=src python -m trace_collect.cli --provider <provider> --model <model> \
+    --benchmark bfcl-web-search --scaffold openclaw --mcp-config none      # SERPAPI_API_KEY
+
+PYTHONPATH=src python -m trace_collect.cli --provider <provider> --model <model> \
+    --benchmark bfcl-memory --scaffold openclaw --mcp-config none          # faiss + ST
+```
+
+Smoke first with `--sample 1` (or `--instance-ids <id>`) before a full run.
+Per-task artifacts (`trace.jsonl`, `resources.json`, `trace_viz.html`) land
+under `traces/<slug>/<safe-model>/<timestamp>/<instance_id>/attempt_1/`.
+
+> Note on `bfcl-memory`: each scenario's prerequisite "memory write"
+> conversations are emitted before its question entries and must run in that
+> order (the plugin preserves load order instead of sorting by id), so memory
+> state is populated before the questions. Sampling a subset may split a
+> scenario — prefer a full run, or select whole scenarios via `--instance-ids`.
+
 ## Resource Monitoring
 
 The harness ships five resource monitors that activate depending on the

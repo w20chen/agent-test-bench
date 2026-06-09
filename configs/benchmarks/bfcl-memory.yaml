@@ -1,14 +1,15 @@
 slug: bfcl-memory
-display_name: "BFCL Memory (vector)"
+display_name: "BFCL Memory (vector/kv/rec_sum)"
 trace_root: traces/bfcl-memory
 default_max_iterations: 30
-selection_n: 1000
+selection_n: 2000
 selection_seed: 42
 default_prompt_template: default
 extras:
-  # BFCL root comes from BFCL_REPO_PATH (default /home/huanqi/projects/gorilla);
-  # package lives under this subdir. Override bfcl_repo_path if the env is unset.
-  # Vector backend only; needs faiss-cpu + sentence-transformers at run time.
+  # Set BFCL_REPO_PATH to your gorilla checkout; package lives under this subdir.
+  # Fallback: set bfcl_repo_path here (no machine-specific default).
+  # Runs all three memory backends (vector/kv/rec_sum); needs faiss-cpu +
+  # sentence-transformers (vector) and rank_bm25 (kv) at run time.
   # selection_n is large so prereq + question chains stay together (prereq
   # entries run first; sampling preserves load order, not id sort).
   bfcl_package_subdir: berkeley-function-call-leaderboard
