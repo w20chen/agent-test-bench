@@ -1,0 +1,12 @@
+slug: bfcl-multi-turn-base
+display_name: "BFCL Multi-Turn Base"
+trace_root: traces/bfcl-multi-turn-base
+default_max_iterations: 30
+selection_n: 200
+selection_seed: 42
+default_prompt_template: default
+extras:
+  # BFCL is an external read-only repo. Root comes from the BFCL_REPO_PATH env
+  # var (default /home/huanqi/projects/gorilla); the package lives under this
+  # subdir. Override bfcl_repo_path here only if the env var is unset.
+  bfcl_package_subdir: berkeley-function-call-leaderboard
