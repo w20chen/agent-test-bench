@@ -407,6 +407,10 @@ def generate_html(attempt_dir: Path) -> str:
         total_llm_ms=f"{summary.get('total_llm_ms', 0):.0f}",
         total_tool_ms=f"{summary.get('total_tool_ms', 0):.0f}",
         tool_breakdown=json.dumps(summary.get("tool_ms_by_name", {}), ensure_ascii=False),
+        tool_colors=json.dumps(
+            {name: _color_for_tool(name) for name in summary.get("tool_ms_by_name", {})},
+            ensure_ascii=False,
+        ),
         resource_summary=json.dumps(resource_summary, ensure_ascii=False),
         resource_count=len(resource_samples),
         gantt_items=gantt_json,
@@ -491,6 +495,7 @@ var GANTT = {gantt_items};
 var GANTT_TOTAL = {gantt_total};
 var RES_DATA = {res_data};
 var TOOL_BREAKDOWN = {tool_breakdown};
+var TOOL_COLORS = {tool_colors};
 var RES_SUMMARY = {resource_summary};
 var RES_COUNT = {resource_count};
 var MEM_BW_REASON = '{mem_bw_reason}';
@@ -798,12 +803,10 @@ Chart.register({{
     // Tool Time Pie
     var toolNames = Object.keys(TOOL_BREAKDOWN);
     if (toolNames.length) {{
-        var toolColors = {{exec:'#e67e22',read_file:'#27ae60',write_file:'#8e44ad',edit_file:'#c0392b',list_dir:'#16a085',web_search:'#2980b9',web_fetch:'#1abc9c',message:'#7f8c8d',spawn:'#d35400'}};
+        // Same per-tool colors as the Gantt (computed in Python via
+        // _color_for_tool), so a tool is the same color in both views.
         var bgColors = toolNames.map(function(n) {{
-            if (toolColors[n]) return toolColors[n];
-            if (n.startsWith('exec-')) return toolColors['exec'];
-            if (n.startsWith('mcp_')) return '#8e44ad';
-            return '#95a5a6';
+            return TOOL_COLORS[n] || '#95a5a6';
         }});
         new Chart(document.getElementById('chart-tool-pie'), {{
             type: 'doughnut',
