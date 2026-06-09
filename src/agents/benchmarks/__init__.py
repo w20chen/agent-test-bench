@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from agents.benchmarks.base import Benchmark, BenchmarkConfig, Runner
 from agents.benchmarks.bfcl_multi_turn_base import BFCLMultiTurnBase
+from agents.benchmarks.bfcl_memory import BFCLMemory
 from agents.benchmarks.bfcl_multi_turn_long_context import BFCLMultiTurnLongContext
 from agents.benchmarks.bfcl_web_search import BFCLWebSearch
 from agents.benchmarks.browsecomp import BrowseCompBenchmark
@@ -26,6 +27,7 @@ __all__ = [
     "get_benchmark_class",
     "Benchmark",
     "BenchmarkConfig",
+    "BFCLMemory",
     "BFCLMultiTurnBase",
     "BFCLMultiTurnLongContext",
     "BFCLWebSearch",
@@ -39,6 +41,7 @@ __all__ = [
 
 #: Maps benchmark slug → concrete :class:`~agents.benchmarks.base.Benchmark` subclass.
 REGISTRY: dict[str, type[Benchmark]] = {
+    "bfcl-memory": BFCLMemory,
     "bfcl-multi-turn-base": BFCLMultiTurnBase,
     "bfcl-multi-turn-long-context": BFCLMultiTurnLongContext,
     "bfcl-web-search": BFCLWebSearch,
