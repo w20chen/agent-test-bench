@@ -602,11 +602,17 @@ async def _run_scaffold_tasks(
                     results[-1].elapsed_s,
                 )
 
-                # Generate per-task HTML visualization.
+                # Generate per-task HTML visualization. Name it
+                # "<benchmark-slug>__<instance_id>.html" so HTMLs from a full
+                # run are uniquely identifiable and collectible into one folder.
                 try:
                     from trace_collect.html_viz import generate_html
 
-                    viz_path = attempt_ctx.attempt_dir / "trace_viz.html"
+                    safe_instance = re.sub(r"[^A-Za-z0-9._-]", "_", instance_id)
+                    viz_path = (
+                        attempt_ctx.attempt_dir
+                        / f"{benchmark.config.slug}__{safe_instance}.html"
+                    )
                     viz_path.write_text(
                         generate_html(attempt_ctx.attempt_dir),
                         encoding="utf-8",

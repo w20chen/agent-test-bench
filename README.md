@@ -287,8 +287,8 @@ backend instantiation, and backend implementations (simulated filesystem,
 booking, web search, vector/kv/rec_sum memory) are reused unmodified; OpenClaw
 issues the LLM calls and runs the multi-turn loop. Each BFCL conversation turn
 is delivered one at a time, so the agent only ever sees the current and past
-turns. Traces, `resources.json`, and `trace_viz.html` come from the standard
-host pipeline — BFCL's own evaluation/scoring is **not** run.
+turns. Traces, `resources.json`, and a per-task HTML report come from the
+standard host pipeline — BFCL's own evaluation/scoring is **not** run.
 
 | Slug | BFCL categories | Notes |
 |---|---|---|
@@ -336,7 +336,9 @@ export BFCL_REPO_PATH=/abs/path/to/gorilla   # dir containing berkeley-function-
   `OPENAI_API_KEY`, `OPENROUTER_API_KEY`).
 - `bfcl-web-search`: a SerpAPI key — `export SERPAPI_API_KEY=...`.
 - `bfcl-memory` (vector): first run downloads `all-MiniLM-L6-v2` from
-  HuggingFace; on a restricted network set `export HF_ENDPOINT=https://hf-mirror.com`.
+  HuggingFace. If a global `HF_ENDPOINT` mirror is set but its model-config API
+  path fails, force the real host for the run with
+  `HF_ENDPOINT=https://huggingface.co` (works through an HTTP/SOCKS proxy).
 - For host memory-bandwidth sampling: `sudo sysctl -w kernel.perf_event_paranoid=-1`
   (otherwise the bandwidth fields read 0; everything else still works).
 
@@ -360,8 +362,12 @@ PYTHONPATH=src python -m trace_collect.cli --provider <provider> --model <model>
 ```
 
 Smoke first with `--sample 1` (or `--instance-ids <id>`) before a full run.
-Per-task artifacts (`trace.jsonl`, `resources.json`, `trace_viz.html`) land
-under `traces/<slug>/<safe-model>/<timestamp>/<instance_id>/attempt_1/`.
+Per-task artifacts land under
+`traces/<slug>/<safe-model>/<timestamp>/<instance_id>/attempt_1/`:
+`trace.jsonl`, `resources.json`, and the HTML report
+`<slug>__<instance_id>.html` (named so a full run's HTMLs are uniquely
+identifiable and collectible into one folder, e.g.
+`find traces -name '<slug>__*.html'`).
 
 > Note on `bfcl-memory`: each scenario's prerequisite "memory write"
 > conversations are emitted before its question entries and must run in that

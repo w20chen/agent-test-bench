@@ -32,6 +32,58 @@ def test_process_stats_sampler_stop_samples_fast_process_attempt() -> None:
     assert "mem_usage" in samples[0]
 
 
+def test_psutil_sampler_context_switches_monotonic_when_child_exits(monkeypatch) -> None:
+    """A child exiting between samples must not lower the summed counter.
+
+    Without per-process high-water marks, the exited child's switches drop out
+    of the sum, making the cumulative non-monotonic and producing negative
+    context-switch rates in the HTML. With high-water marks the counter only
+    grows.
+    """
+    state = {"children": [(2, 1000.0, 5), (3, 1001.0, 7)]}
+
+    class FakeProcess:
+        def __init__(self, pid, create_time, ctx) -> None:
+            self.pid = pid
+            self._ct = create_time
+            self._ctx = ctx
+
+        def children(self, *, recursive: bool):
+            return [FakeProcess(p, ct, cx) for (p, ct, cx) in state["children"]]
+
+        def memory_info(self):
+            return SimpleNamespace(rss=1024 * 1024)
+
+        def cpu_percent(self, *, interval=None):
+            return 1.0
+
+        def io_counters(self):
+            return SimpleNamespace(read_bytes=0, write_bytes=0)
+
+        def num_ctx_switches(self):
+            return SimpleNamespace(voluntary=self._ctx, involuntary=0)
+
+        def create_time(self):
+            return self._ct
+
+    fake_psutil = types.ModuleType("psutil")
+    fake_psutil.Process = lambda pid: FakeProcess(1, 999.0, 10)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    hw: dict = {}
+    s1 = _sample_with_psutil(1, ctx_high_water=hw)
+    assert s1 is not None
+    assert s1["context_switches"] == 22  # root 10 + child 5 + child 7
+
+    # pid 3 exits; remaining child's per-process counter grows 5 -> 6.
+    state["children"] = [(2, 1000.0, 6)]
+    s2 = _sample_with_psutil(1, ctx_high_water=hw)
+    assert s2 is not None
+    # root 10 + child2 6 + retained child3 7 = 23 (does not drop despite exit).
+    assert s2["context_switches"] == 23
+    assert s2["context_switches"] >= s1["context_switches"]
+
+
 def test_psutil_sampler_aggregates_recursive_children(monkeypatch) -> None:
     class FakeProcess:
         def __init__(self, pid: int, rss: int, cpu: float) -> None:
@@ -116,7 +168,7 @@ def test_process_sampler_keeps_psutil_child_io_over_proc_parent(monkeypatch) -> 
     sampler = ProcessStatsSampler(pid=1, interval_s=60.0)
     monkeypatch.setattr(
         "harness.process_stats_sampler._sample_with_psutil",
-        lambda pid, *, process_cache: {
+        lambda pid, *, process_cache, ctx_high_water=None: {
             "epoch": 1.0,
             "timestamp": "ts",
             "mem_usage": "60MiB",
@@ -148,7 +200,7 @@ def test_process_sampler_attaches_host_memory_bandwidth(monkeypatch) -> None:
     sampler = ProcessStatsSampler(pid=1, interval_s=60.0)
     monkeypatch.setattr(
         "harness.process_stats_sampler._sample_with_psutil",
-        lambda pid, *, process_cache: {
+        lambda pid, *, process_cache, ctx_high_water=None: {
             "epoch": 1.0,
             "timestamp": "ts",
             "mem_usage": "60MiB",
