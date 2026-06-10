@@ -155,6 +155,7 @@ def _cache_process(
 def _sample_with_psutil(
     pid: int,
     process_cache: dict[int, Any] | None = None,
+    ctx_high_water: dict[tuple[int, float], int] | None = None,
 ) -> dict[str, Any] | None:
     try:
         import psutil  # type: ignore[import]
@@ -211,7 +212,18 @@ def _sample_with_psutil(
             pass
         try:
             ctxt = proc.num_ctx_switches()
-            context_switches += int(ctxt.voluntary + ctxt.involuntary)
+            proc_ctx = int(ctxt.voluntary + ctxt.involuntary)
+            if ctx_high_water is not None:
+                # Keep each process's last count keyed by (pid, create_time) so
+                # a child exiting between samples does not make the summed
+                # counter drop (which would otherwise yield negative rates).
+                try:
+                    key = (int(proc.pid), float(proc.create_time()))
+                except Exception:
+                    key = (int(getattr(proc, "pid", 0)), 0.0)
+                ctx_high_water[key] = max(ctx_high_water.get(key, 0), proc_ctx)
+            else:
+                context_switches += proc_ctx
             found_context = True
         except Exception:
             pass
@@ -227,6 +239,8 @@ def _sample_with_psutil(
         sample["disk_read_bytes"] = disk_read_bytes
         sample["disk_write_bytes"] = disk_write_bytes
     if found_context:
+        if ctx_high_water is not None:
+            context_switches = sum(ctx_high_water.values())
         sample["context_switches"] = context_switches
     if len(processes) > 1:
         sample["process_count"] = len(processes)
@@ -256,11 +270,15 @@ class ProcessStatsSampler(threading.Thread):
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._psutil_process_cache: dict[int, Any] = {}
+        # Per-(pid, create_time) high-water marks of context switches so the
+        # summed counter stays monotonic even as child processes come and go.
+        self._ctx_high_water: dict[tuple[int, float], int] = {}
 
     def _collect_sample(self) -> dict[str, Any] | None:
         sample = _sample_with_psutil(
             self.pid,
             process_cache=self._psutil_process_cache,
+            ctx_high_water=self._ctx_high_water,
         ) or _sample_with_ps(self.pid)
         if sample is None:
             sample = _fallback_sample()

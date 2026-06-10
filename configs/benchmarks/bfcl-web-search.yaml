@@ -1,0 +1,13 @@
+slug: bfcl-web-search
+display_name: "BFCL Web Search"
+trace_root: traces/bfcl-web-search
+default_max_iterations: 30
+selection_n: 200
+selection_seed: 42
+default_prompt_template: default
+extras:
+  # Set BFCL_REPO_PATH to your gorilla checkout; package lives under this subdir.
+  # Fallback: set bfcl_repo_path here (no machine-specific default).
+  # Loads both web_search_base and web_search_no_snippet from the same file.
+  # Needs a web-search API key at run time (e.g. SERPAPI_API_KEY).
+  bfcl_package_subdir: berkeley-function-call-leaderboard

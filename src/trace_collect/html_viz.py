@@ -10,6 +10,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import colorsys
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,6 +20,36 @@ from typing import Any
 
 
 from trace_collect.exec_classifier import classify_exec_tool_name
+
+# Explicit colors for the built-in OpenClaw/SWE-bench tool surface.
+_BUILTIN_TOOL_COLORS = {
+    "exec": "#e67e22",
+    "read_file": "#27ae60",
+    "write_file": "#8e44ad",
+    "edit_file": "#c0392b",
+    "list_dir": "#16a085",
+    "web_search": "#2980b9",
+    "web_fetch": "#1abc9c",
+    "message": "#7f8c8d",
+    "spawn": "#d35400",
+}
+
+
+def _color_for_tool(tool_name: str) -> str:
+    """Return a stable display color for a tool name in the Gantt chart.
+
+    Built-in tools keep their dedicated colors; any other tool (BFCL backend
+    tools, MCP tools, etc.) gets a deterministic color derived from its name —
+    the hash picks a hue across the full color wheel, so distinct tools are
+    visually distinguishable and a given tool is always the same color.
+    """
+    if tool_name in _BUILTIN_TOOL_COLORS:
+        return _BUILTIN_TOOL_COLORS[tool_name]
+    if tool_name.startswith("exec-"):
+        return _BUILTIN_TOOL_COLORS["exec"]
+    hue = (int(hashlib.md5(tool_name.encode("utf-8")).hexdigest(), 16) % 360) / 360.0
+    r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.6)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -223,23 +255,10 @@ def generate_html(attempt_dir: Path) -> str:
                                 tooltip_extra = f" | {first_kv[0]}={str(first_kv[1])[:60]}"
                 except (json.JSONDecodeError, TypeError, StopIteration):
                     pass
-            # Distinct colors per tool type
-            tool_colors = {
-                "exec": "#e67e22",
-                "read_file": "#27ae60",
-                "write_file": "#8e44ad",
-                "edit_file": "#c0392b",
-                "list_dir": "#16a085",
-                "web_search": "#2980b9",
-                "web_fetch": "#1abc9c",
-                "message": "#7f8c8d",
-                "spawn": "#d35400",
-            }
-            color = tool_colors.get(tool_name)
-            if color is None and tool_name.startswith("exec-"):
-                color = tool_colors["exec"]
-            if color is None:
-                color = "#95a5a6"
+            # Distinct, stable color per tool name (built-in tools keep their
+            # dedicated colors; BFCL/other tools get a deterministic palette
+            # color instead of all sharing one gray).
+            color = _color_for_tool(tool_name)
         else:
             continue
         gantt_items.append({
@@ -388,6 +407,10 @@ def generate_html(attempt_dir: Path) -> str:
         total_llm_ms=f"{summary.get('total_llm_ms', 0):.0f}",
         total_tool_ms=f"{summary.get('total_tool_ms', 0):.0f}",
         tool_breakdown=json.dumps(summary.get("tool_ms_by_name", {}), ensure_ascii=False),
+        tool_colors=json.dumps(
+            {name: _color_for_tool(name) for name in summary.get("tool_ms_by_name", {})},
+            ensure_ascii=False,
+        ),
         resource_summary=json.dumps(resource_summary, ensure_ascii=False),
         resource_count=len(resource_samples),
         gantt_items=gantt_json,
@@ -472,6 +495,7 @@ var GANTT = {gantt_items};
 var GANTT_TOTAL = {gantt_total};
 var RES_DATA = {res_data};
 var TOOL_BREAKDOWN = {tool_breakdown};
+var TOOL_COLORS = {tool_colors};
 var RES_SUMMARY = {resource_summary};
 var RES_COUNT = {resource_count};
 var MEM_BW_REASON = '{mem_bw_reason}';
@@ -779,12 +803,10 @@ Chart.register({{
     // Tool Time Pie
     var toolNames = Object.keys(TOOL_BREAKDOWN);
     if (toolNames.length) {{
-        var toolColors = {{exec:'#e67e22',read_file:'#27ae60',write_file:'#8e44ad',edit_file:'#c0392b',list_dir:'#16a085',web_search:'#2980b9',web_fetch:'#1abc9c',message:'#7f8c8d',spawn:'#d35400'}};
+        // Same per-tool colors as the Gantt (computed in Python via
+        // _color_for_tool), so a tool is the same color in both views.
         var bgColors = toolNames.map(function(n) {{
-            if (toolColors[n]) return toolColors[n];
-            if (n.startsWith('exec-')) return toolColors['exec'];
-            if (n.startsWith('mcp_')) return '#8e44ad';
-            return '#95a5a6';
+            return TOOL_COLORS[n] || '#95a5a6';
         }});
         new Chart(document.getElementById('chart-tool-pie'), {{
             type: 'doughnut',

@@ -1,0 +1,11 @@
+slug: bfcl-multi-turn-long-context
+display_name: "BFCL Multi-Turn Long Context"
+trace_root: traces/bfcl-multi-turn-long-context
+default_max_iterations: 30
+selection_n: 200
+selection_seed: 42
+default_prompt_template: default
+extras:
+  # Set BFCL_REPO_PATH to your gorilla checkout; package lives under this subdir.
+  # Fallback: set bfcl_repo_path here (no machine-specific default).
+  bfcl_package_subdir: berkeley-function-call-leaderboard

@@ -602,11 +602,15 @@ async def _run_scaffold_tasks(
                     results[-1].elapsed_s,
                 )
 
-                # Generate per-task HTML visualization.
+                # Generate per-task HTML visualization. The filename is chosen
+                # by the benchmark plugin (default "trace_viz.html"); plugins may
+                # embed identifying info so a full run's HTMLs are collectible.
                 try:
                     from trace_collect.html_viz import generate_html
 
-                    viz_path = attempt_ctx.attempt_dir / "trace_viz.html"
+                    viz_path = attempt_ctx.attempt_dir / benchmark.viz_filename(
+                        instance_id
+                    )
                     viz_path.write_text(
                         generate_html(attempt_ctx.attempt_dir),
                         encoding="utf-8",
