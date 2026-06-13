@@ -123,6 +123,7 @@ class TraceCollectorHook(AgentHook):
         data: dict[str, Any],
         *,
         iteration: int = 0,
+        ts: float | None = None,
     ) -> None:
         entry = EvalTraceEvent(
             agent_id=self.agent_id,
@@ -131,7 +132,7 @@ class TraceCollectorHook(AgentHook):
             event=event,
             category=category,
             data=data,
-            ts=time.time(),
+            ts=ts if ts is not None else time.time(),
             iteration=iteration,
         )
         self.add_record(entry.to_dict())
@@ -228,6 +229,7 @@ class TraceCollectorHook(AgentHook):
             "llm_call_end",
             llm_event_data,
             iteration=context.iteration,
+            ts=llm_ts_end,
         )
         llm_action = TraceAction(
             action_type="llm_call",
@@ -305,25 +307,9 @@ class TraceCollectorHook(AgentHook):
                     )
 
                 is_mcp = tool_name.startswith("mcp_")
-                self.emit_event(
-                    MCP if is_mcp else TOOL,
-                    "tool_exec_end",
-                    {
-                        "tool_name": tool_name,
-                        "success": tool_ok,
-                        "duration_ms": round(duration_ms, 1),
-                        "result_preview": tool_content[:200],
-                    },
-                    iteration=context.iteration,
-                )
-                if tool_name == "spawn":
-                    self.emit_event(
-                        SUBAGENT,
-                        "subagent_complete",
-                        {"task_preview": tool_content[:200]},
-                        iteration=context.iteration,
-                    )
 
+                # Compute tool wall-clock timing before emitting events so
+                # events carry the correct ts (not the time after_iteration runs).
                 per_tool_start_mono = tool_start_mono_by_id.get(tc_id)
                 if per_tool_start_mono is not None and duration_ms > 0:
                     # Convert monotonic start time to approximate epoch so
@@ -341,6 +327,28 @@ class TraceCollectorHook(AgentHook):
                         if duration_ms
                         else tool_ts_end
                     )
+
+                self.emit_event(
+                    MCP if is_mcp else TOOL,
+                    "tool_exec_end",
+                    {
+                        "tool_name": tool_name,
+                        "success": tool_ok,
+                        "duration_ms": round(duration_ms, 1),
+                        "result_preview": tool_content[:200],
+                    },
+                    iteration=context.iteration,
+                    ts=tool_ts_end,
+                )
+                if tool_name == "spawn":
+                    self.emit_event(
+                        SUBAGENT,
+                        "subagent_complete",
+                        {"task_preview": tool_content[:200]},
+                        iteration=context.iteration,
+                        ts=tool_ts_end,
+                    )
+
                 action_id_suffix = tc_id if tc_id else tool_name
                 tool_action = TraceAction(
                     action_type="tool_exec",
@@ -784,6 +792,7 @@ class SessionRunner:
         session_manager = SessionManager(workspace)
 
         all_hooks: list[AgentHook] = [trace_hook, *self.extra_hooks]
+        subagent_trace_dir = trace_file.parent / "subagents"
         agent = AgentLoop(
             bus=bus,
             provider=self.provider,
@@ -799,6 +808,7 @@ class SessionRunner:
             session_manager=session_manager,
             hooks=all_hooks,
             malformed_retry_budget=self.malformed_retry_budget,
+            subagent_trace_dir=subagent_trace_dir,
         )
 
         inject_event_callbacks(agent, trace_hook)

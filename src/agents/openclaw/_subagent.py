@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.openclaw._hook import AgentHook, AgentHookContext
+from agents.openclaw._hook import AgentHook, AgentHookContext, CompositeHook
 from agents.openclaw._runner import AgentRunSpec, AgentRunner
 from agents.openclaw._skills import BUILTIN_SKILLS_DIR
 from agents.openclaw.tools.filesystem import (
@@ -48,6 +48,7 @@ class SubagentManager:
         workspace: Path,
         bus: MessageBus,
         max_tool_result_chars: int,
+        trace_dir: Path | None = None,
         model: str | None = None,
         web_search_config: "WebSearchConfig | None" = None,
         web_proxy: str | None = None,
@@ -65,9 +66,11 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.malformed_retry_budget = malformed_retry_budget
+        self.trace_dir = trace_dir
         self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._active_trace_hooks: dict[str, Any] = {}
 
     async def spawn(
         self,
@@ -99,6 +102,40 @@ class SubagentManager:
 
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+
+    def _build_subagent_hook(self, task_id: str) -> AgentHook:
+        """Build the hook chain for a subagent, including trace collection."""
+        hooks: list[AgentHook] = [_SubagentHook(task_id)]
+        if self.trace_dir is not None:
+            from agents.openclaw._session_runner import TraceCollectorHook  # lazy — avoid circular import
+
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_file = self.trace_dir / f"{task_id}.jsonl"
+            trace_hook = TraceCollectorHook(
+                trace_file,
+                task_id,
+                agent_id=f"subagent-{task_id}",
+                task_id=task_id,
+            )
+            trace_hook.add_record({
+                "type": "trace_metadata",
+                "scaffold": "openclaw",
+                "trace_format_version": 5,
+                "mode": "collect",
+                "instance_id": task_id,
+                "agent_id": f"subagent-{task_id}",
+                "scaffold_capabilities": {
+                    "tools": ["read_file", "write_file", "edit_file", "list_dir",
+                              "exec", "web_search", "web_fetch"],
+                    "memory": False,
+                    "skills": False,
+                    "file_ops": "structured",
+                },
+            })
+            # Stash for summary writing after the run completes.
+            self._active_trace_hooks[task_id] = trace_hook
+            hooks.append(trace_hook)
+        return CompositeHook(hooks)
 
     async def _run_subagent(
         self,
@@ -156,14 +193,16 @@ class SubagentManager:
                 model=self.model,
                 max_iterations=15,
                 max_tool_result_chars=self.max_tool_result_chars,
-                hook=_SubagentHook(task_id),
+                hook=self._build_subagent_hook(task_id),
                 max_iterations_message="Task completed but no final response was generated.",
                 error_message=None,
                 fail_on_tool_error=True,
+                concurrent_tools=True,
             )
             run_kwargs["malformed_retry_budget"] = self.malformed_retry_budget
             result = await self.runner.run(AgentRunSpec(**run_kwargs))
             if result.stop_reason == "tool_error":
+                await self._write_subagent_trace_summary(task_id, False)
                 await self._announce_result(
                     task_id,
                     label,
@@ -174,6 +213,7 @@ class SubagentManager:
                 )
                 return
             if result.stop_reason == "error":
+                await self._write_subagent_trace_summary(task_id, False)
                 await self._announce_result(
                     task_id,
                     label,
@@ -189,16 +229,43 @@ class SubagentManager:
             )
 
             logger.info("Subagent [{}] completed successfully", task_id)
+            await self._write_subagent_trace_summary(task_id, True)
             await self._announce_result(
                 task_id, label, task, final_result, origin, "ok"
             )
 
+        except asyncio.CancelledError:
+            logger.warning("Subagent [{}] cancelled", task_id)
+            await self._write_subagent_trace_summary(task_id, False)
+            try:
+                await self._announce_result(
+                    task_id,
+                    label,
+                    task,
+                    "Subagent was cancelled before completion.",
+                    origin,
+                    "error",
+                )
+            except Exception:
+                logger.debug(
+                    "Subagent [{}] could not announce cancellation (loop shutting down)",
+                    task_id,
+                )
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
+            await self._write_subagent_trace_summary(task_id, False)
             await self._announce_result(
                 task_id, label, task, error_msg, origin, "error"
             )
+
+    async def _write_subagent_trace_summary(
+        self, task_id: str, success: bool
+    ) -> None:
+        """Write the trace summary for a completed subagent."""
+        trace_hook = self._active_trace_hooks.pop(task_id, None)
+        if trace_hook is not None:
+            await trace_hook.write_summary(success=success, elapsed_s=0.0)
 
     async def _announce_result(
         self,

@@ -174,6 +174,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        subagent_trace_dir: Path | None = None,
     ):
         from agents.openclaw.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -237,6 +238,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             malformed_retry_budget=self.malformed_retry_budget,
+            trace_dir=subagent_trace_dir,
         )
 
         self._running = False
@@ -367,8 +369,15 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        skip_extra_hooks: bool = False,
     ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop."""
+        """Run the agent iteration loop.
+
+        When *skip_extra_hooks* is True, ``self._extra_hooks`` (including the
+        trace-collector hook) are NOT attached to this invocation.  This is
+        used for system-channel messages (e.g. subagent result delivery) so
+        that a concurrently-running main loop's trace state is not corrupted.
+        """
         loop_hook = _LoopHook(
             self,
             on_progress=on_progress,
@@ -378,9 +387,10 @@ class AgentLoop:
             chat_id=chat_id,
             message_id=message_id,
         )
+        extra = self._extra_hooks if not skip_extra_hooks else []
         hook: AgentHook = (
-            _LoopHookChain(loop_hook, self._extra_hooks)
-            if self._extra_hooks
+            _LoopHookChain(loop_hook, extra)
+            if extra
             else loop_hook
         )
 
@@ -637,6 +647,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
+                skip_extra_hooks=(msg.sender_id == "subagent"),
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             self._clear_runtime_checkpoint(session)
@@ -652,6 +663,11 @@ class AgentLoop:
             self._schedule_background(
                 self.memory_consolidator.maybe_consolidate_by_tokens(session)
             )
+            # Subagent result processing must NOT publish an outbound
+            # message — the ResultCollector would treat it as the final
+            # eval result and prematurely terminate the main agent loop.
+            if msg.sender_id == "subagent":
+                return None
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,

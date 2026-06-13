@@ -142,6 +142,16 @@ def generate_html(attempt_dir: Path) -> str:
     resources = _load_json(resources_path)
     manifest = _load_json(manifest_path)
 
+    # ── Load subagent traces ─────────────────────────────────────
+    subagents_dir = attempt_dir / "subagents"
+    if subagents_dir.is_dir():
+        for sub_trace_path in sorted(subagents_dir.glob("*.jsonl")):
+            sub_records = _load_jsonl(sub_trace_path)
+            # Tag subagent records so the Gantt chart can distinguish lanes.
+            for rec in sub_records:
+                rec["_subagent"] = True
+            records.extend(sub_records)
+
     # ── Classify exec tool names in-memory ─────────────────────────
     # Post-process actions and rebuild summary so Gantt bars, pie
     # chart, and stats all reflect exec-grep / exec-find / etc.
@@ -216,6 +226,22 @@ def generate_html(attempt_dir: Path) -> str:
             break
 
     # ── Build Gantt data ──────────────────────────────────────────
+    # Sort actions: group by agent (main agent first, then each
+    # subagent), then by ts_start within each group.  This keeps
+    # each agent's actions together in the vertical layout while
+    # preserving chronological order inside each lane.
+    def _sort_key(a: dict[str, Any]) -> tuple[int, str, float]:
+        is_sub = a.get("_subagent", False)
+        agent_id = str(a.get("agent_id", ""))
+        ts_start = a.get("ts_start", float("inf"))
+        if not isinstance(ts_start, (int, float)) or ts_start <= 0:
+            ts_start = float("inf")
+        # Main agent (is_sub=False) → group 0; subagents → group 1.
+        # Within the same group, sort by agent_id then ts_start.
+        return (1 if is_sub else 0, agent_id, float(ts_start))
+
+    actions.sort(key=_sort_key)
+
     gantt_items: list[dict[str, Any]] = []
     for a in actions:
         ts_s = a.get("ts_start", 0)
@@ -224,16 +250,21 @@ def generate_html(attempt_dir: Path) -> str:
             continue
         atype = a.get("action_type", "?")
         iteration = a.get("iteration", 0)
+        is_sub = a.get("_subagent", False)
+        agent_id = a.get("agent_id", "")
         label = ""
         color = ""
         tooltip_extra = ""
         if atype == "llm_call":
-            label = f"LLM #{iteration}"
+            prefix = f"[{agent_id}] " if is_sub else ""
+            label = f"{prefix}LLM #{iteration}"
             color = "#4a90d9"
         elif atype == "tool_exec":
             tdata = a.get("data") or {}
             tool_name = tdata.get("tool_name", "?")
-            label = f"{tool_name} #{iteration}"
+            # Prefix subagent actions so they're visually distinct.
+            prefix = f"[{agent_id}] " if is_sub else ""
+            label = f"{prefix}{tool_name} #{iteration}"
             # Extract a short preview of tool arguments for the tooltip.
             tooltip_extra = ""
             tool_args_raw = tdata.get("tool_args", "")

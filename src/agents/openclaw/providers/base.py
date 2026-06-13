@@ -169,6 +169,14 @@ class LLMProvider(ABC):
         sanitized = []
         for msg in messages:
             clean = {k: v for k, v in msg.items() if k in allowed_keys}
+            # Strip empty-string reasoning_content — some providers (DeepSeek)
+            # reject "reasoning_content": "" but accept the key being absent.
+            if (
+                "reasoning_content" in clean
+                and isinstance(clean["reasoning_content"], str)
+                and not clean["reasoning_content"]
+            ):
+                del clean["reasoning_content"]
             if clean.get("role") == "assistant" and "content" not in clean:
                 clean["content"] = None
             sanitized.append(clean)
