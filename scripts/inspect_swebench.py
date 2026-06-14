@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -293,6 +294,106 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
         print(f"    {k}: {v}")
 
 
+def _parse_test_node_id(test_name: str) -> tuple[str | None, str]:
+    """Parse a pytest node ID into (file_path, test_spec).
+
+    Examples:
+        "test_func (module.path.ClassName)" -> ("tests/module/path.py", "ClassName.test_func")
+        "test_func"                           -> (None, "test_func")
+        "Plain description text"              -> (None, "Plain description text")
+    """
+    # Match pytest verbose format: "test_name (module.path.ClassName)"
+    m = re.match(r'^(.+?)\s+\((.+?)\)\s*$', test_name)
+    if m:
+        test_spec = m.group(1).strip()
+        module_path = m.group(2).strip()
+        # module_path like "auth_tests.test_validators.UsernameValidatorsTests"
+        # The file is in tests/<module_path with . -> />.py, strip last segment if it's a class
+        parts = module_path.split(".")
+        # Remove the class name (last segment) to get the module file path
+        file_module = ".".join(parts[:-1]) if parts[-1][0].isupper() else module_path
+        file_path = "tests/" + file_module.replace(".", "/") + ".py"
+        # If the class part was the module, re-check
+        return (file_path, f"{parts[-1]}.{test_spec}" if parts[-1][0].isupper() else test_spec)
+    # Try simpler format: "module.path.test_func" (no class in parens)
+    m2 = re.match(r'^([\w.]+)\.(\w+)$', test_name)
+    if m2:
+        module_path = m2.group(1)
+        test_spec = m2.group(2)
+        file_path = "tests/" + module_path.replace(".", "/") + ".py"
+        return (file_path, test_spec)
+    return (None, test_name)
+
+
+def _collect_test_files(task: dict[str, Any]) -> dict[str, list[str]]:
+    """Parse FAIL_TO_PASS and return {file_path: [test_spec, ...]}."""
+    ftp = task.get("FAIL_TO_PASS", [])
+    if isinstance(ftp, str):
+        try:
+            ftp = json.loads(ftp)
+        except (json.JSONDecodeError, TypeError):
+            ftp = []
+
+    files: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    for test_name in ftp:
+        file_path, test_spec = _parse_test_node_id(str(test_name))
+        if file_path:
+            files.setdefault(file_path, []).append(test_spec)
+        else:
+            unknown.append(test_spec)
+    if unknown:
+        files["(unmapped — plain descriptions)"] = unknown
+    return files
+
+
+def cmd_tests(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    """Show test files involved in FAIL_TO_PASS."""
+    task = find_task(tasks, args.instance_id)
+    if not task:
+        print(f"[!] Task not found: {args.instance_id}")
+        sys.exit(1)
+
+    test_files = _collect_test_files(task)
+
+    if args.file:
+        # Show a specific test file from the container
+        image = get_image_name(task)
+        if not docker_image_exists(image):
+            print(f"[!] Image {image} not found locally. Please pull first.")
+            sys.exit(1)
+        target = args.file if args.file.startswith("/") else f"/testbed/{args.file}"
+        print(f"[tests] {target}:")
+        print("-" * 60)
+
+        def do_cat(cid: str, fp: str) -> None:
+            try:
+                out = docker_exec(cid, "cat", fp)
+                print(out)
+            except subprocess.CalledProcessError as e:
+                print(f"[!] Error: {e.stderr}")
+
+        with_testbed_container(image, do_cat, target)
+        print("-" * 60)
+        return
+
+    # Summary mode
+    total_tests = sum(len(v) for v in test_files.values())
+    print(f"FAIL_TO_PASS: {total_tests} tests across {len(test_files)} files")
+    print()
+    for file_path, tests in sorted(test_files.items()):
+        print(f"  {file_path}  ({len(tests)} tests)")
+        for t in tests[:8]:
+            print(f"      - {t}")
+        if len(tests) > 8:
+            print(f"      ... and {len(tests) - 8} more")
+        print()
+
+    print("---")
+    print("To view a specific test file:")
+    print(f"  python scripts/inspect_swebench.py -b {task.get('_benchmark', 'swe-bench-verified')} tests {task.get('instance_id', 'ID')} -f tests/auth_tests/test_validators.py")
+
+
 def cmd_pull(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     """Pull Docker image."""
     task = find_task(tasks, args.instance_id)
@@ -481,6 +582,11 @@ def main() -> None:
     p_diff = sub.add_parser("diff", help="Show git diff")
     p_diff.add_argument("instance_id", help="Task instance_id")
 
+    # tests
+    p_tests = sub.add_parser("tests", help="Show FAIL_TO_PASS test files grouped by source file")
+    p_tests.add_argument("instance_id", help="Task instance_id")
+    p_tests.add_argument("-f", "--file", type=str, default=None, help="View a specific test file (e.g. tests/auth_tests/test_validators.py)")
+
     # shell
     p_shell = sub.add_parser("shell", help="Enter interactive bash shell")
     p_shell.add_argument("instance_id", help="Task instance_id")
@@ -502,6 +608,7 @@ def main() -> None:
     command_map = {
         "list": cmd_list,
         "info": cmd_info,
+        "tests": cmd_tests,
         "pull": cmd_pull,
         "ls": cmd_ls,
         "cat": cmd_cat,

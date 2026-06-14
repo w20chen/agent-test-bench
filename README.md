@@ -85,6 +85,12 @@ python scripts/inspect_swebench.py --benchmark swe-bench-verified cat django__dj
 # View git diff (base_commit to current state)
 python scripts/inspect_swebench.py --benchmark swe-bench-verified diff django__django-10097
 
+# Show FAIL_TO_PASS tests grouped by source file (understand what needs fixing)
+python scripts/inspect_swebench.py --benchmark swe-bench-verified tests django__django-10097
+
+# View a specific test file
+python scripts/inspect_swebench.py --benchmark swe-bench-verified tests django__django-10097 -f tests/auth_tests/test_validators.py
+
 # Export the entire /testbed to a local directory
 python scripts/inspect_swebench.py --benchmark swe-bench-verified export django__django-10097 /testbed ./export_django/
 
@@ -144,6 +150,16 @@ python scripts/inspect_swebench.py -b swe-bench-verified export astropy__astropy
 ```bash
 python scripts/inspect_swebench.py -b swe-bench-verified pull django__django-10097
 python scripts/inspect_swebench.py -b swe-bench-verified diff django__django-10097
+```
+
+**Workflow 4: Understand what tests need to pass (FAIL_TO_PASS)**
+
+```bash
+# See which test files are involved and how many tests per file
+python scripts/inspect_swebench.py -b swe-bench-verified tests django__django-10097
+
+# Then view a specific test file
+python scripts/inspect_swebench.py -b swe-bench-verified tests django__django-10097 -f tests/auth_tests/test_validators.py
 ```
 
 ## Trace Collect
