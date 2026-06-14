@@ -245,9 +245,7 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     # 问题描述
     problem = task.get("problem_statement", task.get("problem", ""))
     print(f"  [问题描述 / Problem Statement]")
-    print(textwrap.indent(problem[:2000] if problem else "(无)", "    "))
-    if len(problem) > 2000:
-        print(f"    ... (截断，共 {len(problem)} 字符)")
+    print(textwrap.indent(problem if problem else "(无)", "    "))
 
     # 测试
     ftp = task.get("FAIL_TO_PASS", [])
@@ -265,16 +263,12 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
 
     print(f"  {('-'*56)}")
     print(f"  FAIL_TO_PASS ({len(ftp)} tests):")
-    for t in ftp[:20]:
+    for t in ftp:
         print(f"    - {t}")
-    if len(ftp) > 20:
-        print(f"    ... 共 {len(ftp)} 个")
 
     print(f"  PASS_TO_PASS ({len(ptp)} tests):")
-    for t in ptp[:10]:
+    for t in ptp:
         print(f"    - {t}")
-    if len(ptp) > 10:
-        print(f"    ... 共 {len(ptp)} 个")
 
     # 测试命令
     test_cmd = task.get("test_cmd", "")
@@ -286,7 +280,7 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     if task.get("_benchmark") == "swe-rebench":
         install_cfg = task.get("install_config")
         if install_cfg:
-            print(f"  install_config: {json.dumps(install_cfg, indent=4, default=str)[:500]}")
+            print(f"  install_config: {json.dumps(install_cfg, indent=4, default=str)}")
 
     # 其他所有字段
     print(f"  {('-'*56)}")
@@ -297,10 +291,7 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     for k, v in task.items():
         if k in skip_keys or k.startswith("_"):
             continue
-        v_str = str(v)
-        if len(v_str) > 200:
-            v_str = v_str[:200] + "..."
-        print(f"    {k}: {v_str}")
+        print(f"    {k}: {v}")
 
 
 def cmd_pull(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
