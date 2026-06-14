@@ -465,25 +465,56 @@ def cmd_export(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
 
 
 def cmd_diff(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """Show git diff of /testbed inside the container."""
+    """Show the gold fix patch (diff) that would resolve the task.
+
+    By default, displays the ``patch`` and ``test_patch`` fields from the
+    dataset — these are the ground-truth diffs that an agent is expected to
+    reproduce.  Use ``--container`` to instead compute a live git diff inside
+    the container (useful after you've made manual edits in a shell session).
+    """
     task = find_task(tasks, args.instance_id)
     if not task:
         print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
-    image = get_image_name(task)
-    base = task.get("base_commit", "HEAD~1")
 
-    def do_diff(cid: str, base_commit: str) -> None:
-        print(f"[diff] base_commit = {base_commit}")
-        print("-" * 60)
-        try:
-            out = docker_exec(cid, "sh", "-c", f"cd /testbed && git diff --stat {base_commit}")
-            print(out)
-        except subprocess.CalledProcessError as e:
-            print(f"[!] git diff failed: {e.stderr}")
-        print("-" * 60)
+    if args.container:
+        # Live git diff inside the container
+        image = get_image_name(task)
+        base = task.get("base_commit", "HEAD~1")
 
-    with_testbed_container(image, do_diff, base)
+        def do_diff(cid: str, base_commit: str) -> None:
+            print(f"[diff] base_commit = {base_commit}")
+            print("-" * 60)
+            try:
+                out = docker_exec(cid, "sh", "-c", f"cd /testbed && git diff --stat {base_commit}")
+                print(out if out else "(no uncommitted changes)")
+            except subprocess.CalledProcessError as e:
+                print(f"[!] git diff failed: {e.stderr}")
+            print("-" * 60)
+
+        with_testbed_container(image, do_diff, base)
+        return
+
+    # Default: show the gold patch from the dataset
+    patch = task.get("patch", "")
+    test_patch = task.get("test_patch", "")
+
+    if patch:
+        print(f"[Gold Fix Patch]  ({len(patch)} chars)")
+        print("=" * 60)
+        print(patch)
+    else:
+        print("[Gold Fix Patch]  (none — this task may not have a code patch)")
+
+    if test_patch:
+        print()
+        print(f"[Test Patch]  ({len(test_patch)} chars)")
+        print("=" * 60)
+        print(test_patch)
+
+    if not patch and not test_patch:
+        print()
+        print("Tip: use --container to run a live git diff inside the container instead.")
 
 
 def cmd_shell(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
@@ -579,8 +610,9 @@ def main() -> None:
     p_export.add_argument("dst", help="Local destination path")
 
     # diff
-    p_diff = sub.add_parser("diff", help="Show git diff")
+    p_diff = sub.add_parser("diff", help="Show gold fix patch (use --container for live git diff)")
     p_diff.add_argument("instance_id", help="Task instance_id")
+    p_diff.add_argument("--container", action="store_true", help="Run live git diff inside the container instead")
 
     # tests
     p_tests = sub.add_parser("tests", help="Show FAIL_TO_PASS test files grouped by source file")

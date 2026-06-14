@@ -82,8 +82,11 @@ python scripts/inspect_swebench.py --benchmark swe-bench-verified ls django__dja
 # View a specific file inside the container
 python scripts/inspect_swebench.py --benchmark swe-bench-verified cat django__django-10097 /testbed/setup.py
 
-# View git diff (base_commit to current state)
+# View the gold fix patch (what the agent is expected to produce)
 python scripts/inspect_swebench.py --benchmark swe-bench-verified diff django__django-10097
+
+# Live git diff inside the container (after making manual edits in a shell)
+python scripts/inspect_swebench.py --benchmark swe-bench-verified diff django__django-10097 --container
 
 # Show FAIL_TO_PASS tests grouped by source file (understand what needs fixing)
 python scripts/inspect_swebench.py --benchmark swe-bench-verified tests django__django-10097
@@ -145,10 +148,10 @@ python scripts/inspect_swebench.py -b swe-bench-verified export astropy__astropy
 # Then open ./case_astropy_12907/ in your local IDE
 ```
 
-**Workflow 3: Inspect the git diff to understand the bug fix**
+**Workflow 3: See the gold fix patch (the expected solution)**
 
 ```bash
-python scripts/inspect_swebench.py -b swe-bench-verified pull django__django-10097
+# Shows both the code patch and the test patch from the dataset
 python scripts/inspect_swebench.py -b swe-bench-verified diff django__django-10097
 ```
 
