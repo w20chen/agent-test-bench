@@ -44,6 +44,107 @@ make test    # run pytest
 make lint    # ruff
 ```
 
+## SWE-bench Case 检查 (无需 Agent / 直接审阅 Case)
+
+`scripts/inspect_swebench.py` 是一个**独立脚本**，用于快速查看 SWE-bench
+Verified 和 SWE-rebench 的具体测试用例。无需接入 Agent 系统，只需要
+Docker + HuggingFace datasets。
+
+**适合场景：** 审阅者想看 benchmark 里的 case 长什么样、代码仓库结构、
+问题描述、测试内容。
+
+### 环境准备
+
+```bash
+pip install datasets docker
+export HF_ENDPOINT=https://hf-mirror.com
+```
+
+### 使用示例
+
+```bash
+# 列出 SWE-bench Verified 的前 20 个任务
+python scripts/inspect_swebench.py --benchmark swe-bench-verified list
+
+# 按关键词搜索
+python scripts/inspect_swebench.py --benchmark swe-bench-verified list -k django
+
+# 查看某个任务的全部信息（问题描述、测试命令、镜像名）
+python scripts/inspect_swebench.py --benchmark swe-bench-verified info django__django-10097
+
+# 拉取该任务的 Docker 镜像（约 2GB，可能需要几分钟）
+python scripts/inspect_swebench.py --benchmark swe-bench-verified pull django__django-10097
+
+# 查看容器内 /testbed 的文件结构
+python scripts/inspect_swebench.py --benchmark swe-bench-verified ls django__django-10097
+
+# 查看容器内的某个文件
+python scripts/inspect_swebench.py --benchmark swe-bench-verified cat django__django-10097 /testbed/setup.py
+
+# 查看 git diff（base_commit 到当前状态的改动）
+python scripts/inspect_swebench.py --benchmark swe-bench-verified diff django__django-10097
+
+# 将整个 /testbed 导出到本地目录
+python scripts/inspect_swebench.py --benchmark swe-bench-verified export django__django-10097 /testbed ./export_django/
+
+# 进入容器的交互式 bash shell（最灵活的方式）
+python scripts/inspect_swebench.py --benchmark swe-bench-verified shell django__django-10097
+```
+
+### SWE-rebench 同样适用
+
+```bash
+# SWE-rebench
+python scripts/inspect_swebench.py --benchmark swe-rebench list
+python scripts/inspect_swebench.py --benchmark swe-rebench info 12rambau__sepal_ui-411
+python scripts/inspect_swebench.py --benchmark swe-rebench pull 12rambau__sepal_ui-411
+python scripts/inspect_swebench.py --benchmark swe-rebench shell 12rambau__sepal_ui-411
+```
+
+### 使用本地缓存加速
+
+如果已经用 `make download-swebench-verified` 下载过数据，可使用本地
+`tasks.json` 缓存，跳过 HuggingFace 下载：
+
+```bash
+python scripts/inspect_swebench.py \
+    --benchmark swe-bench-verified \
+    --cache-file data/swebench_verified/tasks.json \
+    list
+```
+
+### 常用场景
+
+**场景 1：快速看几个 case 是什么样子**
+
+```bash
+# 1. 列几个任务看看
+python scripts/inspect_swebench.py -b swe-bench-verified list -n 5
+
+# 2. 挑一个感兴趣的看详情
+python scripts/inspect_swebench.py -b swe-bench-verified info sympy__sympy-12481
+
+# 3. 拉镜像 + 进 shell 看代码
+python scripts/inspect_swebench.py -b swe-bench-verified pull sympy__sympy-12481
+python scripts/inspect_swebench.py -b swe-bench-verified shell sympy__sympy-12481
+# 在容器内: ls /testbed, cat /testbed/setup.py, git log, 等等
+```
+
+**场景 2：导出所有文件做离线分析**
+
+```bash
+python scripts/inspect_swebench.py -b swe-bench-verified pull astropy__astropy-12907
+python scripts/inspect_swebench.py -b swe-bench-verified export astropy__astropy-12907 /testbed ./case_astropy_12907/
+# 然后可以用本地 IDE 打开 ./case_astropy_12907/ 查看
+```
+
+**场景 3：看 bug 的 git diff 理解具体改了什么**
+
+```bash
+python scripts/inspect_swebench.py -b swe-bench-verified pull django__django-10097
+python scripts/inspect_swebench.py -b swe-bench-verified diff django__django-10097
+```
+
 ## Trace Collect
 
 Run an agent scaffold on a benchmark and record a canonical v5 JSONL trace per
@@ -71,6 +172,17 @@ Key flags: `--benchmark <slug>` (default `swe-bench-verified`),
 
 See `src/trace_collect/CLAUDE.md` for the complete flag reference, provider
 registry, checkpointing behaviour, and trace schema v5 layout.
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-v4-flash \
+    --benchmark deep-research-bench \
+    --scaffold openclaw \
+    --sample 1 \
+    --mcp-config none \
+    --verbose
+```
 
 ## Quick Test
 
