@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-SWE-bench 实例检查工具 (Inspection Tool)
-=========================================
+SWE-bench Inspection Tool
+==========================
 
-一个**独立脚本**，用于查看 SWE-bench Verified 和 SWE-rebench 的具体 case，
-无需接入 Agent 系统。适合给审阅者快速了解 benchmark 内容。
+A **standalone script** for inspecting SWE-bench Verified and SWE-rebench
+test cases. No agent system integration needed. Ideal for reviewers who want
+to quickly understand benchmark content.
 
-功能:
-  list              列出所有可用任务 (instance_id + 简述)
-  info <id>         查看某个任务的完整信息 (问题描述、测试命令、镜像名等)
-  pull <id>         拉取 Docker 镜像 (可能需要较长时间)
-  ls <id> [path]    列出容器 /testbed 目录下的文件
-  cat <id> <path>   查看容器内的某个文件
-  export <id> <src> <dst>  从容器中导出文件/目录到本地
-  diff <id>         查看容器 /testbed 的 git diff (相对于 base_commit)
-  shell <id>        进入容器的交互式 bash shell
+Commands:
+  list              List all available tasks (instance_id + summary)
+  info <id>         View full task details (problem statement, test command, image name, etc.)
+  pull <id>         Pull the Docker image (may take a while)
+  ls <id> [path]    List files under /testbed in the container
+  cat <id> <path>   View a file inside the container
+  export <id> <src> <dst>  Export files/directories from container to local
+  diff <id>         Show git diff of /testbed (relative to base_commit)
+  shell <id>        Enter an interactive bash shell in the container
 
-用法:
-  # 激活环境后直接运行
+Usage:
   conda activate ML
   python scripts/inspect_swebench.py --benchmark swe-bench-verified list
   python scripts/inspect_swebench.py --benchmark swe-bench-verified info sympy__sympy-12345
@@ -26,7 +26,7 @@ SWE-bench 实例检查工具 (Inspection Tool)
   python scripts/inspect_swebench.py --benchmark swe-rebench list
   python scripts/inspect_swebench.py --benchmark swe-rebench pull <instance_id>
 
-依赖:
+Dependencies:
   pip install datasets docker
 """
 
@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Docker / Podman 辅助函数
+# Docker / Podman helpers
 # ---------------------------------------------------------------------------
 
 CONTAINER_EXEC = os.environ.get("CONTAINER_EXEC", "docker")
@@ -67,10 +67,10 @@ def _run_capture(*args: str, timeout: int | None = None) -> str:
 
 
 def docker_pull(image: str) -> None:
-    """Pull a Docker image, with retries."""
-    print(f"[pull] 正在拉取 {image} ...")
+    """Pull a Docker image."""
+    print(f"[pull] Pulling {image} ...")
     _run(CONTAINER_EXEC, "pull", image, timeout=3600)
-    print(f"[pull] 完成: {image}")
+    print(f"[pull] Done: {image}")
 
 
 def docker_image_exists(image: str) -> bool:
@@ -105,7 +105,7 @@ def docker_cp(container_id: str, src: str, dst: str) -> None:
 def with_testbed_container(image: str, action: callable, *args: Any) -> Any:
     """Start a temp container from `image`, run `action(container_id, *args)`, clean up."""
     if not docker_image_exists(image):
-        print(f"[!] 镜像 {image} 不存在，请先 pull。")
+        print(f"[!] Image {image} not found locally. Please pull first.")
         sys.exit(1)
     cid = docker_run_detached(image)
     try:
@@ -115,10 +115,10 @@ def with_testbed_container(image: str, action: callable, *args: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# 数据集加载
+# Dataset loading
 # ---------------------------------------------------------------------------
 
-# 对于 datasets>=3.0 的向后兼容
+# Backward compatibility for datasets>=3.0
 try:
     import datasets.features.features as _ff
     from datasets.features.features import LargeList, _FEATURE_TYPES
@@ -143,7 +143,7 @@ BENCHMARK_CONFIGS = {
 
 
 def load_tasks(benchmark: str) -> list[dict[str, Any]]:
-    """从 HuggingFace 加载数据集并返回任务列表。"""
+    """Load dataset from HuggingFace and return the task list."""
     from datasets import load_dataset
 
     cfg = BENCHMARK_CONFIGS[benchmark]
@@ -151,7 +151,6 @@ def load_tasks(benchmark: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     for row in ds:
         task = dict(row)
-        # 添加派生字段
         task["_benchmark"] = benchmark
         tasks.append(task)
     return tasks
@@ -161,25 +160,25 @@ def find_task(tasks: list[dict[str, Any]], instance_id: str) -> dict[str, Any] |
     for t in tasks:
         if t.get("instance_id") == instance_id:
             return t
-    # 模糊匹配
+    # Fuzzy match
     matches = [t for t in tasks if instance_id in t.get("instance_id", "")]
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        print(f"[!] 多个匹配: {[m['instance_id'] for m in matches]}")
+        print(f"[!] Multiple matches: {[m['instance_id'] for m in matches]}")
         return None
     return None
 
 
 def get_image_name(task: dict[str, Any]) -> str:
-    """获取任务的 Docker 镜像名称。"""
+    """Get the Docker image name for a task."""
     benchmark = task.get("_benchmark", "")
-    # SWE-rebench 有明确的 docker_image 字段
+    # SWE-rebench has an explicit docker_image field
     if benchmark == "swe-rebench":
         img = task.get("docker_image") or task.get("image_name")
         if img:
             return str(img)
-    # SWE-bench Verified: 从 instance_id 推导
+    # SWE-bench Verified: derive from instance_id
     img = task.get("image_name") or task.get("docker_image")
     if img:
         return str(img)
@@ -189,11 +188,11 @@ def get_image_name(task: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 命令实现
+# Command implementations
 # ---------------------------------------------------------------------------
 
 def cmd_list(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """列出所有任务。"""
+    """List all tasks."""
     n = args.n or len(tasks)
     keyword = args.keyword or ""
 
@@ -222,16 +221,16 @@ def cmd_list(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
 
     total = len(tasks)
     if keyword:
-        print(f"--- 匹配 {shown} / {total} 个任务 (关键词: '{keyword}') ---")
+        print(f"--- Matched {shown} / {total} tasks (keyword: '{keyword}') ---")
     else:
-        print(f"--- 显示前 {shown} / {total} 个任务 ---")
+        print(f"--- Showing first {shown} / {total} tasks ---")
 
 
 def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """显示单个任务的详细信息。"""
+    """Show detailed information for a single task."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到任务: {args.instance_id}")
+        print(f"[!] Task not found: {args.instance_id}")
         sys.exit(1)
 
     iid = task.get("instance_id", "?")
@@ -242,12 +241,12 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     print(f"  image_name:      {get_image_name(task)}")
     print(f"  {('-'*56)}")
 
-    # 问题描述
+    # Problem statement
     problem = task.get("problem_statement", task.get("problem", ""))
-    print(f"  [问题描述 / Problem Statement]")
-    print(textwrap.indent(problem if problem else "(无)", "    "))
+    print(f"  [Problem Statement]")
+    print(textwrap.indent(problem if problem else "(none)", "    "))
 
-    # 测试
+    # Tests
     ftp = task.get("FAIL_TO_PASS", [])
     if isinstance(ftp, str):
         try:
@@ -270,21 +269,21 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     for t in ptp:
         print(f"    - {t}")
 
-    # 测试命令
+    # Test command
     test_cmd = task.get("test_cmd", "")
     if test_cmd:
         print(f"  [Generated Test Command]")
         print(f"    {test_cmd}")
 
-    # SWE-rebench 特有字段
+    # SWE-rebench specific fields
     if task.get("_benchmark") == "swe-rebench":
         install_cfg = task.get("install_config")
         if install_cfg:
             print(f"  install_config: {json.dumps(install_cfg, indent=4, default=str)}")
 
-    # 其他所有字段
+    # All other fields
     print(f"  {('-'*56)}")
-    print(f"  [所有字段]")
+    print(f"  [All Fields]")
     skip_keys = {"problem_statement", "problem", "FAIL_TO_PASS", "PASS_TO_PASS",
                  "test_cmd", "image_name", "docker_image", "install_config",
                  "instance_id", "repo", "base_commit", "_benchmark"}
@@ -295,40 +294,40 @@ def cmd_info(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
 
 
 def cmd_pull(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """拉取 Docker 镜像。"""
+    """Pull Docker image."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
     docker_pull(image)
 
 
 def cmd_ls(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """列出容器 /testbed 的文件。"""
+    """List files in container /testbed."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
     path = args.path or "/testbed"
 
     def do_ls(cid: str, p: str) -> None:
-        print(f"[ls] /testbed 下的文件 (容器: {cid[:12]}):")
+        print(f"[ls] Files under /testbed (container: {cid[:12]}):")
         try:
             out = docker_exec(cid, "ls", "-lah", p)
             print(out)
         except subprocess.CalledProcessError as e:
-            print(f"[!] 错误: {e.stderr}")
+            print(f"[!] Error: {e.stderr}")
 
     with_testbed_container(image, do_ls, path)
 
 
 def cmd_cat(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """查看容器内文件。"""
+    """View a file inside the container."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
 
@@ -339,17 +338,17 @@ def cmd_cat(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
             out = docker_exec(cid, "cat", filepath)
             print(out)
         except subprocess.CalledProcessError as e:
-            print(f"[!] 错误: {e.stderr}")
+            print(f"[!] Error: {e.stderr}")
         print("-" * 60)
 
     with_testbed_container(image, do_cat, args.path)
 
 
 def cmd_export(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """从容器导出文件/目录。"""
+    """Export files/directories from container."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
 
@@ -359,16 +358,16 @@ def cmd_export(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
     def do_export(cid: str, src: str, dst_path: str) -> None:
         print(f"[export] {src} -> {dst_path}")
         docker_cp(cid, src, dst_path)
-        print(f"[export] 完成")
+        print(f"[export] Done")
 
     with_testbed_container(image, do_export, args.src, str(dst.absolute()))
 
 
 def cmd_diff(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """显示容器内 /testbed 的 git diff。"""
+    """Show git diff of /testbed inside the container."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
     base = task.get("base_commit", "HEAD~1")
@@ -380,27 +379,26 @@ def cmd_diff(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
             out = docker_exec(cid, "sh", "-c", f"cd /testbed && git diff --stat {base_commit}")
             print(out)
         except subprocess.CalledProcessError as e:
-            print(f"[!] git diff 失败: {e.stderr}")
+            print(f"[!] git diff failed: {e.stderr}")
         print("-" * 60)
 
     with_testbed_container(image, do_diff, base)
 
 
 def cmd_shell(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    """进入容器交互式 shell。"""
+    """Enter an interactive shell in the container."""
     task = find_task(tasks, args.instance_id)
     if not task:
-        print(f"[!] 未找到: {args.instance_id}")
+        print(f"[!] Not found: {args.instance_id}")
         sys.exit(1)
     image = get_image_name(task)
 
     if not docker_image_exists(image):
-        print(f"[!] 镜像 {image} 不存在，请先 pull。")
+        print(f"[!] Image {image} not found locally. Please pull first.")
         sys.exit(1)
 
-    print(f"[shell] 正在启动容器并进入 /testbed ...")
-    print(f"  退出: 输入 exit 或 Ctrl+D")
-    # 直接 exec，继承终端
+    print(f"[shell] Starting container and entering /testbed ...")
+    print(f"  Exit: type exit or press Ctrl+D")
     os.execvp(CONTAINER_EXEC, [
         CONTAINER_EXEC, "run", "--rm", "-it",
         "-w", "/testbed",
@@ -410,15 +408,15 @@ def cmd_shell(tasks: list[dict[str, Any]], args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# Main entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SWE-bench 实例检查工具 — 查看/浏览 SWE-bench 任务，无需 Agent 系统",
+        description="SWE-bench Inspection Tool — browse SWE-bench tasks without an agent system",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
-        示例:
+        Examples:
           %(prog)s --benchmark swe-bench-verified list
           %(prog)s --benchmark swe-bench-verified list -k django
           %(prog)s --benchmark swe-bench-verified info sympy__sympy-12345
@@ -439,68 +437,68 @@ def main() -> None:
         "--benchmark", "-b",
         choices=["swe-bench-verified", "swe-rebench"],
         default="swe-bench-verified",
-        help="选择 benchmark (默认: swe-bench-verified)",
+        help="Select benchmark (default: swe-bench-verified)",
     )
     parser.add_argument(
         "--cache-file", "-c",
         type=Path,
         default=None,
-        help="使用本地 JSON 缓存而非每次从 HF 下载 (如 data/swebench_verified/tasks.json)",
+        help="Use local JSON cache instead of downloading from HF each time (e.g. data/swebench_verified/tasks.json)",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     # list
-    p_list = sub.add_parser("list", help="列出所有任务")
-    p_list.add_argument("-n", type=int, default=20, help="显示前 N 个 (默认 20)")
-    p_list.add_argument("-k", "--keyword", type=str, default="", help="按关键词过滤")
+    p_list = sub.add_parser("list", help="List all tasks")
+    p_list.add_argument("-n", type=int, default=20, help="Show first N (default 20)")
+    p_list.add_argument("-k", "--keyword", type=str, default="", help="Filter by keyword")
 
     # info
-    p_info = sub.add_parser("info", help="查看任务详细信息")
-    p_info.add_argument("instance_id", help="任务 instance_id")
+    p_info = sub.add_parser("info", help="Show task details")
+    p_info.add_argument("instance_id", help="Task instance_id")
 
     # pull
-    p_pull = sub.add_parser("pull", help="拉取 Docker 镜像")
-    p_pull.add_argument("instance_id", help="任务 instance_id")
+    p_pull = sub.add_parser("pull", help="Pull Docker image")
+    p_pull.add_argument("instance_id", help="Task instance_id")
 
     # ls
-    p_ls = sub.add_parser("ls", help="列出容器内文件")
-    p_ls.add_argument("instance_id", help="任务 instance_id")
-    p_ls.add_argument("path", nargs="?", default="/testbed", help="路径 (默认 /testbed)")
+    p_ls = sub.add_parser("ls", help="List files in container")
+    p_ls.add_argument("instance_id", help="Task instance_id")
+    p_ls.add_argument("path", nargs="?", default="/testbed", help="Path (default /testbed)")
 
     # cat
-    p_cat = sub.add_parser("cat", help="查看容器内文件")
-    p_cat.add_argument("instance_id", help="任务 instance_id")
-    p_cat.add_argument("path", help="文件路径 (如 /testbed/setup.py)")
+    p_cat = sub.add_parser("cat", help="View file in container")
+    p_cat.add_argument("instance_id", help="Task instance_id")
+    p_cat.add_argument("path", help="File path (e.g. /testbed/setup.py)")
 
     # export
-    p_export = sub.add_parser("export", help="从容器导出文件/目录")
-    p_export.add_argument("instance_id", help="任务 instance_id")
-    p_export.add_argument("src", help="容器内路径 (如 /testbed)")
-    p_export.add_argument("dst", help="本地目标路径")
+    p_export = sub.add_parser("export", help="Export files/dirs from container")
+    p_export.add_argument("instance_id", help="Task instance_id")
+    p_export.add_argument("src", help="Container path (e.g. /testbed)")
+    p_export.add_argument("dst", help="Local destination path")
 
     # diff
-    p_diff = sub.add_parser("diff", help="查看 git diff")
-    p_diff.add_argument("instance_id", help="任务 instance_id")
+    p_diff = sub.add_parser("diff", help="Show git diff")
+    p_diff.add_argument("instance_id", help="Task instance_id")
 
     # shell
-    p_shell = sub.add_parser("shell", help="进入容器交互式 bash")
-    p_shell.add_argument("instance_id", help="任务 instance_id")
+    p_shell = sub.add_parser("shell", help="Enter interactive bash shell")
+    p_shell.add_argument("instance_id", help="Task instance_id")
 
     args = parser.parse_args()
 
-    # 加载任务
+    # Load tasks
     if args.cache_file and args.cache_file.exists():
-        print(f"[load] 从缓存加载: {args.cache_file}")
+        print(f"[load] Loading from cache: {args.cache_file}")
         tasks = json.loads(args.cache_file.read_text(encoding="utf-8"))
         for t in tasks:
             t["_benchmark"] = args.benchmark
     else:
-        print(f"[load] 从 HuggingFace 加载 {BENCHMARK_CONFIGS[args.benchmark]['desc']} ...")
+        print(f"[load] Loading {BENCHMARK_CONFIGS[args.benchmark]['desc']} from HuggingFace ...")
         tasks = load_tasks(args.benchmark)
-        print(f"[load] 加载了 {len(tasks)} 个任务")
+        print(f"[load] Loaded {len(tasks)} tasks")
 
-    # 执行命令
+    # Dispatch command
     command_map = {
         "list": cmd_list,
         "info": cmd_info,
