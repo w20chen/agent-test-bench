@@ -1,4 +1,4 @@
-# Agent Bench
+# Agent Sched Bench
 
 Benchmark environment for studying agent scheduling and KV-cache management on
 multi-step LLM workloads. The repo ships three top-level capabilities:
@@ -43,6 +43,18 @@ make help    # list all targets
 make test    # run pytest
 make lint    # ruff
 ```
+
+## Using the Repo: Three Entry Points
+
+This repo supports three progressively deeper ways to interact with benchmarks.
+The sections below walk through each:
+
+- **Inspect cases** — browse benchmark tasks without running an agent (next section).
+- **Run an agent interactively** — send a one-shot prompt to the OpenClaw agent
+  via CLI (see [Quick Test](#quick-test)).
+- **Run a full benchmark** — execute the agent on many tasks with container
+  orchestration, trace collection, and result aggregation (see
+  [Trace Collect](#trace-collect) onwards).
 
 ## SWE-bench Case Inspection (No Agent Required / Review Cases Directly)
 
@@ -165,6 +177,10 @@ python scripts/inspect_swebench.py -b swe-bench-verified tests django__django-10
 python scripts/inspect_swebench.py -b swe-bench-verified tests django__django-10097 -f tests/auth_tests/test_validators.py
 ```
 
+The inspection script is read-only — it helps you understand what a benchmark
+case looks like. The next section covers actually running an agent to solve
+these cases.
+
 ## Trace Collect
 
 Run an agent scaffold on a benchmark and record a canonical v5 JSONL trace per
@@ -206,9 +222,28 @@ PYTHONPATH=src python -m trace_collect.cli \
     --verbose
 ```
 
+The commands above cover the general pattern. The next section is a concrete,
+step-by-step walkthrough for running SWE-rebench end-to-end on an ARM server,
+including environment setup, image preparation, execution, and troubleshooting.
+
+In addition to the benchmark runner, the repo also ships a **standalone
+OpenClaw CLI** for sending one-shot prompts without the benchmark harness:
+
+```bash
+PYTHONPATH=src python -m agents.openclaw \
+    --prompt "Write a Python script to download web page and parse title" \
+    --provider deepseek \
+    --model deepseek-chat \
+    --workspace ./workspace
+```
+
+This is the quickest way to test that your LLM provider is wired correctly
+before running a full benchmark.  Use `--async` for background runs and
+`--status --session-id <id>` to check progress (see `openclaw --help`).
+
 ## Quick Test
 
-End-to-end walkthrough for running a single SWE-rebench task.
+End-to-end walkthrough for running a single SWE-rebench task on an ARM server.
 
 Prerequisites: ARM server + DeepSeek API + Docker
 
@@ -450,6 +485,16 @@ only sampled attention rows inside hooks. It forces
 `NANOBOT_MAX_CONCURRENT_REQUESTS=1` and is intended for data collection, not
 production throughput.
 
+## Supported Benchmarks
+
+The repo ships with plugin-based benchmark support. Each benchmark is defined
+by a YAML config in `configs/benchmarks/` and a Python plugin in
+`src/agents/benchmarks/`. The table below lists all registered benchmarks,
+their task shape, data source, runtime environment, and supported scaffolds.
+
+To add a new benchmark, follow the plugin architecture: create a YAML config
+and a Python class inheriting from `agents.benchmarks.base.Benchmark`.
+
 ### Registered Benchmarks
 
 | Slug | `task_shape` | Dataset | Split | Docker | Scaffolds | Scoring |
@@ -462,6 +507,11 @@ production throughput.
 
 Terminal-Bench requires Python 3.12+ (upstream `tb` CLI dependency) and only
 supports `--scaffold openclaw` with the Docker runtime in phase 1.
+
+In addition to the SWE-style and QA benchmarks above, the repo also integrates
+with the **BFCL (Berkeley Function Calling Leaderboard)** datasets as host-mode
+benchmarks. Unlike SWE-bench tasks which run inside Docker containers, BFCL
+runs directly on the host using OpenClaw's multi-turn loop.
 
 ## BFCL via OpenClaw (host-mode)
 
