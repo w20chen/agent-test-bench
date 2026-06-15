@@ -844,7 +844,7 @@ Chart.register({{
                 scales: {{
                     y:{{ type:'linear', position:'left',
                         title:{{display:true,text:'Hit / Miss Rate'}},
-                        min:0, max:1,
+                        min:0,
                         ticks:{{ callback: function(v) {{ return (v*100).toFixed(0) + '%'; }} }}
                     }},
                     y1:{{ type:'linear', position:'right',
