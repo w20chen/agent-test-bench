@@ -516,6 +516,16 @@ PYTHONPATH=src python -m trace_collect.cli \
     --verbose
 ```
 
+Deep research bench ships two prompt templates under
+`configs/prompts/deep_research_bench/`:
+
+| Template | Behaviour |
+|----------|-----------|
+| `default` | Agent uses the `spawn` tool to launch 2–4 parallel subagents that decompose and research independent facets, then synthesises their findings. |
+| `no_spawn` | Pure single-agent mode — no subagent spawning. The agent searches, reads, and answers on its own. |
+
+Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
+
 The commands above cover the general pattern. The next section is a concrete,
 step-by-step walkthrough for running SWE-rebench end-to-end on an ARM server,
 including environment setup, image preparation, execution, and troubleshooting.
