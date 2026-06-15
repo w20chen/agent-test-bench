@@ -286,7 +286,7 @@ class TraceCollectorHook(AgentHook):
                     tc_id and tc_id.startswith("malformed_retry_")
                 ):
                     continue
-                tool_start_mono = self._tool_start_ts.pop(tc_id, None)
+                tool_start_mono = self._tool_start_ts.get(tc_id)
                 # Prefer per-tool wall timing captured inside _execute_tools,
                 # which records each tool's actual completion time even when
                 # tools run concurrently. Fall back to iteration-level
@@ -350,6 +350,20 @@ class TraceCollectorHook(AgentHook):
                     )
 
                 action_id_suffix = tc_id if tc_id else tool_name
+                tool_action_data: dict[str, Any] = {
+                    "tool_name": tool_name,
+                    "tool_call_id": tc_id,
+                    "tool_args": tool_args_by_id.get(tc_id, ""),
+                    "tool_result": tool_content,
+                    "duration_ms": round(duration_ms, 1),
+                    "success": tool_ok,
+                }
+                # Preserve monotonic wall-time for audit (clock-source
+                # independent, immune to NTP / leap-second adjustments).
+                if per_tool_start_mono is not None:
+                    tool_action_data["start_mono"] = per_tool_start_mono
+                if per_tool_timing is not None:
+                    tool_action_data["wall_ms"] = per_tool_timing
                 tool_action = TraceAction(
                     action_type="tool_exec",
                     action_id=f"tool_{context.iteration}_{action_id_suffix}",
@@ -359,14 +373,7 @@ class TraceCollectorHook(AgentHook):
                     iteration=context.iteration,
                     ts_start=tool_ts_start,
                     ts_end=tool_ts_end,
-                    data={
-                        "tool_name": tool_name,
-                        "tool_call_id": tc_id,
-                        "tool_args": tool_args_by_id.get(tc_id, ""),
-                        "tool_result": tool_content,
-                        "duration_ms": round(duration_ms, 1),
-                        "success": tool_ok,
-                    },
+                    data=tool_action_data,
                 )
                 self._write_action(tool_action)
 

@@ -28,7 +28,7 @@ class MemoryBandwidthReading:
 
 @dataclass(frozen=True, slots=True)
 class PerfEventBackend:
-    kind: Literal["intel_imc_cas", "explicit_byte_events"]
+    kind: Literal["intel_imc_cas", "explicit_byte_events", "arm_ddrc"]
     source: str
     read_specs: tuple[str, ...]
     write_specs: tuple[str, ...]
@@ -119,8 +119,66 @@ def _detect_explicit_byte_backend(
     )
 
 
+def _detect_arm_ddrc_backend(
+    root: Path = EVENT_SOURCE_ROOT,
+) -> PerfEventBackend | None:
+    """Detect ARM DDRC PMU using raw event codes — LAST RESORT only.
+
+    Raw event codes for Hisilicon / ARM DDRC are speculative and have NOT
+    been validated on physical hardware.  This backend is only used when
+    neither Intel IMC nor any explicit-byte-event PMU is available.
+
+    The named-event path (``read_bytes`` / ``write_bytes`` in the
+    ``events/`` directory) is handled by ``_detect_explicit_byte_backend``,
+    which runs BEFORE this function.
+    """
+    ddrc_patterns = ("hisi_ddrc*", "arm_ddrc*")
+    read_specs: list[str] = []
+    write_specs: list[str] = []
+
+    for pattern in ddrc_patterns:
+        devices = sorted(root.glob(pattern)) if root.exists() else []
+        for device in devices:
+            aliases = _event_aliases(device)
+            if aliases:
+                # Device HAS named events — skip here;
+                # _detect_explicit_byte_backend already handled it.
+                continue
+            # Raw event code fallback (speculative — see docstring)
+            if device.name.startswith("hisi_ddrc"):
+                # flux_rcmd (0x02): read commands, flux_wcmd (0x03): write commands
+                # Each command is assumed to transfer 64 bytes (one cache line).
+                # WARNING: event encodings NOT validated on hardware.
+                read_specs.append(f"{device.name}/event=0x02/")
+                write_specs.append(f"{device.name}/event=0x03/")
+            elif device.name.startswith("arm_ddrc"):
+                # event=0x00: read, event=0x01: write (speculative)
+                read_specs.append(f"{device.name}/event=0x00/")
+                write_specs.append(f"{device.name}/event=0x01/")
+        if read_specs and write_specs:
+            break
+
+    if not read_specs or not write_specs:
+        return None
+    logger.warning(
+        "Using speculative ARM DDRC raw event codes for memory bandwidth. "
+        "Values may be inaccurate — validate on target hardware."
+    )
+    return PerfEventBackend(
+        kind="arm_ddrc",
+        source="perf:arm-ddrc-raw",
+        read_specs=tuple(read_specs),
+        write_specs=tuple(write_specs),
+        bytes_per_count=INTEL_CAS_BYTES,
+    )
+
+
 def detect_perf_backend(root: Path = EVENT_SOURCE_ROOT) -> PerfEventBackend | None:
-    return _detect_intel_imc_backend(root) or _detect_explicit_byte_backend(root)
+    return (
+        _detect_intel_imc_backend(root)
+        or _detect_explicit_byte_backend(root)   # catches ARM DDRC with named events
+        or _detect_arm_ddrc_backend(root)         # speculative raw codes, last resort
+    )
 
 
 def _parse_perf_count(raw: str) -> float | None:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.memory_bandwidth import attach_host_memory_bandwidth
+from harness.micro_arch import attach_micro_arch
 
 
 def _now_sample() -> dict[str, Any]:
@@ -293,6 +294,11 @@ def _fallback_sample() -> dict[str, Any]:
 class ProcessStatsSampler(threading.Thread):
     """Sample host-process stats with the ContainerStatsSampler-like interface."""
 
+    # Consolidate per-process high-water marks every N samples to bound
+    # dict growth on long-running agents that spawn many short-lived
+    # children (prevents slow memory creep).
+    _HW_CONSOLIDATE_EVERY = 200
+
     def __init__(self, pid: int | None = None, *, interval_s: float = 1.0) -> None:
         target_pid = os.getpid() if pid is None else pid
         super().__init__(daemon=True, name=f"proc-stats-{target_pid}")
@@ -300,6 +306,7 @@ class ProcessStatsSampler(threading.Thread):
         self.interval_s = interval_s
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
+        self._sample_count: int = 0
         self._psutil_process_cache: dict[int, Any] = {}
         # Per-(pid, create_time) high-water marks of context switches so the
         # summed counter stays monotonic even as child processes come and go.
@@ -307,8 +314,33 @@ class ProcessStatsSampler(threading.Thread):
         # Per-(pid, create_time) high-water marks of disk I/O (read_bytes,
         # write_bytes) for the same reason.
         self._io_high_water: dict[tuple[int, float], tuple[int, int]] = {}
+        # Consolidated totals absorbed from previous high-water windows.
+        self._consolidated_ctx: int = 0
+        self._consolidated_io_read: int = 0
+        self._consolidated_io_write: int = 0
+
+    def _maybe_consolidate_hw(self) -> None:
+        """Periodically fold per-process high-water marks into running totals.
+
+        Without consolidation the ``_ctx_high_water`` and ``_io_high_water``
+        dicts grow without bound on agents that spawn many short-lived
+        children.  Folding preserves the cumulative counter while keeping
+        the working set small.
+        """
+        self._sample_count += 1
+        if self._sample_count % self._HW_CONSOLIDATE_EVERY != 0:
+            return
+        if self._ctx_high_water:
+            self._consolidated_ctx += sum(self._ctx_high_water.values())
+            self._ctx_high_water.clear()
+        if self._io_high_water:
+            for _rb, _wb in self._io_high_water.values():
+                self._consolidated_io_read += _rb
+                self._consolidated_io_write += _wb
+            self._io_high_water.clear()
 
     def _collect_sample(self) -> dict[str, Any] | None:
+        self._maybe_consolidate_hw()
         sample = _sample_with_psutil(
             self.pid,
             process_cache=self._psutil_process_cache,
@@ -317,6 +349,16 @@ class ProcessStatsSampler(threading.Thread):
         ) or _sample_with_ps(self.pid)
         if sample is None:
             sample = _fallback_sample()
+        # Add consolidated high-water totals so exited-process
+        # contributions are preserved across consolidation windows.
+        if self._consolidated_ctx:
+            prev = sample.get("context_switches", 0)
+            sample["context_switches"] = prev + self._consolidated_ctx
+        if self._consolidated_io_read or self._consolidated_io_write:
+            prev_r = sample.get("disk_read_bytes", 0)
+            prev_w = sample.get("disk_write_bytes", 0)
+            sample["disk_read_bytes"] = prev_r + self._consolidated_io_read
+            sample["disk_write_bytes"] = prev_w + self._consolidated_io_write
         # Only fall back to /proc/<pid>/io (root PID only, no children)
         # when psutil did not already provide process-tree I/O counters.
         if "disk_read_bytes" not in sample:
@@ -332,6 +374,7 @@ class ProcessStatsSampler(threading.Thread):
             sample["net_rx_bytes"] = net["net_rx_bytes"]
             sample["net_tx_bytes"] = net["net_tx_bytes"]
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
+        attach_micro_arch(sample, interval_s=self.interval_s)
         return sample
 
     def run(self) -> None:

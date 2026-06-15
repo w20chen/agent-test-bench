@@ -323,6 +323,13 @@ def generate_html(attempt_dir: Path) -> str:
         "mem_bw_total": [],
         "mem_bw_read": [],
         "mem_bw_write": [],
+        # Micro-architecture PMU metrics
+        "l1d_hit": [],
+        "l1i_hit": [],
+        "branch_miss": [],
+        "ipc": [],
+        "instr_per_s": [],
+        "bus_access": [],
     }
     prev_dr: float = 0.0
     prev_dw: float = 0.0
@@ -399,6 +406,19 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["mem_bw_total"].append(_safe_float(s.get("memory_total_mb_s", 0)))
         res_data["mem_bw_read"].append(_safe_float(s.get("memory_read_mb_s", 0)))
         res_data["mem_bw_write"].append(_safe_float(s.get("memory_write_mb_s", 0)))
+        # Micro-architecture PMU metrics (may be sparse - alternating groups)
+        # Use None (→ null in JSON) when the metric is truly absent, so
+        # Chart.js spanGaps can skip those points instead of flattening to 0.
+        _l1d = s.get("l1d_hit_rate")
+        res_data["l1d_hit"].append(_l1d if _l1d is not None else None)
+        _l1i = s.get("l1i_hit_rate")
+        res_data["l1i_hit"].append(_l1i if _l1i is not None else None)
+        _bmr = s.get("branch_miss_rate")
+        res_data["branch_miss"].append(_bmr if _bmr is not None else None)
+        _ipc = s.get("ipc")
+        res_data["ipc"].append(_ipc if _ipc is not None else None)
+        res_data["instr_per_s"].append(_safe_float(s.get("instructions_per_s", 0)))
+        res_data["bus_access"].append(_safe_float(s.get("bus_access_per_s", 0)))
 
     # ── Unified time span (covers both Gantt and resource data) ────
     res_max_ts = max(res_data["timestamps"]) if res_data["timestamps"] else 0.0
@@ -412,6 +432,22 @@ def generate_html(attempt_dir: Path) -> str:
             reason = s.get("memory_bandwidth_reason", "")
             if reason:
                 mem_bw_reason = reason
+                break
+
+    # ── Micro-architecture availability ────────────────────────────
+    micro_arch_available = any(s.get("micro_arch_available") for s in resource_samples)
+    micro_arch_source = ""
+    micro_arch_reason = ""
+    for s in resource_samples:
+        src = s.get("micro_arch_source", "")
+        if src:
+            micro_arch_source = src
+            break
+    if not micro_arch_available:
+        for s in resource_samples:
+            reason = s.get("micro_arch_reason", "")
+            if reason:
+                micro_arch_reason = reason
                 break
 
     # ── Serialize data as JSON for JavaScript ─────────────────────
@@ -448,6 +484,9 @@ def generate_html(attempt_dir: Path) -> str:
         gantt_total=unified_total,
         res_data=res_json,
         mem_bw_reason=_esc(mem_bw_reason),
+        micro_arch_available="true" if micro_arch_available else "false",
+        micro_arch_source=_esc(micro_arch_source),
+        micro_arch_reason=_esc(micro_arch_reason),
         ts_start=_ts_to_str(t0) if t0 else "N/A",
         ts_end=_ts_to_str(t0 + unified_total) if t0 else "N/A",
     )
@@ -530,6 +569,9 @@ var TOOL_COLORS = {tool_colors};
 var RES_SUMMARY = {resource_summary};
 var RES_COUNT = {resource_count};
 var MEM_BW_REASON = '{mem_bw_reason}';
+var MICRO_ARCH_AVAILABLE = {micro_arch_available};
+var MICRO_ARCH_SOURCE = '{micro_arch_source}';
+var MICRO_ARCH_REASON = '{micro_arch_reason}';
 
 // ── Gantt Chart ───────────────────────────────────────────────────
 (function() {{
@@ -714,6 +756,7 @@ Chart.register({{
         parent.innerHTML =
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🖥 CPU & Memory</h3><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🧠 Memory Bandwidth (host)</h3><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔬 Micro-Architecture (PMU)</h3><div style="height:280px"><canvas id="chart-micro-arch"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (rate)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O (rate)</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches (rate)</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
@@ -748,7 +791,7 @@ Chart.register({{
             document.getElementById('chart-mem-bw').parentNode.innerHTML =
                 '<p style="color:#c0392b;font-size:12px;padding:20px 0;text-align:center">'
                 + '⚠ Memory bandwidth unavailable: <code>' + MEM_BW_REASON + '</code>'
-                + '<br><span style="color:#888">(requires Intel IMC PMU: check <code>ls /sys/bus/event_source/devices/ | grep uncore</code>)</span></p>';
+                + '<br><span style="color:#888">(requires Intel IMC, ARM DDRC, or generic PMU: check <code>ls /sys/bus/event_source/devices/ | grep -E "uncore_imc|ddrc"</code>)</span></p>';
         }} else {{
         new Chart(document.getElementById('chart-mem-bw'), {{
             type: 'line',
@@ -770,6 +813,63 @@ Chart.register({{
             }}
         }});
         }}  // end else (mem_bw available)
+
+        // ── Micro-Architecture (PMU) ──────────────────────────
+        if (!MICRO_ARCH_AVAILABLE) {{
+            var maReason = MICRO_ARCH_REASON || 'PMU not detected or permission denied';
+            var maHint = MICRO_ARCH_SOURCE
+                ? ('Platform: <code>' + MICRO_ARCH_SOURCE + '</code> &mdash; ')
+                : '';
+            document.getElementById('chart-micro-arch').parentNode.innerHTML =
+                '<p style="color:#c0392b;font-size:12px;padding:20px 0;text-align:center">'
+                + '⚠ Micro-architecture unavailable: <code>' + maReason + '</code>'
+                + '<br><span style="color:#888">' + maHint
+                + '(requires ARMv8 / x86 core PMU: check <code>ls /sys/bus/event_source/devices/ | grep -E "armv8|cpu"</code>'
+                + ' and <code>sudo sysctl -w kernel.perf_event_paranoid=-1</code>)</span></p>';
+        }} else {{
+        new Chart(document.getElementById('chart-micro-arch'), {{
+            type: 'line',
+            data: {{
+                labels: RES_DATA.timestamps.map(function(t) {{ return t.toFixed(1); }}),
+                datasets: [
+                    {{ label:'L1D Hit Rate', data:RES_DATA.l1d_hit, borderColor:'#27ae60', tension:0, yAxisID:'y', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle', spanGaps:true }},
+                    {{ label:'L1I Hit Rate', data:RES_DATA.l1i_hit, borderColor:'#2ecc71', tension:0, yAxisID:'y', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle', borderDash:[4,2], spanGaps:true }},
+                    {{ label:'Branch Miss Rate', data:RES_DATA.branch_miss, borderColor:'#e74c3c', tension:0, yAxisID:'y', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle', spanGaps:true }},
+                    {{ label:'IPC', data:RES_DATA.ipc, borderColor:'#8e44ad', tension:0, yAxisID:'y1', borderWidth:1.5, pointBackgroundColor:'#fff', pointRadius:1.5, pointHoverRadius:6, pointHitRadius:10, pointStyle:'circle', borderDash:[4,2], spanGaps:true }}
+                ]
+            }},
+            options: {{
+                responsive:true, maintainAspectRatio:false,
+                interaction:{{mode:'index',intersect:false}},
+                scales: {{
+                    y:{{ type:'linear', position:'left',
+                        title:{{display:true,text:'Rate (0-1)'}},
+                        min:0, max:1,
+                        ticks:{{ callback: function(v) {{ return (v*100).toFixed(0) + '%'; }} }}
+                    }},
+                    y1:{{ type:'linear', position:'right',
+                        title:{{display:true,text:'Rate / IPC'}},
+                        min:0, grid:{{drawOnChartArea:false}},
+                        ticks:{{ callback: function(v) {{ return v.toFixed(2); }} }}
+                    }},
+                    x:{{ type:'linear', title:{{display:true,text:'Time (s)'}}, min:0, max:GANTT_TOTAL }}
+                }},
+                plugins: {{
+                    tooltip: {{
+                        callbacks: {{
+                            label: function(ctx) {{
+                                var v = ctx.raw;
+                                if (v == null) return ctx.dataset.label + ': N/A';
+                                if (ctx.dataset.label.indexOf('Hit Rate') >= 0 || ctx.dataset.label.indexOf('Miss Rate') >= 0)
+                                    return ctx.dataset.label + ': ' + (v*100).toFixed(1) + '%';
+                                return ctx.dataset.label + ': ' + v.toFixed(3);
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+        }}  // end else (micro_arch available)
 
         // Network
         new Chart(document.getElementById('chart-net'), {{

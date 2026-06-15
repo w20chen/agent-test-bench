@@ -431,10 +431,22 @@ async def run_attempt(
                 sampler = None
             except Exception:
                 sampler = None
+        watcher_samples: list[dict[str, Any]] = []
         if sampler is not None:
-            samples = sampler.stop()
-        elif ctx.samples is not None:
-            samples = ctx.samples
+            watcher_samples = sampler.stop()
+        if ctx.samples is not None:
+            # ctx.samples may have been started earlier (e.g. by
+            # _run_openclaw_in_task_container before the blocking
+            # bootstrap phase) and thus captures a superset of the
+            # watcher sampler's timeline.  Prefer the dataset with
+            # more samples — the earlier-started sampler covers
+            # bootstrap overhead that the watcher would miss.
+            if len(ctx.samples) >= len(watcher_samples):
+                samples = ctx.samples
+            else:
+                samples = watcher_samples
+        else:
+            samples = watcher_samples
         if process_sampler is not None:
             process_samples = process_sampler.stop()
             if not samples:

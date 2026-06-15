@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.memory_bandwidth import attach_host_memory_bandwidth
+from harness.micro_arch import attach_micro_arch, get_micro_arch_collector
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +429,7 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute resources.json summary from a sample list.
 
     Extends the AgentCGroup-compatible format with disk I/O, network I/O,
-    and context switch fields.
+    context switch, and micro-architecture (PMU) fields.
     """
     if not samples:
         return {
@@ -447,6 +448,11 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
             "net_rx_mb": {"min": 0, "max": 0, "avg": 0, "delta": 0},
             "net_tx_mb": {"min": 0, "max": 0, "avg": 0, "delta": 0},
             "context_switches": {"min": 0, "max": 0, "avg": 0, "delta": 0},
+            "micro_arch_available": False,
+            "l1d_hit_rate": {"min": 0, "max": 0, "avg": 0},
+            "l1i_hit_rate": {"min": 0, "max": 0, "avg": 0},
+            "branch_miss_rate": {"min": 0, "max": 0, "avg": 0},
+            "ipc": {"min": 0, "max": 0, "avg": 0},
         }
 
     mem_values: list[float] = []
@@ -459,6 +465,12 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     net_rx_values: list[float] = []
     net_tx_values: list[float] = []
     ctxt_values: list[float] = []
+    # Micro-architecture PMU metrics
+    l1d_hit_values: list[float] = []
+    l1i_hit_values: list[float] = []
+    branch_miss_values: list[float] = []
+    ipc_values: list[float] = []
+    # ---
     mem_bw_available = False
     mem_bw_source: str | None = None
     mem_bw_reason: str | None = None
@@ -507,6 +519,20 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         if ctxt is not None:
             ctxt_values.append(float(ctxt))
 
+        # Micro-architecture PMU metrics (may be sparse — alternating groups)
+        l1d = sample.get("l1d_hit_rate")
+        if l1d is not None:
+            l1d_hit_values.append(float(l1d))
+        l1i = sample.get("l1i_hit_rate")
+        if l1i is not None:
+            l1i_hit_values.append(float(l1i))
+        bmr = sample.get("branch_miss_rate")
+        if bmr is not None:
+            branch_miss_values.append(float(bmr))
+        ipc_val = sample.get("ipc")
+        if ipc_val is not None:
+            ipc_values.append(float(ipc_val))
+
     duration = 0.0
     if len(samples) > 1:
         duration = float(samples[-1]["epoch"]) - float(samples[0]["epoch"])
@@ -535,6 +561,13 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "net_rx_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(net_rx_values)},
         "net_tx_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(net_tx_values)},
         "context_switches": {"min": 0, "max": 0, "avg": 0, "delta": _delta(ctxt_values)},
+        # Micro-architecture (PMU) metrics — min/max/avg across samples
+        "micro_arch_available": any(s.get("micro_arch_available") for s in samples),
+        "micro_arch_scope": next((s.get("micro_arch_scope") for s in samples if s.get("micro_arch_scope")), None),
+        "l1d_hit_rate": _minmaxavg(l1d_hit_values),
+        "l1i_hit_rate": _minmaxavg(l1i_hit_values),
+        "branch_miss_rate": _minmaxavg(branch_miss_values),
+        "ipc": _minmaxavg(ipc_values),
     }
 
 
@@ -569,11 +602,14 @@ class ContainerStatsSampler(threading.Thread):
         self.subprocess_timeout_s = subprocess_timeout_s
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
+        self._sample_count: int = 0
         self._cgroup_path: Path | None = None
         self._container_pid: int | None = None
         self._io_mode: str | None = None  # "cgroup", "exec", or None
         # Context switches keyed by (pid, starttime) for stable identity across PID reuse
         self._pid_ctxt: dict[tuple[int, int], int] = {}
+        # Consolidated context-switch total absorbed from previous windows.
+        self._consolidated_ctxt: int = 0
         # High-water marks for exec-mode disk I/O (non-monotonic source)
         self._io_hwm_read: int = 0
         self._io_hwm_write: int = 0
@@ -581,6 +617,20 @@ class ContainerStatsSampler(threading.Thread):
         self._prev_cpu_usec: int | None = None
         self._prev_cpu_ts: float | None = None
         self._nproc: int = _ncpus()
+
+    # Consolidate per-PID context-switch high-water marks every N
+    # samples to bound dict growth on long-running containers that
+    # spawn many short-lived processes.
+    _CTXT_CONSOLIDATE_EVERY = 200
+
+    def _maybe_consolidate_ctxt(self) -> None:
+        """Periodically fold per-PID context-switch marks into a running total."""
+        self._sample_count += 1
+        if self._sample_count % self._CTXT_CONSOLIDATE_EVERY != 0:
+            return
+        if self._pid_ctxt:
+            self._consolidated_ctxt += sum(self._pid_ctxt.values())
+            self._pid_ctxt.clear()
 
     def _ensure_io_source(self) -> None:
         """Resolve the I/O data source on first call.
@@ -617,6 +667,7 @@ class ContainerStatsSampler(threading.Thread):
     def _sample_io(self, sample: dict[str, Any]) -> None:
         """Attach disk I/O and context switch data to a sample dict."""
         self._ensure_io_source()
+        self._maybe_consolidate_ctxt()
 
         io_data: dict[str, int] | None = None
         if self._io_mode == "cgroup" and self._cgroup_path is not None:
@@ -630,8 +681,9 @@ class ContainerStatsSampler(threading.Thread):
                     ctxt = _read_pid_context_switches(pid)
                     if ctxt is not None and starttime is not None:
                         self._pid_ctxt[(pid, starttime)] = ctxt
-                if self._pid_ctxt:
-                    sample["context_switches"] = sum(self._pid_ctxt.values())
+                ctxt_total = sum(self._pid_ctxt.values()) + self._consolidated_ctxt
+                if self._pid_ctxt or self._consolidated_ctxt:
+                    sample["context_switches"] = ctxt_total
         elif self._io_mode == "exec":
             # Halve timeout per call so total stays within stop() budget
             half_timeout = self.subprocess_timeout_s / 2
@@ -648,7 +700,8 @@ class ContainerStatsSampler(threading.Thread):
             if ctxt is not None:
                 # Exec-mode: aggregate count, use high-water mark (non-monotonic source)
                 self._pid_ctxt[(0, 0)] = max(self._pid_ctxt.get((0, 0), 0), ctxt)
-                sample["context_switches"] = sum(self._pid_ctxt.values())
+                ctxt_total = sum(self._pid_ctxt.values()) + self._consolidated_ctxt
+                sample["context_switches"] = ctxt_total
 
         if io_data:
             rb = io_data.get("read_bytes", 0)
@@ -671,6 +724,7 @@ class ContainerStatsSampler(threading.Thread):
             if tx is not None:
                 sample["net_tx_bytes"] = tx
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
+        attach_micro_arch(sample, interval_s=self.interval_s)
 
     def run(self) -> None:
         # Resolve cgroup path once at start.
@@ -690,6 +744,17 @@ class ContainerStatsSampler(threading.Thread):
             if sample is not None:
                 self._sample_io(sample)
                 self._samples.append(sample)
+                # Initialize micro-arch collector on first sample with
+                # per-container scoping when cgroup path is available.
+                if len(self._samples) == 1:
+                    try:
+                        get_micro_arch_collector(
+                            interval_s=self.interval_s,
+                            cgroup_path=self._cgroup_path,
+                            container_pid=self._container_pid,
+                        )
+                    except Exception:
+                        logger.debug("micro-arch collector init skipped", exc_info=True)
 
             elapsed = time.monotonic() - tick_start
             remainder = max(0.0, self.interval_s - elapsed)

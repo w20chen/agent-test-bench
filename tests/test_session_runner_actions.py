@@ -61,6 +61,7 @@ class _StubContext:
         tool_calls: list[_StubToolCall] | None = None,
         usage: dict[str, int] | None = None,
         response: _StubResponse | None = None,
+        tool_events: list[dict[str, Any]] | None = None,
     ) -> None:
         self.iteration = iteration
         self.messages = messages
@@ -68,6 +69,7 @@ class _StubContext:
         self.usage = usage or {}
         self.response = response
         self.malformed_retry_count = 0
+        self.tool_events = tool_events or []
 
 
 def test_trace_collector_emits_llm_call_action(tmp_path: Path) -> None:
@@ -393,6 +395,103 @@ async def _drive_refetches_late_openrouter_metadata(tmp_path: Path) -> None:
     assert llm_event["data"]["openrouter_metadata_fetch_status"] == "success"
     assert summary["total_llm_call_time_ms"] == 4321.0
     assert summary["llm_timing_source"] == "openrouter_generation_time_ms"
+
+
+def test_trace_collector_uses_tool_events_wall_ms(tmp_path: Path) -> None:
+    """Primary timing path: context.tool_events with wall_ms + start_mono.
+
+    When _execute_tools populates context.tool_events (the normal path
+    for OpenClaw eval runs), the TraceCollectorHook must prefer those
+    per-tool wall-clock measurements over the iteration-level fallback.
+    """
+    import asyncio
+
+    asyncio.run(_drive_tool_events_wall_ms(tmp_path))
+
+
+async def _drive_tool_events_wall_ms(tmp_path: Path) -> None:
+    import time as _time
+
+    trace_file = tmp_path / "trace.jsonl"
+    hook = TraceCollectorHook(trace_file, instance_id="test-tool-events")
+
+    msgs_in = [
+        {"role": "system", "content": "You are a coding agent."},
+        {"role": "user", "content": "Read the file."},
+    ]
+    ctx_before = _StubContext(iteration=0, messages=msgs_in)
+    await hook.before_iteration(ctx_before)
+
+    stub_tc = _StubToolCall("read_file", {"path": "README.md"})
+    ctx_before_tools = _StubContext(
+        iteration=0,
+        messages=msgs_in
+        + [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": stub_tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "README.md"}',
+                        },
+                    }
+                ],
+            }
+        ],
+        tool_calls=[stub_tc],
+        usage={"prompt_tokens": 50, "completion_tokens": 15},
+    )
+    await hook.before_execute_tools(ctx_before_tools)
+
+    # Simulate _execute_tools having measured a 123.4 ms wall time.
+    mono_start = _time.monotonic() - 0.1234  # pretend tool started 123.4 ms ago
+    ctx_after = _StubContext(
+        iteration=0,
+        messages=ctx_before_tools.messages
+        + [
+            {
+                "role": "tool",
+                "tool_call_id": stub_tc.id,
+                "name": "read_file",
+                "content": "# Project README\n\nHello world.",
+            }
+        ],
+        tool_calls=[stub_tc],
+        usage={"prompt_tokens": 50, "completion_tokens": 15},
+        response=_StubResponse(content="", finish_reason="tool_calls"),
+        tool_events=[
+            {
+                "tc_id": stub_tc.id,
+                "wall_ms": 123.4,
+                "start_mono": mono_start,
+            }
+        ],
+    )
+    await hook.after_iteration(ctx_after)
+    await hook.write_summary(success=True, elapsed_s=10.0)
+
+    records = [
+        json.loads(line) for line in trace_file.read_text().strip().splitlines()
+    ]
+    tool_execs = [
+        r
+        for r in records
+        if r.get("type") == "action" and r.get("action_type") == "tool_exec"
+    ]
+    assert len(tool_execs) == 1, f"Expected 1 tool_exec, got {len(tool_execs)}"
+    te = tool_execs[0]
+    # Primary path: duration_ms comes from tool_events wall_ms.
+    assert te["data"]["duration_ms"] == 123.4
+    # Monotonic audit fields are preserved.
+    assert te["data"]["wall_ms"] == 123.4
+    assert isinstance(te["data"]["start_mono"], float)
+    # Summary aggregates tool time correctly.
+    summary = next(r for r in records if r.get("type") == "summary")
+    assert summary["total_tool_ms"] == 123.4
 
 
 def test_resolve_run_outcome_uses_trace_llm_error_event(tmp_path: Path) -> None:
