@@ -212,6 +212,16 @@ End-to-end walkthrough for running a single SWE-rebench task.
 
 Prerequisites: ARM server + DeepSeek API + Docker
 
+The harness supports **two ARM image modes**, controlled by the
+``ARM_IMAGE_MODE`` environment variable:
+
+| Mode | Env | Behaviour |
+|------|-----|-----------|
+| **native** (default) | ``ARM_IMAGE_MODE=native`` or unset | Build a shared ARM base image once; clone each task's repo from a local bare mirror at runtime. No QEMU needed. |
+| **qemu** | ``ARM_IMAGE_MODE=qemu`` | Pull the official x86_64 per-task Docker images and run them via QEMU binfmt emulation. Requires ``make setup-arm-host`` first. |
+
+Choose the mode that fits your environment before proceeding with Step 1.
+
 ### Step 0
 
 ```bash
@@ -236,6 +246,8 @@ export WEB_SEARCH_PROVIDER=tavily
 
 ### Step 1 — One-time environment setup
 
+**Native mode (default):**
+
 ```bash
 # Build the ARM-native base image and download SWE-rebench data + repos
 make setup-arm-native
@@ -244,15 +256,34 @@ make setup-arm-native
 conda activate ML
 ```
 
-ARM hosts auto-detect and use the native `swe-arm-base` image with local
-repo mirrors — no QEMU emulation needed.  The legacy `make setup-arm-host`
-target still exists for x86_64-on-ARM QEMU emulation if required.
+ARM hosts auto-detect and use the native ``swe-arm-base`` image with local
+repo mirrors — no QEMU emulation needed.
 
-### Step 1b — Pre-pull images (recommended)
+**QEMU mode:**
 
-Each SWE-rebench task uses its own ~2 GB Docker image
+```bash
+# Install QEMU binfmt handlers so Docker can run x86_64 images on ARM
+make setup-arm-host
+
+# Download the dataset metadata (task list) — images are pulled on demand
+make download-swe-rebench
+
+# Activate the conda environment
+conda activate ML
+
+# Then set ARM_IMAGE_MODE=qemu when running (see Step 2).
+```
+
+In QEMU mode the official ``swerebench/sweb.eval.x86_64.<task>`` images are
+pulled and executed via QEMU user-mode emulation.  The ARM base image
+(``make setup-arm-native``) is not needed.
+
+### Step 1b — Pre-pull images (recommended for QEMU mode)
+
+In **QEMU mode** each SWE-rebench task uses its own ~2 GB Docker image
 (``swerebench/sweb.eval.x86_64.<task>:latest``).  Pulling them ahead of
-time avoids network stalls during the run.
+time avoids network stalls during the run.  (In native mode there is only
+one shared base image; pre-pulling is unnecessary.)
 
 ```bash
 # Pull images for the first 16 tasks (match --sample 16)
@@ -288,6 +319,8 @@ print(f'... ({len(tasks)} total)')
 
 Run a specific test case.
 
+**Native mode (default):**
+
 ```bash
 DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
@@ -303,6 +336,24 @@ DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli 
 The first run on a task builds a cached ARM derivative image
 (``swe-arm-fixed-<instance_id>``).  Subsequent runs skip the build step
 and start immediately.
+
+**QEMU mode:**
+
+```bash
+ARM_IMAGE_MODE=qemu DEEPSEEK_API_KEY=sk-deepseek-api-key PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-v4-flash \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --instance-ids "12rambau__sepal_ui-411" \
+    --mcp-config none \
+    --verbose \
+    --container docker
+```
+
+The official x86_64 task image is pulled on first use; a writable
+derivative (``swebench-fixed-*``) is cached for subsequent runs.  Docker
+transparently handles the x86_64 → ARM emulation via QEMU.
 
 ### Step 2b — Replay
 

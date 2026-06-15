@@ -527,11 +527,14 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "memory_bandwidth_available": mem_bw_available,
         "memory_bandwidth_source": mem_bw_source,
         "memory_bandwidth_reason": mem_bw_reason,
-        "disk_read_mb": {**_minmaxavg(disk_read_values), "delta": _delta(disk_read_values)},
-        "disk_write_mb": {**_minmaxavg(disk_write_values), "delta": _delta(disk_write_values)},
-        "net_rx_mb": {**_minmaxavg(net_rx_values), "delta": _delta(net_rx_values)},
-        "net_tx_mb": {**_minmaxavg(net_tx_values), "delta": _delta(net_tx_values)},
-        "context_switches": {**_minmaxavg(ctxt_values), "delta": _delta(ctxt_values)},
+        # Cumulative counters: min/max/avg are meaningless for monotonic
+        # values (min ≡ first sample, max ≡ last sample). Set them to 0
+        # and keep only delta (total change).
+        "disk_read_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(disk_read_values)},
+        "disk_write_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(disk_write_values)},
+        "net_rx_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(net_rx_values)},
+        "net_tx_mb": {"min": 0, "max": 0, "avg": 0, "delta": _delta(net_tx_values)},
+        "context_switches": {"min": 0, "max": 0, "avg": 0, "delta": _delta(ctxt_values)},
     }
 
 

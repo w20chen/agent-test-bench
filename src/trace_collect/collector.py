@@ -30,6 +30,7 @@ from harness.container_image_prep import (
     prune_dangling_images,
     remove_image,
     resolve_arm_base_image,
+    use_arm_qemu,
 )
 from trace_collect.attempt_pipeline import (
     AttemptContext,
@@ -256,7 +257,10 @@ def _task_source_image(benchmark: "Benchmark", task: dict[str, Any]) -> str | No
     image_name = benchmark.image_name_for(task)
     if not image_name:
         return None
-    if is_arm_host():
+    # ARM-native mode: use the shared ARM base image (x86_64 task images
+    # don't exist for arm64).  QEMU mode: use the original x86_64 image
+    # and let Docker binfmt handle the emulation.
+    if is_arm_host() and not use_arm_qemu():
         return resolve_arm_base_image(benchmark.config)
     return normalize_image_reference(str(image_name))
 
@@ -367,8 +371,9 @@ def _cleanup_task_images(
     if container_executable is None:
         raise ValueError("container_executable is required for image cleanup")
 
-    # Never remove the shared ARM base image.
-    if is_arm_host():
+    # Never remove the shared ARM base image (native mode only).
+    # In QEMU mode per-task x86_64 images are cleaned up normally.
+    if is_arm_host() and not use_arm_qemu():
         source_image = None
 
     keep_gb_str = os.environ.get("KEEP_IMAGES_ABOVE_GB", "")
@@ -485,8 +490,14 @@ async def _run_scaffold_tasks(
             logger.info("[%d/%d] START %s (%s)", i + 1, total, instance_id, scaffold)
             t0 = time.monotonic()
 
-            # ARM host: validate repo mirrors exist before attempting container tasks.
-            if is_arm_host() and benchmark.execution_environment == "container":
+            # ARM-native mode: validate repo mirrors exist before
+            # attempting container tasks.  QEMU mode skips this — the
+            # x86_64 task images already contain the repo code.
+            if (
+                is_arm_host()
+                and not use_arm_qemu()
+                and benchmark.execution_environment == "container"
+            ):
                 repos_root = benchmark.config.repos_root
                 if repos_root is None:
                     raise ValueError(

@@ -780,6 +780,7 @@ class UnifiedProvider(LLMProvider):
     @classmethod
     def _parse_chunks(cls, chunks: list[Any]) -> LLMResponse:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tc_bufs: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
@@ -841,6 +842,9 @@ class UnifiedProvider(LLMProvider):
                 text = cls._extract_text_content(delta.get("content"))
                 if text:
                     content_parts.append(text)
+                rc = delta.get("reasoning_content")
+                if isinstance(rc, str) and rc:
+                    reasoning_parts.append(rc)
                 for idx, tc in enumerate(delta.get("tool_calls") or []):
                     _accum_tc(tc, idx)
                 usage = cls._extract_usage(chunk_map) or usage
@@ -855,9 +859,14 @@ class UnifiedProvider(LLMProvider):
             delta = choice.delta
             if delta and delta.content:
                 content_parts.append(delta.content)
+            if delta:
+                rc = getattr(delta, "reasoning_content", None)
+                if isinstance(rc, str) and rc:
+                    reasoning_parts.append(rc)
             for tc in (delta.tool_calls or []) if delta else []:
                 _accum_tc(tc, getattr(tc, "index", 0))
 
+        reasoning_content = "".join(reasoning_parts) or None
         return LLMResponse(
             content="".join(content_parts) or None,
             tool_calls=[
@@ -875,6 +884,7 @@ class UnifiedProvider(LLMProvider):
             ],
             finish_reason=finish_reason,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
 
     @staticmethod

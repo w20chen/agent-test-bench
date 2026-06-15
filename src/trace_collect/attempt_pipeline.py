@@ -16,6 +16,7 @@ from harness.container_image_prep import (
     ensure_fixed_image,
     ensure_arm_fixed_image,
     is_arm_host,
+    use_arm_qemu,
     _inspect_image_platform,
 )
 from harness.container_runtime import container_run_user_args
@@ -344,7 +345,12 @@ async def run_attempt(
         if container_executable is None:
             raise ValueError("container_executable is required for container tasks")
         try:
-            if is_arm_host() and ctx.arm_repo and ctx.arm_base_commit:
+            if (
+                is_arm_host()
+                and not use_arm_qemu()
+                and ctx.arm_repo
+                and ctx.arm_base_commit
+            ):
                 # ARM-native: build fixed image from base + cloned repo.
                 if ctx.arm_repos_root is None:
                     raise ValueError(

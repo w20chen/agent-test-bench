@@ -103,6 +103,10 @@ class BenchmarkConfig:
         Path fields (``data_root``, ``repos_root``, ``trace_root``) are
         wrapped in :class:`pathlib.Path`.  ``repos_root`` is ``None`` when
         absent or explicitly set to ``null`` in the YAML.
+
+        Any top-level YAML key not recognised as a declared field is
+        automatically folded into ``extras`` so that benchmark plugins and
+        runtime helpers (e.g. ``resolve_arm_base_image``) can read them.
         """
         raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
 
@@ -112,6 +116,17 @@ class BenchmarkConfig:
         )
         data_root_raw = raw.get("data_root")
         data_root: Path | None = Path(data_root_raw) if data_root_raw is not None else None
+
+        # Gather any top-level keys not explicitly handled below into extras.
+        _known = frozenset({
+            "slug", "display_name", "harness_dataset", "harness_split",
+            "data_root", "repos_root", "trace_root", "default_max_iterations",
+            "selection_n", "selection_seed", "default_prompt_template",
+            "exclude_lite", "extras",
+        })
+        explicit_extras = dict(raw.get("extras", {}))
+        overflow = {k: v for k, v in raw.items() if k not in _known}
+        merged_extras = {**explicit_extras, **overflow}
 
         return cls(
             slug=raw["slug"],
@@ -126,7 +141,7 @@ class BenchmarkConfig:
             selection_seed=int(raw["selection_seed"]),
             default_prompt_template=str(raw.get("default_prompt_template", "default")),
             exclude_lite=bool(raw.get("exclude_lite", False)),
-            extras=dict(raw.get("extras", {})),
+            extras=merged_extras,
         )
 
 class Benchmark(ABC):

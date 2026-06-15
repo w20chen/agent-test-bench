@@ -20,7 +20,7 @@ help:
 	@printf "  download-swe-rebench        Download SWE-rebench (nebius/SWE-rebench) filtered split\n"
 	@printf "  setup-swe-rebench-repos     Clone repos referenced by SWE-rebench tasks\n"
 	@printf "  setup-swe-rebench           Shortcut: download-swe-rebench + setup-swe-rebench-repos\n"
-	@printf "  setup-arm-host              Enable amd64 emulation on ARM Docker hosts (legacy QEMU path)\n"
+	@printf "  setup-arm-host              Enable amd64 emulation on ARM Docker hosts (QEMU binfmt)\n"
 	@printf "  build-arm-base              Build the ARM-native base image (containers/Containerfile.arm-base)\n"
 	@printf "  setup-arm-native            Full ARM-native setup: build-arm-base + setup-swe-rebench\n"
 	@printf "  smoke-swe-rebench-openclaw  Run $(SMOKE_N) SWE-rebench tasks through openclaw\n"

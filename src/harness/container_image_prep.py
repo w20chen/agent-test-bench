@@ -331,6 +331,34 @@ def is_arm_host() -> bool:
     return _detect_host_arch() == "arm64"
 
 
+def arm_image_mode() -> str:
+    """Return the ARM image mode for the current host.
+
+    Controlled by the ``ARM_IMAGE_MODE`` environment variable:
+
+    * ``native`` (default) — use ARM-native base image + local repo mirrors.
+    * ``qemu`` — use QEMU emulation to run the official x86_64 task images.
+
+    On non-ARM hosts this always returns ``"native"`` (the value is unused).
+    Invalid values silently fall back to ``"native"``.
+    """
+    mode = os.environ.get("ARM_IMAGE_MODE", "native").strip().lower()
+    if mode in ("native", "qemu"):
+        return mode
+    return "native"
+
+
+def use_arm_qemu() -> bool:
+    """True when the ARM host should use QEMU-emulated x86_64 images.
+
+    Requires:
+    * Host architecture is ARM64/AArch64 (``is_arm_host()`` is True).
+    * ``ARM_IMAGE_MODE`` is set to ``"qemu"``.
+    * The host has been prepared with ``make setup-arm-host`` (QEMU binfmt).
+    """
+    return is_arm_host() and arm_image_mode() == "qemu"
+
+
 def resolve_arm_base_image(benchmark_config: Any | None = None) -> str:
     """Return the ARM base image to use.
 

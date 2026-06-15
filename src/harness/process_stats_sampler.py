@@ -21,6 +21,16 @@ def _now_sample() -> dict[str, Any]:
 
 
 def _read_proc_io(pid: int) -> dict[str, int] | None:
+    """Read block-layer I/O bytes from ``/proc/<pid>/io``.
+
+    Uses ``read_bytes`` / ``write_bytes`` (bytes actually fetched from /
+    written to the storage layer), NOT ``rchar`` / ``wchar`` (syscall-
+    level bytes that include TTY, pipe, socket, and page-cache hits).
+
+    Only reports the root PID — does not recurse into children.
+    Prefer ``_sample_with_psutil`` when psutil is available because it
+    sums across the full process tree.
+    """
     try:
         text = Path(f"/proc/{pid}/io").read_text(encoding="utf-8")
     except (FileNotFoundError, PermissionError, OSError):
@@ -34,8 +44,8 @@ def _read_proc_io(pid: int) -> dict[str, int] | None:
             values[key.strip()] = int(value.strip())
         except ValueError:
             continue
-    read_bytes = values.get("rchar")
-    write_bytes = values.get("wchar")
+    read_bytes = values.get("read_bytes")
+    write_bytes = values.get("write_bytes")
     if read_bytes is None and write_bytes is None:
         return None
     return {
@@ -156,6 +166,7 @@ def _sample_with_psutil(
     pid: int,
     process_cache: dict[int, Any] | None = None,
     ctx_high_water: dict[tuple[int, float], int] | None = None,
+    io_high_water: dict[tuple[int, float], tuple[int, int]] | None = None,
 ) -> dict[str, Any] | None:
     try:
         import psutil  # type: ignore[import]
@@ -205,8 +216,25 @@ def _sample_with_psutil(
             pass
         try:
             io_counters = proc.io_counters()
-            disk_read_bytes += int(getattr(io_counters, "read_bytes", 0))
-            disk_write_bytes += int(getattr(io_counters, "write_bytes", 0))
+            proc_read = int(getattr(io_counters, "read_bytes", 0))
+            proc_write = int(getattr(io_counters, "write_bytes", 0))
+            if io_high_water is not None:
+                # Keep each process's last-known I/O counters keyed by
+                # (pid, create_time) so a child exiting between samples
+                # does not make the summed counter drop (which would
+                # otherwise yield negative rates).
+                try:
+                    key = (int(proc.pid), float(proc.create_time()))
+                except Exception:
+                    key = (int(getattr(proc, "pid", 0)), 0.0)
+                prev = io_high_water.get(key, (0, 0))
+                io_high_water[key] = (
+                    max(prev[0], proc_read),
+                    max(prev[1], proc_write),
+                )
+            else:
+                disk_read_bytes += proc_read
+                disk_write_bytes += proc_write
             found_io = True
         except Exception:
             pass
@@ -236,6 +264,9 @@ def _sample_with_psutil(
         }
     )
     if found_io:
+        if io_high_water is not None:
+            disk_read_bytes = sum(v[0] for v in io_high_water.values())
+            disk_write_bytes = sum(v[1] for v in io_high_water.values())
         sample["disk_read_bytes"] = disk_read_bytes
         sample["disk_write_bytes"] = disk_write_bytes
     if found_context:
@@ -273,19 +304,26 @@ class ProcessStatsSampler(threading.Thread):
         # Per-(pid, create_time) high-water marks of context switches so the
         # summed counter stays monotonic even as child processes come and go.
         self._ctx_high_water: dict[tuple[int, float], int] = {}
+        # Per-(pid, create_time) high-water marks of disk I/O (read_bytes,
+        # write_bytes) for the same reason.
+        self._io_high_water: dict[tuple[int, float], tuple[int, int]] = {}
 
     def _collect_sample(self) -> dict[str, Any] | None:
         sample = _sample_with_psutil(
             self.pid,
             process_cache=self._psutil_process_cache,
             ctx_high_water=self._ctx_high_water,
+            io_high_water=self._io_high_water,
         ) or _sample_with_ps(self.pid)
         if sample is None:
             sample = _fallback_sample()
-        proc_io = _read_proc_io(self.pid)
-        if proc_io is not None:
-            sample["disk_read_bytes"] = proc_io["read_bytes"]
-            sample["disk_write_bytes"] = proc_io["write_bytes"]
+        # Only fall back to /proc/<pid>/io (root PID only, no children)
+        # when psutil did not already provide process-tree I/O counters.
+        if "disk_read_bytes" not in sample:
+            proc_io = _read_proc_io(self.pid)
+            if proc_io is not None:
+                sample["disk_read_bytes"] = proc_io["read_bytes"]
+                sample["disk_write_bytes"] = proc_io["write_bytes"]
         ctxt = _read_proc_context_switches(self.pid)
         if ctxt is not None and "context_switches" not in sample:
             sample["context_switches"] = ctxt
