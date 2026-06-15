@@ -374,7 +374,10 @@ class ProcessStatsSampler(threading.Thread):
             sample["net_rx_bytes"] = net["net_rx_bytes"]
             sample["net_tx_bytes"] = net["net_tx_bytes"]
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
-        attach_micro_arch(sample, interval_s=self.interval_s)
+        # Micro-arch PMU sampling runs at ≥ 2× the process-stats rate
+        # to reduce stair-step artefacts from alternating group rotation.
+        _micro_arch_interval = max(0.5, self.interval_s / 2)
+        attach_micro_arch(sample, interval_s=_micro_arch_interval)
         return sample
 
     def run(self) -> None:

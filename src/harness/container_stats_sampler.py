@@ -724,7 +724,10 @@ class ContainerStatsSampler(threading.Thread):
             if tx is not None:
                 sample["net_tx_bytes"] = tx
         attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
-        attach_micro_arch(sample, interval_s=self.interval_s)
+        # Micro-arch PMU sampling runs at ≥ 2× the container-stats rate
+        # to reduce stair-step artefacts from alternating group rotation.
+        _micro_arch_interval = max(0.5, self.interval_s / 2)
+        attach_micro_arch(sample, interval_s=_micro_arch_interval)
 
     def run(self) -> None:
         # Resolve cgroup path once at start.
@@ -748,8 +751,9 @@ class ContainerStatsSampler(threading.Thread):
                 # per-container scoping when cgroup path is available.
                 if len(self._samples) == 1:
                     try:
+                        _micro_arch_interval = max(0.5, self.interval_s / 2)
                         get_micro_arch_collector(
-                            interval_s=self.interval_s,
+                            interval_s=_micro_arch_interval,
                             cgroup_path=self._cgroup_path,
                             container_pid=self._container_pid,
                         )

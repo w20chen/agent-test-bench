@@ -843,12 +843,12 @@ Chart.register({{
                 interaction:{{mode:'index',intersect:false}},
                 scales: {{
                     y:{{ type:'linear', position:'left',
-                        title:{{display:true,text:'Rate (0-1)'}},
+                        title:{{display:true,text:'Hit / Miss Rate'}},
                         min:0, max:1,
                         ticks:{{ callback: function(v) {{ return (v*100).toFixed(0) + '%'; }} }}
                     }},
                     y1:{{ type:'linear', position:'right',
-                        title:{{display:true,text:'Rate / IPC'}},
+                        title:{{display:true,text:'IPC'}},
                         min:0, grid:{{drawOnChartArea:false}},
                         ticks:{{ callback: function(v) {{ return v.toFixed(2); }} }}
                     }},
