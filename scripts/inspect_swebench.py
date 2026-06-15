@@ -120,11 +120,35 @@ def with_testbed_container(image: str, action: callable, *args: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 # Backward compatibility for datasets>=3.0
+#
+# Two issues:
+# (1) datasets>=3.0 renamed `List` to `LargeList`, but cached dataset_info.json
+#     still references the `List` type name → register the alias.
+# (2) Arrow files encode list-typed columns as ``[Value(...)]`` (→ Sequence),
+#     while cached dataset_info.json may encode them as ``LargeList(...)``.
+#     Patch ``Features.reorder_fields_as`` to normalise before comparing.
 try:
     import datasets.features.features as _ff
     from datasets.features.features import LargeList, _FEATURE_TYPES
+
     if "List" not in _FEATURE_TYPES:
         _FEATURE_TYPES["List"] = LargeList
+
+    def _normalise_largelist(obj: object) -> object:
+        if isinstance(obj, dict):
+            return {k: _normalise_largelist(v) for k, v in obj.items()}
+        if isinstance(obj, LargeList):
+            return [obj.feature]
+        return obj
+
+    _orig_reorder_fields_as = _ff.Features.reorder_fields_as
+
+    def _patched_reorder_fields_as(
+        self: _ff.Features, other: _ff.Features
+    ) -> _ff.Features:
+        return _orig_reorder_fields_as(_normalise_largelist(self), other)
+
+    _ff.Features.reorder_fields_as = _patched_reorder_fields_as  # type: ignore[assignment]
 except ImportError:
     pass
 
