@@ -300,14 +300,39 @@ def _read_cgroup_memory(cgroup_path: Path) -> tuple[int, int | None]:
 
 
 def _read_host_ncpus() -> int:
-    """Return number of online CPUs (default 1 on error)."""
+    """Return number of online CPUs (default 1 on error).
+
+    Parses the Linux CPU-list format (e.g. ``0-63`` or ``0-3,8-11``).
+
+    Examples
+    --------
+    ==============  ======
+    /sys/.../online  Returns
+    ==============  ======
+    ``0``            1
+    ``0-63``         64
+    ``0-3,8-11``     8
+    ``0,2,4``        3
+    (not readable)   ``os.cpu_count()``
+    ==============  ======
+    """
     try:
-        return len(
-            (Path("/sys/devices/system/cpu/online"))
+        text = (
+            Path("/sys/devices/system/cpu/online")
             .read_text(encoding="utf-8")
             .strip()
-            .split(",")
         )
+        count = 0
+        for part in text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                lo_str, hi_str = part.split("-", 1)
+                count += int(hi_str) - int(lo_str) + 1
+            else:
+                count += 1
+        return count or 1
     except Exception:
         import os
         return os.cpu_count() or 1
@@ -615,7 +640,7 @@ class ContainerStatsSampler(threading.Thread):
         self._io_hwm_write: int = 0
         # Cgroup-based CPU tracking (deltas between consecutive samples).
         self._prev_cpu_usec: int | None = None
-        self._prev_cpu_ts: float | None = None
+        self._prev_cpu_mono: float | None = None
         self._nproc: int = _ncpus()
 
     # Consolidate per-PID context-switch high-water marks every N
@@ -733,6 +758,11 @@ class ContainerStatsSampler(threading.Thread):
         # Resolve cgroup path once at start.
         self._resolve_cgroup_path()
 
+        # Skip the first sample — the first reading primes the CPU% baseline
+        # (prev_cpu_usec / prev_cpu_mono) but produces a meaningless 0% CPU
+        # value that would bias the min/avg in the summary.
+        _first_tick = True
+
         while not self._stop_event.is_set():
             tick_start = time.monotonic()
 
@@ -746,9 +776,12 @@ class ContainerStatsSampler(threading.Thread):
 
             if sample is not None:
                 self._sample_io(sample)
-                self._samples.append(sample)
-                # Initialize micro-arch collector on first sample with
-                # per-container scoping when cgroup path is available.
+                if _first_tick:
+                    _first_tick = False
+                else:
+                    self._samples.append(sample)
+                # Initialize micro-arch collector on first retained sample
+                # with per-container scoping when cgroup path is available.
                 if len(self._samples) == 1:
                     try:
                         _micro_arch_interval = max(0.5, self.interval_s / 2)
@@ -769,19 +802,23 @@ class ContainerStatsSampler(threading.Thread):
         """Build a sample from cgroup v2 files (sub-millisecond)."""
         assert self._cgroup_path is not None
         now = datetime.now(tz=timezone.utc)
+        mono_now = time.monotonic()
         cpu_usec = _read_cgroup_cpu_usec(self._cgroup_path)
         mem_bytes, mem_max = _read_cgroup_memory(self._cgroup_path)
 
         # Compute CPU % from delta between consecutive samples.
+        # Reports single-core-equivalent percentage (e.g. 6400% = 64 cores
+        # fully saturated), consistent with ``psutil.Process.cpu_percent()``
+        # and ``docker stats`` output.
         if (
             cpu_usec is not None
             and self._prev_cpu_usec is not None
-            and self._prev_cpu_ts is not None
+            and self._prev_cpu_mono is not None
         ):
             delta_usec = cpu_usec - self._prev_cpu_usec
-            delta_sec = now.timestamp() - self._prev_cpu_ts
+            delta_sec = mono_now - self._prev_cpu_mono
             cpu_percent = (
-                (delta_usec / (delta_sec * 1_000_000 * self._nproc)) * 100
+                (delta_usec / (delta_sec * 1_000_000)) * 100
                 if delta_sec > 0
                 else 0.0
             )
@@ -789,7 +826,7 @@ class ContainerStatsSampler(threading.Thread):
             cpu_percent = 0.0
 
         self._prev_cpu_usec = cpu_usec
-        self._prev_cpu_ts = now.timestamp()
+        self._prev_cpu_mono = mono_now
 
         mem_mb = mem_bytes / (1024 * 1024) if mem_bytes else 0.0
         mem_limit_mb = mem_max / (1024 * 1024) if mem_max else 0.0

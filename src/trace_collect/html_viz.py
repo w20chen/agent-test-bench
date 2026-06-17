@@ -751,16 +751,16 @@ Chart.register({{
     var parent = document.getElementById('res-charts');
     if (!RES_COUNT) {{
         parent.innerHTML = '<div class="chart-wrap"><p style="color:#999">No resource samples collected (container stats sampling may not have been active).</p></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown (ms)</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:2px">🔧 Tool Time Breakdown (ms)</h3><p style="font-size:10px;color:#888;margin:0 0 6px 0;line-height:1.4">Sum of per-tool durations. Concurrent tools overlap → total may exceed wall-clock time.</p><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }} else {{
         parent.innerHTML =
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🖥 CPU & Memory</h3><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🧠 Memory Bandwidth (host)</h3><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:2px">🖥 CPU & Memory</h3><p style="font-size:10px;color:#888;margin:0 0 6px 0;line-height:1.4">CPU % is single-core-equivalent (100% = 1 full core). Memory is container RSS.</p><div style="height:280px"><canvas id="chart-cpu-mem"></canvas></div></div>' +
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:2px">🧠 Memory Bandwidth (host)</h3><p style="font-size:10px;color:#c0392b;margin:0 0 6px 0;line-height:1.4">⚠ System-wide via <code>perf stat -a</code>. Affected by other users on the same physical machine.</p><div style="height:240px"><canvas id="chart-mem-bw"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔬 Micro-Architecture (PMU)</h3><div style="height:280px"><canvas id="chart-micro-arch"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🌐 Network I/O (rate)</h3><div style="height:240px"><canvas id="chart-net"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">💾 Disk I/O (rate)</h3><div style="height:240px"><canvas id="chart-disk"></canvas></div></div>' +
             '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">⚡ Context Switches (rate)</h3><div style="height:200px"><canvas id="chart-ctx"></canvas></div></div>' +
-            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:8px">🔧 Tool Time Breakdown (ms)</h3><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
+            '<div class="chart-wrap"><h3 style="font-size:13px;margin-bottom:2px">🔧 Tool Time Breakdown (ms)</h3><p style="font-size:10px;color:#888;margin:0 0 6px 0;line-height:1.4">Sum of per-tool durations. Concurrent tools overlap → total may exceed wall-clock time.</p><div id="tool-pie-container"><canvas id="chart-tool-pie"></canvas></div></div>';
     }}
 
     // CPU + Memory
