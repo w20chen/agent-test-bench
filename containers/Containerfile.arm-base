@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g-dev \
         # Database client libs (needed by Django, SQLAlchemy, etc.)
         libpq-dev \
-        libmysqlclient-dev \
+        libmariadb-dev \
         # Autotools for repos that build from source
         autoconf \
         automake \
