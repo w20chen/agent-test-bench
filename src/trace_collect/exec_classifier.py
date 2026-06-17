@@ -289,7 +289,16 @@ _COMMAND_PRIORITY: dict[str, int] = {
 _ENV_ASSIGN_RE = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S+)\s*)+")
 
 # Regex to strip leading `sudo` / `nice` / `nohup` / etc.
-_PREAMBLE_RE = re.compile(r"^\s*(?:sudo|nice|nohup|ionice|chroot|flock|stdbuf|timeout)\s+")
+# Also captures ``timeout <duration>`` (e.g. ``timeout 120``) as a single
+# preamble unit so the duration argument doesn't become the "command" token.
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:sudo|nice|nohup|ionice|chroot|flock|stdbuf|timeout(?:\s+\d+[smhd]?)?)\s+"
+)
+
+# After stripping a preamble, the next token(s) may be preamble arguments
+# (flags like ``-k``, ``--preserve-status``, or numeric values).  Strip
+# them so we can reach the real command.
+_PREAMBLE_ARG_RE = re.compile(r"^(?:\s*(?:-\w+|--[\w-]+|\d+[smhd]?))+\s*")
 
 # Common path prefix to strip, e.g. /usr/bin/grep → grep
 _PATH_PREFIX_RE = re.compile(r"^/(?:usr/)?(?:local/)?(?:s?)bin/")
@@ -300,6 +309,11 @@ def _tokenize_segment(segment: str) -> str:
 
     A segment is one piece of a command chain (between ``&&``, ``;``, ``|``).
     Returns the normalised command token, or ``""`` if none found.
+
+    The function scans tokens left-to-right, skipping preamble arguments
+    (numbers, flags) until it finds a recognised command.  This handles
+    cases like ``timeout 120 python3 -m pytest`` where ``120`` is a
+    preamble argument, not the real command.
     """
     seg = segment.strip()
     if not seg:
@@ -308,27 +322,73 @@ def _tokenize_segment(segment: str) -> str:
     # Strip env-var assignments
     seg = _ENV_ASSIGN_RE.sub("", seg).strip()
 
-    # Strip preamble (sudo, nice, ...)
+    # Strip preamble (sudo, nice, timeout, ...)
     seg = _PREAMBLE_RE.sub("", seg).strip()
+
+    # Strip preamble arguments (flags, numeric durations)
+    seg = _PREAMBLE_ARG_RE.sub("", seg).strip()
 
     if not seg:
         return ""
 
-    # Extract first token
     parts = seg.split()
-    token = parts[0]
 
-    # Strip path prefix: /usr/bin/grep → grep
-    token = _PATH_PREFIX_RE.sub("", token)
+    # ── Scan for the best command token ──────────────────────────────
+    # Strategy: find the *first* recognised command token (standard
+    # shell semantics — the first word is the command, rest are args).
+    # However, when the first recognised token is a low-priority
+    # navigational / setup command (``cd``, ``pwd``, ``ls``, …) and a
+    # clearly higher-priority *action* command appears later, prefer
+    # the action.  This handles malformed segments like
+    # ``cd /x 88 timeout 120 python3 -m pytest`` where ``cd`` leaked
+    # into the same segment without a ``&&`` separator.
+    _NAVIGATION_TOKENS = frozenset({
+        "cd", "pushd", "popd", "pwd", "ls", "dir",
+    })
+    token = ""
+    token_idx = -1
+    first_token = ""
+    first_idx = -1
+    first_prio = -1
+    best_action_token = ""
+    best_action_idx = -1
+    best_action_prio = -1
 
-    # Handle `command` builtin: `command grep` → `grep`
-    if token == "command" and len(parts) > 1:
-        token = parts[1]
+    for idx, raw_tok in enumerate(parts):
+        stripped = _PATH_PREFIX_RE.sub("", raw_tok)
+        # ``command`` builtin: ``command grep`` → use the next token
+        if stripped == "command" and idx + 1 < len(parts):
+            stripped = _PATH_PREFIX_RE.sub("", parts[idx + 1])
+            prio = _COMMAND_PRIORITY.get(stripped, -1)
+            if first_token == "" and prio >= 0:
+                first_token, first_idx, first_prio = stripped, idx + 1, prio
+            if prio > best_action_prio:
+                best_action_token, best_action_idx, best_action_prio = stripped, idx + 1, prio
+            continue
+        prio = _COMMAND_PRIORITY.get(stripped, -1)
+        if prio < 0:
+            continue  # not a recognised command
+        if first_token == "":
+            first_token, first_idx, first_prio = stripped, idx, prio
+        if prio > best_action_prio:
+            best_action_token, best_action_idx, best_action_prio = stripped, idx, prio
+
+    if first_token == "":
+        # Fall back to first token even if unrecognised
+        token = _PATH_PREFIX_RE.sub("", parts[0])
+        token_idx = 0
+    elif first_token in _NAVIGATION_TOKENS and best_action_prio >= 3:
+        # Navigation followed by a real action — prefer the action.
+        token = best_action_token
+        token_idx = best_action_idx
+    else:
+        # Standard case: first recognised command wins.
+        token = first_token
+        token_idx = first_idx
 
     # ``xargs`` is plumbing — look through to what it runs
-    if token == "xargs" and len(parts) > 1:
-        # Skip xargs flags (those starting with -) to find the real command
-        for p in parts[1:]:
+    if token == "xargs" and token_idx >= 0:
+        for p in parts[token_idx + 1:]:
             if not p.startswith("-"):
                 token = p
                 break
@@ -338,11 +398,12 @@ def _tokenize_segment(segment: str) -> str:
     _PYTHON_INTERPS = frozenset({
         "python", "python3", "python3.9", "python3.10", "python3.11", "python3.12",
     })
-    if token in _PYTHON_INTERPS and len(parts) >= 4 and parts[1] == "-m":
-        module_token = parts[2]
-        # Only redirect if the module is known — unknown modules stay as python.
-        if module_token in _COMMAND_CATEGORY_MAP:
-            token = module_token
+    if token in _PYTHON_INTERPS and token_idx >= 0:
+        if len(parts) > token_idx + 2 and parts[token_idx + 1] == "-m":
+            module_token = parts[token_idx + 2]
+            # Only redirect if the module is known — unknown modules stay as python.
+            if module_token in _COMMAND_CATEGORY_MAP:
+                token = module_token
 
     return token
 
@@ -358,27 +419,41 @@ def _extract_base_command(command: str) -> str:
     if not command or not isinstance(command, str):
         return "exec"
 
-    # Split into segments
+    # Split into segments, respecting shell quoting so that ``|``, ``&&``,
+    # and ``;`` inside single/double quotes don't trigger a split.
     segments: list[str] = []
     current = ""
     i = 0
+    in_single = False
+    in_double = False
     while i < len(command):
         ch = command[i]
-        if ch == "|" and (i == 0 or command[i - 1] != "\\"):
-            segments.append(current)
-            current = ""
-            i += 1
-            continue
-        if ch == "&" and i + 1 < len(command) and command[i + 1] == "&":
-            segments.append(current)
-            current = ""
-            i += 2
-            continue
-        if ch == ";":
-            segments.append(current)
-            current = ""
-            i += 1
-            continue
+
+        # Track quote state (shell-style, with backslash escape for ")
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            # Only toggle if not escaped
+            if i == 0 or command[i - 1] != "\\":
+                in_double = not in_double
+
+        # Only split when outside quotes
+        if not in_single and not in_double:
+            if ch == "|" and (i == 0 or command[i - 1] != "\\"):
+                segments.append(current)
+                current = ""
+                i += 1
+                continue
+            if ch == "&" and i + 1 < len(command) and command[i + 1] == "&":
+                segments.append(current)
+                current = ""
+                i += 2
+                continue
+            if ch == ";":
+                segments.append(current)
+                current = ""
+                i += 1
+                continue
         current += ch
         i += 1
     segments.append(current)

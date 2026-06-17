@@ -194,10 +194,13 @@ def _read_io_via_exec(
         "    try:\n"
         "      d={}\n"
         "      for l in open(p):\n"
+        "        if ':' not in l: continue\n"
         "        k,v=l.split(':',1)\n"
-        "        d[k.strip()]=int(v.strip())\n"
+        "        try:\n"
+        "          d[k.strip()]=int(v.strip())\n"
+        "        except ValueError: pass\n"
         "      r+=d.get('read_bytes',0);w+=d.get('write_bytes',0)\n"
-        "    except: pass\n"
+        "    except (OSError,IOError): pass\n"
         "  print(r,w)\n"
     )
     try:
@@ -638,6 +641,10 @@ class ContainerStatsSampler(threading.Thread):
         # High-water marks for exec-mode disk I/O (non-monotonic source)
         self._io_hwm_read: int = 0
         self._io_hwm_write: int = 0
+        # Last-known disk I/O values — used as fallback when a read fails
+        # so the cumulative counter never appears to reset to 0.
+        self._last_disk_read_bytes: int = 0
+        self._last_disk_write_bytes: int = 0
         # Cgroup-based CPU tracking (deltas between consecutive samples).
         self._prev_cpu_usec: int | None = None
         self._prev_cpu_mono: float | None = None
@@ -729,16 +736,25 @@ class ContainerStatsSampler(threading.Thread):
                 sample["context_switches"] = ctxt_total
 
         if io_data:
-            rb = io_data.get("read_bytes", 0)
-            wb = io_data.get("write_bytes", 0)
+            rb: int = io_data.get("read_bytes", 0)
+            wb: int = io_data.get("write_bytes", 0)
             if self._io_mode == "exec":
                 # High-water mark: exec-based I/O is non-monotonic
                 self._io_hwm_read = max(self._io_hwm_read, rb)
                 self._io_hwm_write = max(self._io_hwm_write, wb)
                 rb = self._io_hwm_read
                 wb = self._io_hwm_write
+            self._last_disk_read_bytes = rb
+            self._last_disk_write_bytes = wb
             sample["disk_read_bytes"] = rb
             sample["disk_write_bytes"] = wb
+        else:
+            # I/O read failed (e.g. io.stat unavailable, exec timeout).
+            # Preserve last-known values so the cumulative counter never
+            # appears to reset to 0 — a reset would produce a spurious
+            # negative-then-positive rate spike in the visualization.
+            sample["disk_read_bytes"] = self._last_disk_read_bytes
+            sample["disk_write_bytes"] = self._last_disk_write_bytes
 
         # Network I/O from stats output
         net_io = sample.get("net_io")

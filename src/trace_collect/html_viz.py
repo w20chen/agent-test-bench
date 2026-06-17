@@ -350,10 +350,13 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["mem"].append(_parse_mem_mb(str(s.get("mem_usage", ""))))
 
         # Compute dt once per sample — shared by all rate calculations.
+        # On the very first sample there is no previous timestamp to
+        # compute a delta from, so dt=0 and we skip the first rate point.
         if not first:
             dt = rel_ts - prev_ts
         else:
             dt = 0.0
+            first = False
 
         # Network: net_rx_bytes / net_tx_bytes → cumulative MB + rate MB/s
         raw_rx = float(s.get("net_rx_bytes", 0) or 0)
@@ -386,7 +389,6 @@ def generate_html(attempt_dir: Path) -> str:
         else:
             dr_rate = 0.0
             dw_rate = 0.0
-            first = False
         res_data["disk_r_rate"].append(dr_rate)
         res_data["disk_w_rate"].append(dw_rate)
         prev_dr = dr_mb
