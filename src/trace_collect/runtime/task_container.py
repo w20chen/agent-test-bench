@@ -25,6 +25,7 @@ _REDACTED_SECRET = "***REDACTED***"
 _DEFAULT_RUNTIME_PYTHONPATH = f"{REPO_ROOT / 'src'}:{REPO_ROOT}"
 _CONTAINER_SYSTEM_PYTHON = "/usr/bin/python3"
 _DEFAULT_PIP_INDEX_URL = "https://pypi.org/simple"
+_SHARED_BOOTSTRAP_CACHE = Path.home() / ".cache" / "task-container-bootstrap"
 _GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 _GET_PIP_FETCH_ATTEMPTS = 3
 _GET_PIP_FETCH_BACKOFF_SECONDS = 1.0
@@ -284,7 +285,7 @@ def resolve_task_container_exec_config(
             image_platform=image_platform,
         )
 
-    site_dir = task_container_runtime_dir(attempt_dir, "bootstrap") / "pydeps"
+    site_dir = _SHARED_BOOTSTRAP_CACHE / "pydeps"
     return TaskContainerExecConfig(
         runtime=_CONTAINER_SYSTEM_PYTHON,
         pythonpath=f"{site_dir}:{_DEFAULT_RUNTIME_PYTHONPATH}",
@@ -615,8 +616,18 @@ def bootstrap_task_container_python(
         requirements=requirements,
         runtime=exec_config.runtime,
     ):
+        print(
+            f"[bootstrap] shared cache hit: {marker}",
+            file=sys.stderr,
+            flush=True,
+        )
         return
     if marker.exists():
+        print(
+            f"[bootstrap] shared cache stale, rebuilding: {marker}",
+            file=sys.stderr,
+            flush=True,
+        )
         marker.unlink(missing_ok=True)
         shutil.rmtree(exec_config.bootstrap_site_dir, ignore_errors=True)
 
