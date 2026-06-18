@@ -709,12 +709,16 @@ subprocess.check_call(
 )
 _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
-_log("step 3/3: writing marker + cleaning up ...")
+_log("step 3/3: writing marker ...")
 marker.write_text(
     json.dumps({{"requirements": requirements, "python": sys.executable}}),
     encoding="utf-8",
 )
-shutil.rmtree(userbase, ignore_errors=True)
+# Keep userbase intact so the agent can use pip at runtime.
+# get-pip.py is no longer needed; pip binary + lib are kept.
+_get_pip = userbase / "get-pip.py"
+if _get_pip.exists():
+    _get_pip.unlink()
 _log("bootstrap complete")
 """
     result = subprocess.run(
