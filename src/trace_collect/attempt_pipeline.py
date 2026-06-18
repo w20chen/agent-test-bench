@@ -181,6 +181,7 @@ def start_task_container(
     if image_platform:
         cmd.extend(["--platform", image_platform])
     cmd.extend([fixed_image, "sleep", "infinity"])
+    logger.info("starting task container: image=%s platform=%s ...", fixed_image, image_platform or "auto")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if result.returncode != 0:
         raise RuntimeError(

@@ -305,6 +305,11 @@ def resolve_running_container_exec_config(
     if not exec_config.bootstrap:
         return exec_config
 
+    print(
+        f"[bootstrap] probing container {container_id[:12]} for Python >=3.11 ...",
+        file=sys.stderr,
+        flush=True,
+    )
     probe_script = """
 set -eu
 for cand in "$@"; do
