@@ -352,6 +352,11 @@ exit 1
     runtime = result.stdout.strip()
     if not runtime:
         raise RuntimeError("task-container python probe failed: empty interpreter path")
+    print(
+        f"[bootstrap] probing done: {runtime}",
+        file=sys.stderr,
+        flush=True,
+    )
     return TaskContainerExecConfig(
         runtime=runtime,
         pythonpath=exec_config.pythonpath,
@@ -724,7 +729,8 @@ _log("bootstrap complete")
             "-",
         ],
         input=script,
-        capture_output=True,
+        stdout=sys.stderr,
+        stderr=subprocess.PIPE,
         text=True,
         check=False,
         timeout=1800,
@@ -732,5 +738,5 @@ _log("bootstrap complete")
     if result.returncode != 0:
         raise RuntimeError(
             "task-container python bootstrap failed: "
-            f"{result.stderr.strip() or result.stdout.strip()}"
+            f"{result.stderr.strip()}"
         )
