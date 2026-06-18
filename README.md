@@ -318,6 +318,9 @@ metrics as time-series charts below the Gantt chart:
 - **Network I/O** — RX/TX rate in MiB/s (computed from cumulative byte deltas)
 - **Disk I/O** — read/write rate in MiB/s (computed from cumulative byte deltas)
 - **Context Switches** — rate in switches/s
+- **Ksys (Huawei Kunpeng)** — when `--ksys` is passed, `ksys collect` runs
+  alongside the agent and its stdout/stderr are captured in the attempt
+  directory (see **Ksys System Metrics** below).
 
 Each chart gracefully degrades when its data source is unavailable, showing
 a descriptive error message with the specific reason and remediation hint.
@@ -788,6 +791,29 @@ Recording uses `attn_implementation="sdpa"` for the model path and computes
 only sampled attention rows inside hooks. It forces
 `NANOBOT_MAX_CONCURRENT_REQUESTS=1` and is intended for data collection, not
 production throughput.
+
+### Ksys System Metrics
+
+`--ksys` starts `ksys collect` as a background process alongside the agent
+and stops it (SIGINT) when the agent finishes.  The raw stdout/stderr are
+written to `ksys_stdout.txt` / `ksys_stderr.txt` in the attempt directory.
+
+- **Default: off.**  Pass `--ksys` to enable.
+- **No-op when `ksys` is not installed** on the host (graceful degradation).
+- **Timeline alignment:** ksys starts at the same point as other resource
+  samplers, so its data shares the Gantt chart's t0 (time origin).
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider openai \
+    --model deepseek-chat \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --sample 1 \
+    --ksys
+```
 
 ## Supported Benchmarks
 

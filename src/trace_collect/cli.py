@@ -137,6 +137,16 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ksys",
+        action="store_true",
+        help=(
+            "Start `ksys collect` alongside the agent and stop it when the "
+            "agent finishes.  Output written to ksys_stdout.txt / "
+            "ksys_stderr.txt in the attempt directory.  No-op when ksys "
+            "is not installed on the host."
+        ),
+    )
+    parser.add_argument(
         "--kv-policy",
         choices=["none", "random", "streaming", "h2o"],
         default="none",
@@ -671,6 +681,7 @@ def _run_collect(args: argparse.Namespace) -> None:
             prompt_template=args.prompt_template,
             min_free_disk_gb=args.min_free_disk_gb,
             record_internals=args.record_internals,
+            enable_ksys=args.ksys,
             eviction_config=eviction_config,
             sparse_attention_config=sparse_attention_config,
         )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -296,6 +298,20 @@ def _container_is_inspectable(
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _stop_ksys(proc: subprocess.Popen) -> None:
+    """Send SIGINT to *proc*, wait briefly, then force-kill if needed."""
+    try:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("ksys did not exit after SIGINT, sending SIGKILL")
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        logger.warning("ksys stop failed", exc_info=True)
+
+
 async def _wait_for_recording_provider_idle(
     recording_provider: Any,
     *,
@@ -315,6 +331,7 @@ async def run_attempt(
     min_free_disk_gb: float = 30.0,
     container_executable: str | None,
     recording_provider: Any | None = None,
+    enable_ksys: bool = False,
 ) -> AttemptResult:
     """Execute one scaffold attempt and write its artifacts."""
     if recording_provider is not None:
@@ -406,6 +423,29 @@ async def run_attempt(
     if recording_provider is not None:
         recording_provider.start_attempt(ctx.attempt_dir / "recordings")
 
+    # ksys system metrics collector (Huawei Kunpeng).  Started alongside
+    # other samplers so its timeline aligns with the Gantt chart's t0.
+    # Gracefully no-ops when ksys is not installed on the host.
+    # Controlled by --ksys flag (default: off).
+    ksys_proc: subprocess.Popen | None = None
+    if enable_ksys:
+        ksys_bin = shutil.which("ksys")
+        if ksys_bin is not None:
+            ksys_stdout = (ctx.attempt_dir / "ksys_stdout.txt").open("wb")
+            ksys_stderr = (ctx.attempt_dir / "ksys_stderr.txt").open("wb")
+            try:
+                ksys_proc = subprocess.Popen(
+                    [ksys_bin, "collect"],
+                    stdout=ksys_stdout,
+                    stderr=ksys_stderr,
+                )
+                logger.info("ksys collect started (pid=%d) → %s", ksys_proc.pid, ctx.attempt_dir)
+            except Exception:
+                logger.warning("ksys collect failed to start", exc_info=True)
+                ksys_stdout.close()
+                ksys_stderr.close()
+                ksys_proc = None
+
     sampler: ContainerStatsSampler | ProcessStatsSampler | None = None
     samples: list[dict[str, Any]] = []
     result: AttemptResult | None = None
@@ -451,6 +491,8 @@ async def run_attempt(
             process_samples = process_sampler.stop()
             if not samples:
                 samples = process_samples
+        if ksys_proc is not None:
+            _stop_ksys(ksys_proc)
         ctx.end_time = datetime.now(tz=timezone.utc)
 
     status = "completed"

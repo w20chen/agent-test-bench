@@ -458,6 +458,7 @@ async def _run_scaffold_tasks(
     container_executable: str | None,
     prompt_template: str | None,
     min_free_disk_gb: float,
+    enable_ksys: bool = False,
     inner_factory,
     recording_provider: Any | None = None,
 ) -> Path:
@@ -574,6 +575,7 @@ async def _run_scaffold_tasks(
                     "inner": _inner,
                     "min_free_disk_gb": min_free_disk_gb,
                     "container_executable": container_executable,
+                    "enable_ksys": enable_ksys,
                 }
                 if recording_provider is not None:
                     run_attempt_kwargs["recording_provider"] = recording_provider
@@ -674,6 +676,7 @@ async def collect_traces(
     prompt_template: str | None = None,
     min_free_disk_gb: float = 30.0,
     record_internals: bool = False,
+    enable_ksys: bool = False,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
 ) -> Path:
@@ -834,6 +837,7 @@ async def collect_traces(
             container_executable=container_executable,
             prompt_template=prompt_template,
             min_free_disk_gb=min_free_disk_gb,
+            enable_ksys=enable_ksys,
             inner_factory=make_inner,
             recording_provider=recording_provider,
         )
