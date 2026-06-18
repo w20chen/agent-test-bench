@@ -100,7 +100,11 @@ class ExecTool(Tool):
 
         env = os.environ.copy()
         if self.path_append:
-            env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
+            # Prepend bootstrap/tool paths so they take priority over host
+            # ~/.local/bin (critical on ARM+QEMU where the host home directory
+            # is bind-mounted and contains ARM64 binaries that cannot execute
+            # inside the x86_64 container).
+            env["PATH"] = self.path_append + os.pathsep + env.get("PATH", "")
 
         try:
             process = await asyncio.create_subprocess_shell(

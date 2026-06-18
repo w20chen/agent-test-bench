@@ -152,6 +152,14 @@ def start_task_container(
     import subprocess
 
     home_dir = os.environ.get("HOME", "/root")
+    # On ARM+QEMU hosts the host ~/.local/bin contains ARM64 binaries that
+    # cannot execute inside the x86_64 container.  Omit it from PATH and
+    # rely on bootstrap paths (set via exec_path_append) to provide pip and
+    # other runtime tools.
+    if use_arm_qemu():
+        container_path = "/usr/local/bin:/usr/bin:/bin"
+    else:
+        container_path = f"{home_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin"
     cmd = [
         executable,
         "run",
@@ -165,7 +173,7 @@ def start_task_container(
         "-e",
         f"HOME={home_dir}",
         "-e",
-        f"PATH={home_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        f"PATH={container_path}",
     ]
     for env_name in _TASK_CONTAINER_ENV_PASSTHROUGH:
         value = os.environ.get(env_name)
