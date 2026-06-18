@@ -1068,8 +1068,20 @@ async def _run_openclaw_in_task_container(
                 "tool_workspace": "/testbed",
                 "exec_path_append": ":".join(
                     [
-                        str(runtime_dir / "bootstrap" / ".pyuserbase" / "bin"),
-                        str(runtime_dir / "bootstrap" / "pydeps" / "bin"),
+                        str(
+                            Path.home()
+                            / ".cache"
+                            / "task-container-bootstrap"
+                            / ".pyuserbase"
+                            / "bin"
+                        ),
+                        str(
+                            Path.home()
+                            / ".cache"
+                            / "task-container-bootstrap"
+                            / "pydeps"
+                            / "bin"
+                        ),
                     ]
                 ),
                 "exec_working_dir": "/testbed",
