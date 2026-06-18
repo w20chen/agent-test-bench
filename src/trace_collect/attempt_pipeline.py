@@ -473,6 +473,14 @@ async def run_attempt(
             pid=os.getpid(),
             interval_s=0.5,
             exclude_pids={ksys_pid} if ksys_pid is not None else None,
+            # When ksys is enabled, skip child-process enumeration
+            # entirely.  ksys may spawn helpers that would not be
+            # caught by a static PID exclusion list, and any
+            # children created by the agent scaffold (e.g. shell
+            # commands) are short-lived — their contribution to
+            # the cumulative resource profile is negligible
+            # compared to the interference they introduce.
+            include_children=ksys_pid is None,
         )
         process_sampler.start()
     if recording_provider is not None:

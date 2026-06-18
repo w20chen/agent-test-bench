@@ -168,7 +168,7 @@ def test_process_sampler_keeps_psutil_child_io_over_proc_parent(monkeypatch) -> 
     sampler = ProcessStatsSampler(pid=1, interval_s=60.0)
     monkeypatch.setattr(
         "harness.process_stats_sampler._sample_with_psutil",
-        lambda pid, *, process_cache, ctx_high_water=None, io_high_water=None, exclude_pids=None: {
+        lambda pid, *, process_cache, ctx_high_water=None, io_high_water=None, exclude_pids=None, include_children=True: {
             "epoch": 1.0,
             "timestamp": "ts",
             "mem_usage": "60MiB",
@@ -200,7 +200,7 @@ def test_process_sampler_attaches_host_memory_bandwidth(monkeypatch) -> None:
     sampler = ProcessStatsSampler(pid=1, interval_s=60.0)
     monkeypatch.setattr(
         "harness.process_stats_sampler._sample_with_psutil",
-        lambda pid, *, process_cache, ctx_high_water=None, io_high_water=None, exclude_pids=None: {
+        lambda pid, *, process_cache, ctx_high_water=None, io_high_water=None, exclude_pids=None, include_children=True: {
             "epoch": 1.0,
             "timestamp": "ts",
             "mem_usage": "60MiB",

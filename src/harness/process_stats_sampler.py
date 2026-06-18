@@ -163,12 +163,36 @@ def _cache_process(
     return process
 
 
+def _expand_exclude_set(root_pids: set[int]) -> set[int]:
+    """Return *root_pids* plus all current descendants of each root PID.
+
+    This handles the case where an instrumented subprocess (e.g. ksys)
+    spawns helper child processes — excluding only the root PID would
+    miss those helpers.
+    """
+    if not root_pids:
+        return set()
+    try:
+        import psutil
+    except ImportError:
+        return set(root_pids)
+    result = set(root_pids)
+    for pid in root_pids:
+        try:
+            for child in psutil.Process(pid).children(recursive=True):
+                result.add(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+            result.add(pid)  # keep the root even if it's gone
+    return result
+
+
 def _sample_with_psutil(
     pid: int,
     process_cache: dict[int, Any] | None = None,
     ctx_high_water: dict[tuple[int, float], int] | None = None,
     io_high_water: dict[tuple[int, float], tuple[int, int]] | None = None,
     exclude_pids: set[int] | None = None,
+    include_children: bool = True,
 ) -> dict[str, Any] | None:
     try:
         import psutil  # type: ignore[import]
@@ -182,12 +206,15 @@ def _sample_with_psutil(
         )
     except Exception:
         return None
-    try:
-        children = list(process.children(recursive=True))
-    except Exception:
-        children = []
-    # Exclude instrumented subprocesses (e.g. ksys) from the metrics so
-    # they don't pollute the agent's resource accounting.
+    children: list[Any] = []
+    if include_children:
+        try:
+            children = list(process.children(recursive=True))
+        except Exception:
+            children = []
+    # Exclude instrumented subprocesses (e.g. ksys) and their entire
+    # subtrees from the metrics so they don't pollute the agent's
+    # resource accounting.
     _exclude = exclude_pids or set()
     if _exclude:
         children = [c for c in children if c.pid not in _exclude]
@@ -311,12 +338,14 @@ class ProcessStatsSampler(threading.Thread):
         *,
         interval_s: float = 1.0,
         exclude_pids: set[int] | None = None,
+        include_children: bool = True,
     ) -> None:
         target_pid = os.getpid() if pid is None else pid
         super().__init__(daemon=True, name=f"proc-stats-{target_pid}")
         self.pid = target_pid
         self.interval_s = interval_s
         self._exclude_pids: set[int] = exclude_pids or set()
+        self._include_children = include_children
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._sample_count: int = 0
@@ -354,12 +383,16 @@ class ProcessStatsSampler(threading.Thread):
 
     def _collect_sample(self) -> dict[str, Any] | None:
         self._maybe_consolidate_hw()
+        # Dynamically expand exclude_pids to cover the full subtree of each
+        # excluded root (e.g. ksys may spawn helper processes).
+        expanded_exclude = _expand_exclude_set(self._exclude_pids)
         sample = _sample_with_psutil(
             self.pid,
             process_cache=self._psutil_process_cache,
             ctx_high_water=self._ctx_high_water,
             io_high_water=self._io_high_water,
-            exclude_pids=self._exclude_pids,
+            exclude_pids=expanded_exclude,
+            include_children=self._include_children,
         ) or _sample_with_ps(self.pid)
         if sample is None:
             sample = _fallback_sample()
