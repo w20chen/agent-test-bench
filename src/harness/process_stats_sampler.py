@@ -168,6 +168,7 @@ def _sample_with_psutil(
     process_cache: dict[int, Any] | None = None,
     ctx_high_water: dict[tuple[int, float], int] | None = None,
     io_high_water: dict[tuple[int, float], tuple[int, int]] | None = None,
+    exclude_pids: set[int] | None = None,
 ) -> dict[str, Any] | None:
     try:
         import psutil  # type: ignore[import]
@@ -185,6 +186,11 @@ def _sample_with_psutil(
         children = list(process.children(recursive=True))
     except Exception:
         children = []
+    # Exclude instrumented subprocesses (e.g. ksys) from the metrics so
+    # they don't pollute the agent's resource accounting.
+    _exclude = exclude_pids or set()
+    if _exclude:
+        children = [c for c in children if c.pid not in _exclude]
     if process_cache is not None:
         for child in children:
             child_pid = getattr(child, "pid", None)
@@ -299,11 +305,18 @@ class ProcessStatsSampler(threading.Thread):
     # children (prevents slow memory creep).
     _HW_CONSOLIDATE_EVERY = 200
 
-    def __init__(self, pid: int | None = None, *, interval_s: float = 1.0) -> None:
+    def __init__(
+        self,
+        pid: int | None = None,
+        *,
+        interval_s: float = 1.0,
+        exclude_pids: set[int] | None = None,
+    ) -> None:
         target_pid = os.getpid() if pid is None else pid
         super().__init__(daemon=True, name=f"proc-stats-{target_pid}")
         self.pid = target_pid
         self.interval_s = interval_s
+        self._exclude_pids: set[int] = exclude_pids or set()
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._sample_count: int = 0
@@ -346,6 +359,7 @@ class ProcessStatsSampler(threading.Thread):
             process_cache=self._psutil_process_cache,
             ctx_high_water=self._ctx_high_water,
             io_high_water=self._io_high_water,
+            exclude_pids=self._exclude_pids,
         ) or _sample_with_ps(self.pid)
         if sample is None:
             sample = _fallback_sample()

@@ -439,18 +439,12 @@ async def run_attempt(
             )
         )
 
-    process_sampler: ProcessStatsSampler | None = None
-    if ctx.execution_environment == "host":
-        process_sampler = ProcessStatsSampler(pid=os.getpid(), interval_s=0.5)
-        process_sampler.start()
-    if recording_provider is not None:
-        recording_provider.start_attempt(ctx.attempt_dir / "recordings")
-
     # ksys system metrics collector (Huawei Kunpeng).  Started alongside
     # other samplers so its timeline aligns with the Gantt chart's t0.
     # Gracefully no-ops when ksys is not installed on the host.
     # Controlled by --ksys flag (default: off).
     ksys_proc: subprocess.Popen | None = None
+    ksys_pid: int | None = None
     if enable_ksys:
         ksys_bin = shutil.which("ksys")
         if ksys_bin is not None:
@@ -462,12 +456,27 @@ async def run_attempt(
                     stdout=ksys_stdout,
                     stderr=ksys_stderr,
                 )
-                logger.info("ksys collect started (pid=%d) → %s", ksys_proc.pid, ctx.attempt_dir)
+                ksys_pid = ksys_proc.pid
+                logger.info("ksys collect started (pid=%d) → %s", ksys_pid, ctx.attempt_dir)
             except Exception:
                 logger.warning("ksys collect failed to start", exc_info=True)
+                ksys_proc = None
+            finally:
+                # Parent no longer needs these handles — the child has its
+                # own copies.  Closing avoids a file-descriptor leak.
                 ksys_stdout.close()
                 ksys_stderr.close()
-                ksys_proc = None
+
+    process_sampler: ProcessStatsSampler | None = None
+    if ctx.execution_environment == "host":
+        process_sampler = ProcessStatsSampler(
+            pid=os.getpid(),
+            interval_s=0.5,
+            exclude_pids={ksys_pid} if ksys_pid is not None else None,
+        )
+        process_sampler.start()
+    if recording_provider is not None:
+        recording_provider.start_attempt(ctx.attempt_dir / "recordings")
 
     sampler: ContainerStatsSampler | ProcessStatsSampler | None = None
     samples: list[dict[str, Any]] = []
