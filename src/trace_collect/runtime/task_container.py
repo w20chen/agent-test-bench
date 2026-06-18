@@ -626,6 +626,12 @@ def bootstrap_task_container_python(
         or os.environ.get("PIP_INDEX_URL")
         or _DEFAULT_PIP_INDEX_URL
     )
+    print(
+        f"[bootstrap] installing pip + {len(requirements)} runtime deps "
+        f"from {pip_index_url} into container {container_id[:12]}...",
+        file=sys.stderr,
+        flush=True,
+    )
     script = f"""
 import json
 import os
@@ -633,6 +639,10 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import time as _time
+
+def _log(msg):
+    print(f"[bootstrap] {{msg}}", flush=True)
 
 site_dir = pathlib.Path({str(exec_config.bootstrap_site_dir)!r})
 marker = pathlib.Path({str(marker)!r})
@@ -648,6 +658,7 @@ if marker.exists():
 env = dict(os.environ)
 env["PYTHONUSERBASE"] = str(userbase)
 get_pip = userbase / "get-pip.py"
+_log("step 1/3: bootstrapping pip via get-pip.py ...")
 subprocess.check_call(
     [sys.executable, str(get_pip), "--user", "--break-system-packages"],
     env=env,
@@ -657,6 +668,8 @@ if not pip_bin.exists():
     pip_bin = userbase / "bin" / "pip3"
 if not pip_bin.exists():
     raise RuntimeError("pip bootstrap succeeded but pip executable is missing")
+_log(f"step 2/3: pip install {{len(requirements)}} packages from {pip_index_url!r} ...")
+_start = _time.time()
 subprocess.check_call(
     [
         str(pip_bin),
@@ -673,11 +686,15 @@ subprocess.check_call(
     ],
     env=env,
 )
+_elapsed = _time.time() - _start
+_log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
+_log("step 3/3: writing marker + cleaning up ...")
 marker.write_text(
     json.dumps({{"requirements": requirements, "python": sys.executable}}),
     encoding="utf-8",
 )
 shutil.rmtree(userbase, ignore_errors=True)
+_log("bootstrap complete")
 """
     result = subprocess.run(
         [
