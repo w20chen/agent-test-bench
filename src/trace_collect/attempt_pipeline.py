@@ -156,10 +156,23 @@ def start_task_container(
     # cannot execute inside the x86_64 container.  Omit it from PATH and
     # rely on bootstrap paths (set via exec_path_append) to provide pip and
     # other runtime tools.
+    #
+    # Also set PYTHONUSERBASE to the bootstrap userbase so that:
+    # 1. The bootstrapped pip can import its own package (pip._internal)
+    # 2. Python does NOT load ARM64 host .so files from ~/.local/lib/
+    # PIP_BREAK_SYSTEM_PACKAGES avoids the Debian "externally-managed" error.
     if use_arm_qemu():
         container_path = "/usr/local/bin:/usr/bin:/bin"
+        bootstrap_userbase = (
+            f"{home_dir}/.cache/task-container-bootstrap/.pyuserbase"
+        )
+        qemu_env = [
+            "-e", f"PYTHONUSERBASE={bootstrap_userbase}",
+            "-e", "PIP_BREAK_SYSTEM_PACKAGES=1",
+        ]
     else:
         container_path = f"{home_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        qemu_env = []
     cmd = [
         executable,
         "run",
@@ -175,6 +188,7 @@ def start_task_container(
         "-e",
         f"PATH={container_path}",
     ]
+    cmd.extend(qemu_env)
     for env_name in _TASK_CONTAINER_ENV_PASSTHROUGH:
         value = os.environ.get(env_name)
         if value:
