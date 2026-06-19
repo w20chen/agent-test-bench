@@ -756,6 +756,7 @@ class SessionRunner:
             "web_fetch",
             "message",
             "spawn",
+            "sessions_yield",
         ]
 
     async def run(

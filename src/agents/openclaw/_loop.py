@@ -27,6 +27,7 @@ from agents.openclaw.tools.message import MessageTool
 from agents.openclaw.tools.registry import ToolRegistry
 from agents.openclaw.tools.shell import ExecTool
 from agents.openclaw.tools.spawn import SpawnTool
+from agents.openclaw.tools.sessions_yield import YieldTool
 from agents.openclaw.tools.web import WebFetchTool, WebSearchTool
 from agents.openclaw.bus.events import InboundMessage, OutboundMessage
 from agents.openclaw.bus.queue import MessageBus
@@ -295,6 +296,7 @@ class AgentLoop:
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
+        self.tools.register(YieldTool(drain_results=self.subagents.drain_pending_results))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -325,7 +327,7 @@ class AgentLoop:
         self, channel: str, chat_id: str, message_id: str | None = None
     ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn", "cron", "sessions_yield"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(
@@ -370,13 +372,19 @@ class AgentLoop:
         chat_id: str = "direct",
         message_id: str | None = None,
         skip_extra_hooks: bool = False,
-    ) -> tuple[str | None, list[str], list[dict]]:
+        drain_subagent: bool = True,
+    ) -> tuple[str | None, list[str], list[dict], str]:
         """Run the agent iteration loop.
 
         When *skip_extra_hooks* is True, ``self._extra_hooks`` (including the
         trace-collector hook) are NOT attached to this invocation.  This is
         used for system-channel messages (e.g. subagent result delivery) so
         that a concurrently-running main loop's trace state is not corrupted.
+
+        When *drain_subagent* is False, pending subagent results are NOT
+        drained between iterations.  This must be set for subagent result
+        processing (bus path) so that pending results are left for the main
+        agent's loop to consume.
         """
         loop_hook = _LoopHook(
             self,
@@ -417,6 +425,7 @@ class AgentLoop:
                 malformed_retry_budget=self.malformed_retry_budget,
                 progress_callback=on_progress,
                 checkpoint_callback=_checkpoint,
+                drain_subagent_results=self.subagents.drain_pending_results if drain_subagent else None,
             )
         )
         self._last_usage = result.usage
@@ -429,7 +438,7 @@ class AgentLoop:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages
+        return result.final_content, result.tools_used, result.messages, result.stop_reason
 
     def _emit_event(self, category: str, event: str, data: dict | None = None) -> None:
         if self._event_callback:
@@ -641,13 +650,14 @@ class AgentLoop:
                 chat_id=chat_id,
                 current_role=current_role,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
+            final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
                 messages,
                 session=session,
                 channel=channel,
                 chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
                 skip_extra_hooks=(msg.sender_id == "subagent"),
+                drain_subagent=(msg.sender_id != "subagent"),
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             self._clear_runtime_checkpoint(session)
@@ -728,7 +738,7 @@ class AgentLoop:
                 )
             )
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, stop_reason = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,

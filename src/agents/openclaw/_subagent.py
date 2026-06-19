@@ -71,6 +71,11 @@ class SubagentManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._active_trace_hooks: dict[str, Any] = {}
+        # Pending subagent result messages, keyed by session_key.
+        # Populated by _announce_result and drained by the main agent's
+        # runner between iterations so injected results appear in the
+        # model-visible message stream without bus/lock round-trips.
+        self._pending_results: dict[str, list[dict[str, Any]]] = {}
 
     async def spawn(
         self,
@@ -277,6 +282,7 @@ class SubagentManager:
         status: str,
     ) -> None:
         status_text = "completed successfully" if status == "ok" else "failed"
+        session_key = f"{origin['channel']}:{origin['chat_id']}"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
 
@@ -287,11 +293,25 @@ Result:
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
-        # Inject as system message to trigger main agent
+        # 1) Direct injection path: append to the pending-results queue
+        #    so the main agent's runner can pick it up between iterations
+        #    without going through the bus/lock bottleneck.
+        pending_msg = {
+            "role": "assistant",
+            "content": f"[Subagent '{label}' {status_text}]\n\n{result}",
+            "_subagent_task_id": task_id,
+            "_subagent_label": label,
+            "_subagent_status": status,
+        }
+        self._pending_results.setdefault(session_key, []).append(pending_msg)
+
+        # 2) Bus path (legacy): publish to MessageBus so the AgentLoop.run()
+        #    loop can also pick it up via a separate dispatch task.  This
+        #    path is still used when the main agent is yielded.
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
-            chat_id=f"{origin['channel']}:{origin['chat_id']}",
+            chat_id=session_key,
             content=announce_content,
         )
 
@@ -302,6 +322,15 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             origin["channel"],
             origin["chat_id"],
         )
+
+    def drain_pending_results(self, session_key: str) -> list[dict[str, Any]]:
+        """Return and clear pending subagent result messages for *session_key*.
+
+        Called by the main agent's runner between iterations so completed
+        subagent outputs appear in the model-visible message stream without
+        needing a separate dispatch / lock acquisition.
+        """
+        return self._pending_results.pop(session_key, [])
 
     @staticmethod
     def _format_partial_progress(result) -> str:

@@ -453,6 +453,14 @@ def _resolve_tool_request(
             },
         }, command_timeout_s
 
+    if tool_name == "sessions_yield":
+        return {
+            "tool": "sessions_yield",
+            "args": {
+                "message": params.get("message", ""),
+            },
+        }, command_timeout_s
+
     if tool_name == "message":
         return {
             "tool": "message",
@@ -529,7 +537,7 @@ class HostAgent:
 
         tool = self._tools.get(tool_name)
         if tool is None:
-            if tool_name in ("spawn", "message"):
+            if tool_name in ("spawn", "message", "sessions_yield"):
                 return {
                     "ok": True,
                     "result": json.dumps(args, ensure_ascii=False),

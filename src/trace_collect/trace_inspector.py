@@ -637,6 +637,7 @@ _TIMELINE_ICONS: dict[str, str] = {
     "subagent_error": "❌🌱",
     "subagent_cancel": "🚫🌱",
     "subagent_announcement": "📢🌱",
+    "sessions_yield": "⏸️",
     "message_dispatch": "📤",
     "session_lock_acquire": "🔒",
     "session_lock_release": "🔓",

@@ -101,6 +101,55 @@ def find_legal_message_start(messages: list[dict[str, Any]]) -> int:
                                 declared.add(str(tc["id"]))
     return start
 
+
+def repair_orphan_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip trailing assistant messages whose tool_calls lack tool results.
+
+    Some providers (DeepSeek) reject messages where an assistant message
+    declares ``tool_calls`` but no corresponding ``role=tool`` message
+    follows.  This can happen after ``_snip_history`` truncation when
+    the budget cuts between a tool_calls message and its results.
+
+    Returns a (possibly shorter) copy of *messages* with orphan
+    tool_calls-bearing assistant messages stripped from the tail.
+    """
+    if not messages:
+        return messages
+
+    # Gather all tool_call_ids that have a matching tool result later.
+    satisfied: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id")
+            if tid:
+                satisfied.add(str(tid))
+
+    # Walk backwards and remove trailing assistant messages whose
+    # tool_calls are unsatisfied.
+    cleaned = list(messages)
+    while cleaned:
+        last = cleaned[-1]
+        if last.get("role") != "assistant":
+            break
+        tcs = last.get("tool_calls") or []
+        if not tcs:
+            break  # plain assistant message — keep it
+        # Check whether every declared tool_call has a result.
+        orphaned = any(
+            isinstance(tc, dict) and str(tc.get("id", "")) not in satisfied
+            for tc in tcs
+        )
+        if not orphaned:
+            break
+        # Remove unsatisfied tool_call IDs from the satisfied set
+        # (they were only "satisfied" because we haven't stripped them yet).
+        for tc in tcs:
+            if isinstance(tc, dict) and tc.get("id"):
+                satisfied.discard(str(tc["id"]))
+        cleaned.pop()
+
+    return cleaned
+
 def stringify_text_blocks(content: list[dict[str, Any]]) -> str | None:
     parts: list[str] = []
     for block in content:

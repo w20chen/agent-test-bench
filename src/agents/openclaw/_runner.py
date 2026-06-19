@@ -21,6 +21,7 @@ from agents.openclaw.utils.helpers import (
     estimate_prompt_tokens_chain,
     find_legal_message_start,
     maybe_persist_tool_result,
+    repair_orphan_tool_calls,
     truncate_text,
 )
 from agents.openclaw.utils.runtime import (
@@ -125,6 +126,10 @@ class AgentRunSpec:
     malformed_retry_budget: int = 3
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
+    # Callback that drains pending subagent results for the active session.
+    # Called before each iteration so subagent outputs appear in the
+    # model-visible message stream without bus/lock round-trips.
+    drain_subagent_results: Any | None = None
 
 
 @dataclass(slots=True)
@@ -161,6 +166,38 @@ class AgentRunner:
         last_malformed_input_hash: int | None = None
 
         for iteration in range(spec.max_iterations):
+            # ── Inject pending subagent results ──────────────────────
+            # Before each LLM call, check whether any spawned subagents
+            # have completed and inject their output as assistant messages
+            # so the model sees the latest findings without needing a
+            # separate dispatch / lock acquisition.
+            if (
+                spec.drain_subagent_results is not None
+                and spec.session_key is not None
+            ):
+                try:
+                    pending = spec.drain_subagent_results(spec.session_key)
+                    if pending:
+                        for pmsg in pending:
+                            label = pmsg.get("_subagent_label", "subagent")
+                            status = pmsg.get("_subagent_status", "ok")
+                            logger.info(
+                                "Injecting subagent result [{}] ({}) into message stream",
+                                label,
+                                status,
+                            )
+                            messages.append({
+                                "role": "assistant",
+                                "content": str(pmsg.get("content", "")),
+                                "_subagent_injected": True,
+                            })
+                except Exception:
+                    logger.debug(
+                        "Failed to drain subagent results for {}",
+                        spec.session_key,
+                        exc_info=True,
+                    )
+
             try:
                 next_message_id = self._ensure_message_ids(
                     messages,
@@ -168,6 +205,9 @@ class AgentRunner:
                 )
                 messages = self._apply_tool_result_budget(spec, messages)
                 messages_for_model = self._snip_history(spec, messages)
+                # Belt-and-suspenders: strip orphan tool_calls that some
+                # providers (DeepSeek) reject with a 400.
+                messages_for_model = repair_orphan_tool_calls(messages_for_model)
             except Exception as exc:
                 logger.warning(
                     "Context governance failed on turn {} for {}: {}; using raw messages",
@@ -194,6 +234,27 @@ class AgentRunner:
                 print(f"[LLM iter={iteration}] tool_calls={[tc.name for tc in response.tool_calls]}", flush=True)
             else:
                 print(f"[LLM iter={iteration}] final_response={(response.content or '')[:120]}", flush=True)
+
+            # ── Defensive: recover orphaned tool_calls ─────────────
+            # Rare provider / parsing edge case: finish_reason says
+            # "tool_calls" but response.tool_calls is empty.  Use the
+            # context snapshot (which may have captured the calls
+            # before they were dropped) to recover.
+            if (
+                not response.has_tool_calls
+                and response.finish_reason == "tool_calls"
+                and context.tool_calls
+            ):
+                logger.warning(
+                    "Recovering orphaned tool_calls: finish_reason=tool_calls "
+                    "but response.tool_calls empty (iter={}, session={}). "
+                    "Using context.tool_calls ({}) as fallback.",
+                    iteration,
+                    spec.session_key or "default",
+                    [tc.name for tc in context.tool_calls],
+                )
+                # Reconstruct response with recovered tool_calls.
+                response.tool_calls = list(context.tool_calls)
 
             self._refresh_hook_context_messages(context, messages)
             await hook.after_llm_response(context)
@@ -251,6 +312,7 @@ class AgentRunner:
                     self._refresh_hook_context_messages(context, messages)
                     await hook.after_iteration(context)
                     break
+
                 completed_tool_results: list[dict[str, Any]] = []
                 for tool_call, result in zip(response.tool_calls, results):
                     tool_message = {
@@ -849,7 +911,7 @@ class AgentRunner:
             start = find_legal_message_start(kept)
             if start:
                 kept = kept[start:]
-        return system_messages + kept
+        return repair_orphan_tool_calls(system_messages + kept)
 
     def _partition_tool_batches(
         self,

@@ -32,6 +32,7 @@ _BUILTIN_TOOL_COLORS = {
     "web_fetch": "#1abc9c",
     "message": "#7f8c8d",
     "spawn": "#d35400",
+    "sessions_yield": "#e67e22",
 }
 
 
