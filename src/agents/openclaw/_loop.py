@@ -296,7 +296,10 @@ class AgentLoop:
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        self.tools.register(YieldTool(drain_results=self.subagents.drain_pending_results))
+        self.tools.register(YieldTool(
+            drain_results=self.subagents.drain_pending_results,
+            pending_count=self.subagents.pending_subagent_count,
+        ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

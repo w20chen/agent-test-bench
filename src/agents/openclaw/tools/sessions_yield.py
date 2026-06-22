@@ -23,14 +23,19 @@ class YieldTool(Tool):
 
     The tool polls ``_drain_results`` (the same pending-results queue
     populated by :class:`SubagentManager`) at 1-second intervals and
-    returns once results arrive or *timeout_s* is reached.
+    returns once results arrive or all pending subagents have finished.
     """
 
-    _DEFAULT_TIMEOUT_S = 120.0
+    _HARD_TIMEOUT_S = 600.0   # safety net: never block longer than 10 min
     _POLL_INTERVAL_S = 1.0
 
-    def __init__(self, drain_results: Callable[[str], list[dict[str, Any]]] | None = None):
+    def __init__(
+        self,
+        drain_results: Callable[[str], list[dict[str, Any]]] | None = None,
+        pending_count: Callable[[str], int] | None = None,
+    ):
         self._drain = drain_results
+        self._pending_count = pending_count
         self._session_key: str = "cli:direct"
 
     def set_context(self, channel: str, chat_id: str) -> None:
@@ -67,29 +72,41 @@ class YieldTool(Tool):
         }
 
     async def execute(self, message: str = "", **kwargs: Any) -> str:
-        """Block until subagent results arrive, then return them."""
+        """Block until subagent results arrive or all subagents finish."""
         import json
 
-        wait_msg = message or "Waiting for sub-agent completion events."
-        deadline = time.monotonic() + self._DEFAULT_TIMEOUT_S
+        deadline = time.monotonic() + self._HARD_TIMEOUT_S
         collected: list[str] = []
 
         while time.monotonic() < deadline:
-            if self._drain is None:
+            # 1) Drain any results that have arrived.
+            if self._drain is not None:
+                pending = self._drain(self._session_key)
+                if pending:
+                    for pmsg in pending:
+                        label = pmsg.get("_subagent_label", "subagent")
+                        status = pmsg.get("_subagent_status", "ok")
+                        content = pmsg.get("content", "")
+                        logger.info(
+                            "YieldTool collected [{}] ({}) — {} chars",
+                            label, status, len(content),
+                        )
+                        collected.append(f"## {label} ({status})\n\n{content}")
+
+            # 2) Stop if we have collected at least one result.
+            #    (drain_pending_results drains ALL keys, so one collection
+            #     may return multiple subagent results.)
+            if collected:
                 break
-            pending = self._drain(self._session_key)
-            if pending:
-                for pmsg in pending:
-                    label = pmsg.get("_subagent_label", "subagent")
-                    status = pmsg.get("_subagent_status", "ok")
-                    content = pmsg.get("content", "")
-                    logger.info(
-                        "YieldTool collected [{}] ({}) — {} chars",
-                        label, status, len(content),
-                    )
-                    collected.append(f"## {label} ({status})\n\n{content}")
-                if collected:
+
+            # 3) Check whether there are still subagents running.
+            if self._pending_count is not None:
+                remaining = self._pending_count(self._session_key)
+                if remaining == 0:
+                    # All subagents finished but no results arrived
+                    # (e.g. all errored before calling _announce_result).
                     break
+
             await asyncio.sleep(self._POLL_INTERVAL_S)
 
         if not collected:
@@ -97,7 +114,7 @@ class YieldTool(Tool):
                 "status": "timeout",
                 "message": (
                     f"No subagent results received within "
-                    f"{self._DEFAULT_TIMEOUT_S:.0f}s. "
+                    f"{self._HARD_TIMEOUT_S:.0f}s. "
                     "Continue with available information."
                 ),
             })

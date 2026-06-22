@@ -30,11 +30,13 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done. "
-            "For deliverables or existing projects, inspect the workspace first "
-            "and use a dedicated subdirectory when helpful."
+            "Spawn one or more sub-agents to handle independent tasks in parallel. "
+            "Use for complex or time-consuming work that can run concurrently. "
+            "After spawning, call sessions_yield to wait for all results. "
+            "You can repeat spawn→yield→analyze cycles for iterative work. "
+            "Each sub-agent task must be self-contained with clear deliverables "
+            "and a specific output format. Sub-agents are stateless — include "
+            "all necessary context in the task description."
         )
 
     @property
