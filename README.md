@@ -501,10 +501,113 @@ Key flags: `--benchmark <slug>` (default `swe-bench-verified`),
 `--scaffold openclaw|tongyi-deepresearch`, `--mcp-config` (required for
 `openclaw`; YAML path or the literal `none`), `--sample N`,
 `--instance-ids a,b,c`, `--run-id <path>` (resume an interrupted run),
-`--prompt-template <name>` (override the benchmark default).
+`--prompt-template <name>` (override the benchmark default),
+`--ksys` (enable Huawei Kunpeng system metrics), `--concurrency N`
+(spawn N agent instances per task; **requires `--instance-ids` or
+`--sample`** when N > 1; see below).
 
 See `src/trace_collect/CLAUDE.md` for the complete flag reference, provider
 registry, checkpointing behaviour, and trace schema v5 layout.
+
+### Concurrent Agent Execution (`--concurrency`)
+
+`--concurrency N` (default `1`) spawns **N agent instances simultaneously**
+for each benchmark task.  This is designed for hardware stress-testing:
+measure system-level performance (via `ksys`) under multi-agent load.
+
+#### Relationship with `--sample` and `--instance-ids`
+
+These three flags are **orthogonal** and compose freely:
+
+| Flag | Role | Default |
+|------|------|---------|
+| `--sample N` | Limits to the first **N tasks** from the benchmark | all tasks |
+| `--instance-ids a,b,c` | Runs only the **specified instance(s)** | all tasks |
+| `--concurrency N` | Spawns **N parallel attempts** per task | 1 (sequential) |
+
+- `--sample` and `--instance-ids` control **which tasks** run.
+  When both are given, `--instance-ids` selects first, then `--sample`
+  truncates the result.
+- `--concurrency` controls **how many attempts per task**.
+
+> **Guard:** `--concurrency > 1` **requires** `--instance-ids` or
+> `--sample`.  Running *all* benchmark instances with high concurrency
+> is blocked — it would spawn hundreds of parallel containers and
+> overwhelm the host.  The CLI exits with an error if neither is
+> specified.
+
+**Examples of valid combinations:**
+
+```bash
+# 4 concurrent attempts on one specific instance
+--concurrency 4 --instance-ids "django__django-12345"
+
+# 4 concurrent attempts on each of 3 sampled instances (12 total)
+--concurrency 4 --sample 3
+
+# 4 concurrent attempts on each of 2 specific instances (8 total)
+--concurrency 4 --instance-ids "django__django-12345,sympy__sympy-67890"
+
+# Single attempt on each of 10 sampled instances (no concurrency)
+--sample 10
+```
+
+#### When `--concurrency > 1`
+
+- Each task kicks off **N concurrent `run_attempt()` coroutines** via
+  `asyncio.gather()`.  Every instance runs in its own container (or host
+  process) with an independent `attempt_N/` output directory.
+- **All built-in resource monitoring is disabled** — `ContainerStatsSampler`,
+  `ProcessStatsSampler`, `MicroArchCollector`, and
+  `HostMemoryBandwidthCollector` are skipped.  Their module-level singleton
+  design is incompatible with concurrent per-container scoping.
+- **`--ksys` runs once** for the entire concurrent batch (not per-task),
+  writing `ksys_stdout.txt` / `ksys_stderr.txt` to the trace root
+  directory (alongside `results.jsonl`).  ksys captures system-wide
+  metrics, so per-instance output would be redundant.
+- **`--record-internals` is blocked** — the HF recording backend does not
+  support concurrent attempts (the CLI exits with an error if both are set).
+- Results from all N attempts are collected and written to `results.jsonl`;
+  per-attempt HTML visualisation is generated for each.
+
+```bash
+# Stress-test: 3 agents concurrently on a single SWE-rebench case
+ARM_IMAGE_MODE=qemu DEEPSEEK_API_KEY=sk-... PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-v4-flash \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --instance-ids "12rambau__sepal_ui-411" \
+    --mcp-config none \
+    --container docker \
+    --ksys \
+    --concurrency 3
+```
+
+**Output layout (concurrent mode, `--concurrency 3 --instance-ids ...`):**
+
+```text
+traces/<model>/<ts>/
+├── results.jsonl                    # consolidated results from all attempts
+├── ksys_stdout.txt                  # ksys output (single copy for the batch)
+├── ksys_stderr.txt
+└── <instance_id>/
+    ├── ksys_stdout.txt              # per-instance ksys logs (serial mode only)
+    ├── ksys_stderr.txt
+    ├── attempt_1/                   # agent instance 1
+    │   ├── trace.jsonl
+    │   ├── run_manifest.json
+    │   ├── resources.json           # {"monitoring_disabled": true, ...}
+    │   └── trace_viz.html
+    ├── attempt_2/                   # agent instance 2
+    │   └── ...
+    └── attempt_3/                   # agent instance 3
+        └── ...
+```
+
+**Serial mode (`--concurrency 1`, default):** behaviour is unchanged from
+before — one attempt per task, full resource monitoring enabled, `--ksys`
+per instance (output to `<instance_id>/`).
 
 To run the deep research bench:
 
@@ -910,14 +1013,21 @@ production throughput.
 
 ### Ksys System Metrics
 
-`--ksys` starts `ksys collect` as a background process alongside the agent
-and stops it (SIGINT) when the agent finishes.  The raw stdout/stderr are
-written to `ksys_stdout.txt` / `ksys_stderr.txt` in the attempt directory.
+`--ksys` starts `ksys collect -o <dir>` as a background process alongside
+the agent and stops it (SIGINT) when the agent finishes.
 
 - **Default: off.**  Pass `--ksys` to enable.
 - **No-op when `ksys` is not installed** on the host (graceful degradation).
 - **Timeline alignment:** ksys starts at the same point as other resource
   samplers, so its data shares the Gantt chart's t0 (time origin).
+- **Serial mode** (`--concurrency 1`): ksys runs **per instance** with
+  output (`-o`) to `<instance_id>/` (one level above `attempt_N/`).
+  The raw stdout/stderr are captured to `ksys_stdout.txt` /
+  `ksys_stderr.txt` in the attempt directory.
+- **Concurrent mode** (`--concurrency > 1`): ksys runs **once** for the
+  entire batch (not per-task, not per-attempt), with output (`-o`) to
+  `<run_dir>/` (alongside `results.jsonl`).  All other resource samplers
+  are disabled in this mode — ksys is the sole monitoring channel.
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor
+import asyncio
 import json
 import logging
 import os
 import re
 import shutil
+import signal
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -35,6 +38,7 @@ from harness.container_image_prep import (
 from trace_collect.attempt_pipeline import (
     AttemptContext,
     AttemptResult,
+    _stop_ksys,
     run_attempt,
     start_task_container,
     stop_task_container,
@@ -459,10 +463,18 @@ async def _run_scaffold_tasks(
     prompt_template: str | None,
     min_free_disk_gb: float,
     enable_ksys: bool = False,
+    concurrency: int = 1,
     inner_factory,
     recording_provider: Any | None = None,
 ) -> Path:
-    """Iterate over tasks, wrapping each in ``run_attempt``."""
+    """Iterate over tasks, wrapping each in ``run_attempt``.
+
+    When ``concurrency > 1``, each task spawns *concurrency* agent instances
+    simultaneously.  Built-in resource monitoring (ContainerStatsSampler,
+    ProcessStatsSampler, MicroArchCollector, HostMemoryBandwidthCollector)
+    is disabled in this mode; only ``ksys`` (if ``--ksys``) runs once for
+    the entire concurrent batch.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
     completed = load_completed_ids(run_dir)
     if completed:
@@ -476,6 +488,52 @@ async def _run_scaffold_tasks(
         benchmark=benchmark,
         prompt_template=prompt_template,
     )
+
+    # ── ksys system metrics (concurrent mode) ──────────────────────
+    # When concurrency > 1, built-in resource samplers are disabled
+    # and ksys is the sole monitoring channel.  It runs ONCE for the
+    # entire batch (not per-task), capturing system-wide metrics.
+    ksys_proc: subprocess.Popen | None = None
+    if concurrency > 1 and enable_ksys:
+        logger.info("ksys enabled (concurrent mode), looking for ksys on $PATH …")
+        ksys_bin = shutil.which("ksys")
+        if ksys_bin is None:
+            logger.warning(
+                "ksys not found on $PATH — "
+                "no system metrics will be collected. "
+                "Install ksys or remove --ksys flag."
+            )
+        else:
+            logger.info("ksys found at %s", ksys_bin)
+            ksys_out_dir = run_dir.resolve()
+            ksys_out_dir.mkdir(parents=True, exist_ok=True)
+            ksys_stdout = (run_dir / "ksys_stdout.txt").open("wb")
+            ksys_stderr = (run_dir / "ksys_stderr.txt").open("wb")
+            try:
+                ksys_cmd = [ksys_bin, "collect", "-o", str(ksys_out_dir)]
+                logger.info("spawning: %s", " ".join(ksys_cmd))
+                ksys_proc = subprocess.Popen(
+                    ksys_cmd,
+                    stdout=ksys_stdout,
+                    stderr=ksys_stderr,
+                    cwd=str(ksys_out_dir),
+                )
+                logger.info(
+                    "ksys collect -o %s started (pid=%d) for "
+                    "concurrent batch (×%d)",
+                    ksys_out_dir,
+                    ksys_proc.pid,
+                    concurrency,
+                )
+            except Exception:
+                logger.warning(
+                    "ksys collect failed to start",
+                    exc_info=True,
+                )
+                ksys_proc = None
+            finally:
+                ksys_stdout.close()
+                ksys_stderr.close()
 
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="image-prefetch"
@@ -543,6 +601,13 @@ async def _run_scaffold_tasks(
 
             _inner = inner_factory(task)
 
+            # _cleanup_ctx tracks which AttemptContext to use for image
+            # cleanup in the finally block.  In sequential mode it is
+            # simply the single attempt_ctx; in concurrent mode it is
+            # overwritten with the first concurrent context once that
+            # branch is entered.
+            _cleanup_ctx = attempt_ctx
+
             try:
                 _ensure_task_source_ready(
                     instance_id=instance_id,
@@ -571,15 +636,170 @@ async def _run_scaffold_tasks(
                         container_executable=container_executable,
                     )
 
-                run_attempt_kwargs: dict[str, Any] = {
-                    "inner": _inner,
-                    "min_free_disk_gb": min_free_disk_gb,
-                    "container_executable": container_executable,
-                    "enable_ksys": enable_ksys,
-                }
-                if recording_provider is not None:
-                    run_attempt_kwargs["recording_provider"] = recording_provider
-                result = await run_attempt(attempt_ctx, **run_attempt_kwargs)
+                if concurrency > 1:
+                    # ── concurrent mode ──────────────────────────────────
+                    # Built-in resource monitoring is disabled; ksys
+                    # (if enabled) was started once before the task loop
+                    # and captures system-wide metrics for the whole batch.
+                    base_attempt = next_attempt_number(run_dir, instance_id)
+                    concurrent_coros: list[
+                        tuple[int, AttemptContext, dict[str, Any]]
+                    ] = []
+
+                    for n in range(concurrency):
+                        concurrent_ctx = AttemptContext(
+                            run_dir=run_dir,
+                            instance_id=instance_id,
+                            attempt=base_attempt + n,
+                            task=task,
+                            model=model,
+                            scaffold=scaffold,
+                            source_image=source_image,
+                            prompt_template=resolved_prompt_template,
+                            agent_runtime_mode=benchmark.runtime_mode_for(
+                                scaffold
+                            ),
+                            execution_environment=getattr(
+                                benchmark,
+                                "execution_environment",
+                                "container",
+                            ),
+                            arm_repo=task.get("repo"),
+                            arm_base_commit=task.get("base_commit"),
+                            arm_install_config=task.get("install_config"),
+                            arm_repos_root=benchmark.config.repos_root,
+                        )
+                        concurrent_inner = inner_factory(task)
+                        concurrent_kwargs: dict[str, Any] = {
+                            "inner": concurrent_inner,
+                            "min_free_disk_gb": min_free_disk_gb,
+                            "container_executable": container_executable,
+                            "enable_ksys": False,
+                            "disable_resource_monitoring": True,
+                        }
+                        if recording_provider is not None:
+                            concurrent_kwargs["recording_provider"] = (
+                                recording_provider
+                            )
+                        concurrent_coros.append(
+                            (n, concurrent_ctx, concurrent_kwargs)
+                        )
+
+                    # Run each attempt in its own OS thread via
+                    # asyncio.to_thread().  This is necessary because
+                    # the task_container_agent path (and potentially
+                    # other scaffolds) uses synchronous subprocess.run()
+                    # calls that would otherwise block the asyncio event
+                    # loop, preventing other coroutines from starting.
+                    def _run_attempt_sync(
+                        ctx: AttemptContext, **kw: Any,
+                    ) -> AttemptResult:
+                        return asyncio.run(run_attempt(ctx, **kw))
+
+                    raw_results = await asyncio.gather(
+                        *[
+                            asyncio.to_thread(
+                                _run_attempt_sync, ctx, **kw,
+                            )
+                            for _, ctx, kw in concurrent_coros
+                        ],
+                        return_exceptions=True,
+                    )
+
+                    # Collect per-attempt results.
+                    for idx, (n, ctx, _) in enumerate(concurrent_coros):
+                        raw = raw_results[idx]
+                        if isinstance(raw, BaseException):
+                            logger.exception(
+                                "FAILED %s attempt_%d",
+                                instance_id,
+                                base_attempt + n,
+                            )
+                            results.append(
+                                CollectedTaskResult(
+                                    instance_id=instance_id,
+                                    attempt_dir=ctx.attempt_dir,
+                                    success=False,
+                                    model_patch="",
+                                    exit_status="error",
+                                    error=f"{type(raw).__name__}: {raw}",
+                                    elapsed_s=time.monotonic() - t0,
+                                )
+                            )
+                        elif isinstance(raw, AttemptResult):
+                            results.append(
+                                CollectedTaskResult(
+                                    instance_id=instance_id,
+                                    attempt_dir=ctx.attempt_dir,
+                                    success=raw.success,
+                                    model_patch=getattr(raw, "model_patch", "")
+                                    or "",
+                                    exit_status=raw.exit_status,
+                                    error=raw.error,
+                                    elapsed_s=time.monotonic() - t0,
+                                    n_iterations=raw.n_iterations,
+                                )
+                            )
+                            # Per-attempt HTML visualization.
+                            try:
+                                from trace_collect.html_viz import generate_html
+
+                                viz_path = (
+                                    ctx.attempt_dir
+                                    / benchmark.viz_filename(instance_id)
+                                )
+                                viz_path.write_text(
+                                    generate_html(ctx.attempt_dir),
+                                    encoding="utf-8",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "viz %s attempt_%d failed (non-fatal)",
+                                    instance_id,
+                                    base_attempt + n,
+                                    exc_info=True,
+                                )
+                        else:
+                            logger.error(
+                                "Unexpected result type for %s attempt_%d: %s",
+                                instance_id,
+                                base_attempt + n,
+                                type(raw).__name__,
+                            )
+                            results.append(
+                                CollectedTaskResult(
+                                    instance_id=instance_id,
+                                    attempt_dir=ctx.attempt_dir,
+                                    success=False,
+                                    model_patch="",
+                                    exit_status="error",
+                                    error=(
+                                        f"Unexpected result type: "
+                                        f"{type(raw).__name__}"
+                                    ),
+                                    elapsed_s=time.monotonic() - t0,
+                                )
+                            )
+
+                    # Use the first attempt context for image cleanup
+                    # (all concurrent attempts share the same source image).
+                    _cleanup_ctx = concurrent_coros[0][1]
+
+                else:
+                    # ── sequential mode (original behaviour) ─────────────
+                    run_attempt_kwargs: dict[str, Any] = {
+                        "inner": _inner,
+                        "min_free_disk_gb": min_free_disk_gb,
+                        "container_executable": container_executable,
+                        "enable_ksys": enable_ksys,
+                    }
+                    if recording_provider is not None:
+                        run_attempt_kwargs["recording_provider"] = (
+                            recording_provider
+                        )
+                    result = await run_attempt(
+                        attempt_ctx, **run_attempt_kwargs
+                    )
             except Exception as exc:
                 logger.exception("FAILED %s", instance_id)
                 results.append(
@@ -594,59 +814,82 @@ async def _run_scaffold_tasks(
                     )
                 )
             else:
-                results.append(
-                    CollectedTaskResult(
-                        instance_id=instance_id,
-                        attempt_dir=attempt_ctx.attempt_dir,
-                        success=result.success,
-                        model_patch=getattr(result, "model_patch", "") or "",
-                        exit_status=result.exit_status,
-                        error=result.error,
-                        elapsed_s=time.monotonic() - t0,
-                        n_iterations=result.n_iterations,
-                    )
-                )
-                logger.info(
-                    "[%d/%d] DONE %s success=%s elapsed=%.1fs",
-                    i + 1,
-                    total,
-                    instance_id,
-                    results[-1].success,
-                    results[-1].elapsed_s,
-                )
-
-                # Generate per-task HTML visualization. The filename is chosen
-                # by the benchmark plugin (default "trace_viz.html"); plugins may
-                # embed identifying info so a full run's HTMLs are collectible.
-                try:
-                    from trace_collect.html_viz import generate_html
-
-                    viz_path = attempt_ctx.attempt_dir / benchmark.viz_filename(
-                        instance_id
-                    )
-                    viz_path.write_text(
-                        generate_html(attempt_ctx.attempt_dir),
-                        encoding="utf-8",
+                if concurrency <= 1:
+                    # Sequential mode: single result.
+                    results.append(
+                        CollectedTaskResult(
+                            instance_id=instance_id,
+                            attempt_dir=attempt_ctx.attempt_dir,
+                            success=result.success,
+                            model_patch=getattr(result, "model_patch", "")
+                            or "",
+                            exit_status=result.exit_status,
+                            error=result.error,
+                            elapsed_s=time.monotonic() - t0,
+                            n_iterations=result.n_iterations,
+                        )
                     )
                     logger.info(
-                        "viz %s → %s (%.1f KB)",
+                        "[%d/%d] DONE %s success=%s elapsed=%.1fs",
+                        i + 1,
+                        total,
                         instance_id,
-                        viz_path,
-                        viz_path.stat().st_size / 1024,
+                        results[-1].success,
+                        results[-1].elapsed_s,
                     )
-                except Exception:
-                    logger.warning(
-                        "viz %s failed (non-fatal)", instance_id, exc_info=True
+
+                    # Generate per-task HTML visualization.
+                    try:
+                        from trace_collect.html_viz import generate_html
+
+                        viz_path = attempt_ctx.attempt_dir / benchmark.viz_filename(
+                            instance_id
+                        )
+                        viz_path.write_text(
+                            generate_html(attempt_ctx.attempt_dir),
+                            encoding="utf-8",
+                        )
+                        logger.info(
+                            "viz %s → %s (%.1f KB)",
+                            instance_id,
+                            viz_path,
+                            viz_path.stat().st_size / 1024,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "viz %s failed (non-fatal)",
+                            instance_id,
+                            exc_info=True,
+                        )
+                else:
+                    # Concurrent mode: results already collected above.
+                    n_success = sum(
+                        1 for r in results[-concurrency:]
+                        if r.success
+                    )
+                    logger.info(
+                        "[%d/%d] DONE %s ×%d success=%d/%d elapsed=%.1fs",
+                        i + 1,
+                        total,
+                        instance_id,
+                        concurrency,
+                        n_success,
+                        concurrency,
+                        time.monotonic() - t0,
                     )
             finally:
                 _cleanup_task_images(
                     instance_id=instance_id,
                     source_image=source_image,
-                    fixed_image=attempt_ctx.fixed_image,
+                    fixed_image=_cleanup_ctx.fixed_image,
                     keep_source_image=next_source_image,
                     container_executable=container_executable,
                     run_dir=run_dir,
                 )
+
+    # ── stop ksys after all tasks complete ─────────────────────────
+    if ksys_proc is not None:
+        _stop_ksys(ksys_proc)
 
     write_results_jsonl(results, run_dir / "results.jsonl")
     logger.info("Results written to %s", run_dir / "results.jsonl")
@@ -677,6 +920,7 @@ async def collect_traces(
     min_free_disk_gb: float = 30.0,
     record_internals: bool = False,
     enable_ksys: bool = False,
+    concurrency: int = 1,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
 ) -> Path:
@@ -684,6 +928,13 @@ async def collect_traces(
     if record_internals and scaffold != "openclaw":
         raise ValueError(
             "--record-internals currently supports scaffold='openclaw' only"
+        )
+    if concurrency > 1 and instance_ids is None and sample is None:
+        raise ValueError(
+            "--concurrency > 1 requires --instance-ids or --sample. "
+            "Running all benchmark instances with high concurrency is "
+            "almost certainly unintentional. "
+            "Specify --instance-ids <id> or --sample N to limit the scope."
         )
     benchmark.validate_scaffold_support(scaffold)
     execution_environment = benchmark.execution_environment
@@ -838,6 +1089,7 @@ async def collect_traces(
             prompt_template=prompt_template,
             min_free_disk_gb=min_free_disk_gb,
             enable_ksys=enable_ksys,
+            concurrency=concurrency,
             inner_factory=make_inner,
             recording_provider=recording_provider,
         )
@@ -998,14 +1250,17 @@ async def _run_openclaw_in_task_container(
 
     # Start resource sampling directly in a thread — the asyncio watcher in
     # run_attempt cannot make progress because the calls below block the event
-    # loop with synchronous subprocess.run().
-    from harness.container_stats_sampler import ContainerStatsSampler
-    _stats_sampler = ContainerStatsSampler(
-        container_id=container_id,
-        interval_s=0.5,
-        executable=container_executable,
-    )
-    _stats_sampler.start()
+    # loop with synchronous subprocess.run().  Skip when the caller has
+    # opted out (e.g. --concurrency > 1).
+    _stats_sampler: ContainerStatsSampler | None = None
+    if not ctx.disable_resource_monitoring:
+        from harness.container_stats_sampler import ContainerStatsSampler
+        _stats_sampler = ContainerStatsSampler(
+            container_id=container_id,
+            interval_s=0.5,
+            executable=container_executable,
+        )
+        _stats_sampler.start()
 
     try:
         exec_config = resolve_running_container_exec_config(
@@ -1112,7 +1367,8 @@ async def _run_openclaw_in_task_container(
             generation_config=generation_config,
         )
     finally:
-        ctx.samples = _stats_sampler.stop()
+        if _stats_sampler is not None:
+            ctx.samples = _stats_sampler.stop()
         container_logs = stop_task_container(
             container_id,
             executable=container_executable,

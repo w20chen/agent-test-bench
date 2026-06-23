@@ -80,6 +80,7 @@ class AttemptContext:
     fixed_image: str | None = None
     container_id: str | None = None
     samples: list[dict[str, Any]] | None = None
+    disable_resource_monitoring: bool = False
     attempt_dir: Path = field(init=False)
     start_time: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     end_time: datetime | None = None
@@ -322,15 +323,17 @@ def _container_is_inspectable(
 
 
 def _stop_ksys(proc: subprocess.Popen) -> None:
-    """Send SIGINT to *proc*, wait briefly, then force-kill if needed."""
+    """Send SIGINT to *proc*, wait for graceful shutdown, force-kill if stuck."""
     try:
         proc.send_signal(signal.SIGINT)
+        logger.info("ksys sent SIGINT, waiting up to 30s for graceful shutdown …")
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=30)
+            logger.info("ksys exited cleanly after SIGINT")
         except subprocess.TimeoutExpired:
-            logger.warning("ksys did not exit after SIGINT, sending SIGKILL")
+            logger.warning("ksys did not exit after 30s, sending SIGKILL")
             proc.kill()
-            proc.wait(timeout=5)
+            proc.wait(timeout=10)
     except Exception:
         logger.warning("ksys stop failed", exc_info=True)
 
@@ -355,8 +358,19 @@ async def run_attempt(
     container_executable: str | None,
     recording_provider: Any | None = None,
     enable_ksys: bool = False,
+    disable_resource_monitoring: bool = False,
 ) -> AttemptResult:
-    """Execute one scaffold attempt and write its artifacts."""
+    """Execute one scaffold attempt and write its artifacts.
+
+    When *disable_resource_monitoring* is ``True``, built-in resource
+    samplers (ContainerStatsSampler, ProcessStatsSampler) are skipped.
+    This is used by the concurrent-collection path where ksys provides
+    system-level monitoring and per-container sampling would conflict.
+    """
+    # Propagate to ctx so _run_openclaw_in_task_container (and other
+    # inner functions) can also skip their own sampler initialisation.
+    ctx.disable_resource_monitoring = disable_resource_monitoring
+
     if recording_provider is not None:
         await _wait_for_recording_provider_idle(
             recording_provider,
@@ -430,7 +444,7 @@ async def run_attempt(
 
     stop_watcher = threading.Event()
     watcher_task: asyncio.Task[ContainerStatsSampler | None] | None = None
-    if container_executable is not None:
+    if container_executable is not None and not disable_resource_monitoring:
         watcher_task = asyncio.create_task(
             _watch_for_container_ready(
                 ctx,
@@ -446,18 +460,30 @@ async def run_attempt(
     ksys_proc: subprocess.Popen | None = None
     ksys_pid: int | None = None
     if enable_ksys:
+        logger.info("ksys enabled, looking for ksys on $PATH …")
         ksys_bin = shutil.which("ksys")
-        if ksys_bin is not None:
+        if ksys_bin is None:
+            logger.warning(
+                "ksys not found on $PATH — "
+                "no system metrics will be collected. "
+                "Install ksys or remove --ksys flag."
+            )
+        else:
+            logger.info("ksys found at %s", ksys_bin)
+            ksys_out_dir = ctx.attempt_dir.parent.resolve()
             ksys_stdout = (ctx.attempt_dir / "ksys_stdout.txt").open("wb")
             ksys_stderr = (ctx.attempt_dir / "ksys_stderr.txt").open("wb")
             try:
+                ksys_cmd = [ksys_bin, "collect", "-o", str(ksys_out_dir)]
+                logger.info("spawning: %s", " ".join(ksys_cmd))
                 ksys_proc = subprocess.Popen(
-                    [ksys_bin, "collect"],
+                    ksys_cmd,
                     stdout=ksys_stdout,
                     stderr=ksys_stderr,
+                    cwd=str(ksys_out_dir),
                 )
                 ksys_pid = ksys_proc.pid
-                logger.info("ksys collect started (pid=%d) → %s", ksys_pid, ctx.attempt_dir)
+                logger.info("ksys collect started (pid=%d) → %s", ksys_pid, ksys_out_dir)
             except Exception:
                 logger.warning("ksys collect failed to start", exc_info=True)
                 ksys_proc = None
@@ -468,7 +494,7 @@ async def run_attempt(
                 ksys_stderr.close()
 
     process_sampler: ProcessStatsSampler | None = None
-    if ctx.execution_environment == "host":
+    if ctx.execution_environment == "host" and not disable_resource_monitoring:
         process_sampler = ProcessStatsSampler(
             pid=os.getpid(),
             interval_s=0.5,
@@ -670,9 +696,20 @@ async def run_attempt(
 
     attempt_layout.write_run_manifest(ctx.attempt_dir, manifest)
     attempt_layout.write_results_json(ctx.attempt_dir, results_payload)
-    attempt_layout.write_resources_json(
-        ctx.attempt_dir, samples, summary=resources_summary
-    )
+    if samples:
+        attempt_layout.write_resources_json(
+            ctx.attempt_dir, samples, summary=resources_summary
+        )
+    else:
+        # No resource samples collected (e.g. concurrent mode with
+        # disable_resource_monitoring=True).  Write a minimal marker
+        # so downstream consumers can distinguish "no data" from
+        # "zero utilisation".
+        attempt_layout.write_resources_json(
+            ctx.attempt_dir,
+            [],
+            summary={"monitoring_disabled": True, "sample_count": 0},
+        )
     attempt_layout.write_tool_calls_json(ctx.attempt_dir, tool_calls)
     attempt_layout.write_container_stdout(ctx.attempt_dir, ctx.container_stdout)
 

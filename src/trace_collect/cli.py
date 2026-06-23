@@ -147,6 +147,18 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--concurrency",
+        type=positive_int_arg,
+        default=1,
+        help=(
+            "Number of concurrent agent instances per task. "
+            "When > 1, all built-in resource monitoring (ContainerStatsSampler, "
+            "ProcessStatsSampler, MicroArchCollector, HostMemoryBandwidthCollector) "
+            "is disabled; only ksys (if --ksys) runs once for the concurrent batch. "
+            "Default: 1 (sequential)."
+        ),
+    )
+    parser.add_argument(
         "--kv-policy",
         choices=["none", "random", "streaming", "h2o"],
         default="none",
@@ -588,6 +600,13 @@ def _run_collect(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    if args.record_internals and args.concurrency > 1:
+        print(
+            "ERROR: --record-internals is incompatible with --concurrency > 1. "
+            "The HF recording backend does not support concurrent attempts.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # KV eviction policies live in the HF recording path; they are meaningless
     # without --record-internals (no HF backend = no Cache subclass injection
     # site). Either an explicit --kv-policy != none OR a --kv-config yaml that
@@ -682,6 +701,7 @@ def _run_collect(args: argparse.Namespace) -> None:
             min_free_disk_gb=args.min_free_disk_gb,
             record_internals=args.record_internals,
             enable_ksys=args.ksys,
+            concurrency=args.concurrency,
             eviction_config=eviction_config,
             sparse_attention_config=sparse_attention_config,
         )
