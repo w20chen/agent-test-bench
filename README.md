@@ -1,5 +1,8 @@
 # Agent Sched Bench
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![DeepWiki](https://img.shields.io/badge/DeepWiki-Docs-6C5CE7.svg)](https://deepwiki.com/w20chen/agent-test-bench)
+
 Benchmark environment for studying agent scheduling and KV-cache management on
 multi-step LLM workloads. The repo ships three top-level capabilities:
 
