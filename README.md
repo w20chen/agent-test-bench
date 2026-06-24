@@ -21,6 +21,7 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
 - [Quick Start](#quick-start)
 - [Repository Layout](#repository-layout)
 - [Entry Points](#entry-points)
+- [Running Benchmarks](#running-benchmarks)
 - [Documentation](#documentation)
 - [Supported Benchmarks](#supported-benchmarks)
 
@@ -100,6 +101,145 @@ Three progressively deeper ways to interact with this repo:
 
 ---
 
+## Running Benchmarks
+
+All benchmark runs use the same collection entry point. Replace the provider,
+model, and credentials in these examples with the LLM endpoint under test.
+OpenClaw requires an explicit `--mcp-config`; pass `none` to record that MCP is
+intentionally disabled. Traces are written below the benchmark's configured
+`trace_root` (normally `traces/<benchmark>/`), grouped by model and timestamp.
+
+### SWE-Bench Verified
+
+Prepare the selected tasks and their repositories once:
+
+```bash
+conda activate ML
+make download-swebench-verified
+make setup-swebench-repos
+```
+
+Run a sampled task with Docker (replace `--sample 1` with
+`--instance-ids <id>` to select an exact case):
+
+```bash
+DEEPSEEK_API_KEY=... PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark swe-bench-verified \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --sample 1
+```
+
+### SWE-rebench
+
+Prepare the filtered split and repositories once:
+
+```bash
+conda activate ML
+make setup-swe-rebench
+```
+
+Run:
+
+```bash
+DEEPSEEK_API_KEY=... PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --sample 1
+```
+
+SWE-rebench task images are pulled on demand. They can be prefetched with
+`make pull-swe-rebench-images`; on ARM hosts, follow the QEMU or native setup
+in [Getting Started](docs/getting-started.md).
+
+### Terminal-Bench
+
+Terminal-Bench requires Python 3.12+, the project dependencies (including the
+`terminal-bench` package), and a working Docker daemon. Its pinned
+`terminal-bench-core` dataset is resolved automatically through
+`configs/benchmarks/terminal_bench_registry.json`.
+
+```bash
+DEEPSEEK_API_KEY=... PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark terminal-bench \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --sample 1
+```
+
+For the repository's known smoke case, use
+`--instance-ids fix-git` instead of `--sample 1`.
+
+### BFCL
+
+BFCL runs on the host rather than in a task container. Clone the upstream
+Gorilla repository separately, keep it read-only, and point this project at
+the checkout:
+
+```bash
+git clone https://github.com/ShishirPatil/gorilla.git /path/to/gorilla
+git -C /path/to/gorilla checkout <tested-gorilla-commit>
+git -C /path/to/gorilla rev-parse HEAD
+export BFCL_REPO_PATH=/path/to/gorilla
+```
+
+Install the BFCL runtime dependencies required by the chosen category, then
+run one of the registered slugs. This repository does not currently pin a
+known-compatible Gorilla commit, so the experiment configuration must supply
+and record `<tested-gorilla-commit>`.
+
+```bash
+DEEPSEEK_API_KEY=... BFCL_REPO_PATH=/path/to/gorilla \
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark bfcl-multi-turn-base \
+    --scaffold openclaw \
+    --mcp-config none \
+    --sample 1
+```
+
+Available BFCL slugs are `bfcl-multi-turn-base`,
+`bfcl-multi-turn-long-context`, `bfcl-memory`, and `bfcl-web-search`.
+`bfcl-memory` additionally needs the dependencies for its vector, KV, and
+recursive-summary backends; `bfcl-web-search` needs a supported search API key
+such as `SERPAPI_API_KEY`.
+
+The current integration executes BFCL tasks and records OpenClaw traces. It
+does not emit BFCL prediction files or invoke the official scoring pipeline,
+so official BFCL scoring is not currently supported by this collection CLI.
+
+Do not use the sampled command above for `bfcl-memory`. Its entries form
+ordered prerequisite/question chains that share persisted state. Run the full
+loaded dataset sequentially by omitting `--sample` and `--instance-ids`, or
+provide a complete prerequisite-first chain of IDs:
+
+```bash
+DEEPSEEK_API_KEY=... BFCL_REPO_PATH=/path/to/gorilla \
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark bfcl-memory \
+    --scaffold openclaw \
+    --mcp-config none
+```
+
+See [Supported Benchmarks](docs/benchmarks.md) for runtime and scoring details,
+and [Trace Collect](docs/trace-collect.md) for task selection, resuming, and
+concurrency options.
+
+---
+
 ## Documentation
 
 Each entry point above links to a dedicated page that goes into depth. The
@@ -132,6 +272,9 @@ methodology and runtime requirements.
 | `terminal-bench` | Terminal task | Docker | openclaw |
 | `deep-research-bench` | Research QA | Host | openclaw, tongyi-deepresearch |
 | `browsecomp` | Browse QA | Host | openclaw, tongyi-deepresearch |
-| `bfcl-v3` / `bfcl-v4` | Function calling | Host | openclaw |
+| `bfcl-multi-turn-base` | Function calling | Host | openclaw |
+| `bfcl-multi-turn-long-context` | Function calling | Host | openclaw |
+| `bfcl-memory` | Function calling | Host | openclaw |
+| `bfcl-web-search` | Function calling | Host | openclaw |
 
 Full details → [Benchmarks](docs/benchmarks.md)

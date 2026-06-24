@@ -29,6 +29,10 @@ source, runtime environment, and supported agent scaffolds.
 | `terminal-bench` | `terminal_task` | `terminal-bench-core` (or local task dir) | N/A | Terminal-Bench-managed | openclaw (phase 1) | Terminal-Bench harness + imported OpenClaw trace |
 | `deep-research-bench` | `research_qa` | configured in YAML | `test` | host | openclaw, tongyi-deepresearch | reference-answer comparison |
 | `browsecomp` | `browse_qa` | configured in YAML | `test` | host | openclaw, tongyi-deepresearch | reference-answer comparison |
+| `bfcl-multi-turn-base` | BFCL tool use | BFCL `multi_turn_base` | N/A | host | openclaw | completion status + trace |
+| `bfcl-multi-turn-long-context` | BFCL tool use | BFCL `multi_turn_long_context` | N/A | host | openclaw | completion status + trace |
+| `bfcl-memory` | BFCL memory | BFCL `memory_vector`, `memory_kv`, `memory_rec_sum` | N/A | host | openclaw | completion status + trace |
+| `bfcl-web-search` | BFCL web search | BFCL `web_search_base`, `web_search_no_snippet` | N/A | host | openclaw | completion status + trace |
 
 Terminal-Bench requires Python 3.12+ (upstream `tb` CLI dependency) and only
 supports `--scaffold openclaw` with the Docker runtime in phase 1.
@@ -42,7 +46,7 @@ function-calling evaluation through the BFCL suite. These benchmarks test an
 agent's ability to use tools correctly across single-turn and multi-turn
 interactions.
 
-Four BFCL (Berkeley Function Calling Leaderboard) datasets are wired as
+Four BFCL (Berkeley Function Calling Leaderboard) plugin groups are wired as
 host-mode benchmarks driven by the OpenClaw scaffold. BFCL runs as a read-only
 external environment: its dataset loader, tool-doc → schema converter, stateful
 backend instantiation, and backend implementations (simulated filesystem,
@@ -50,25 +54,79 @@ booking, web search, vector/kv/rec_sum memory) are reused unmodified; OpenClaw
 provides the agent loop that interacts with these backends via the BFCL
 function-calling protocol.
 
-| Slug | BFCL Version | Multi-turn | Mode |
-|------|-------------|------------|------|
-| `bfcl-v3` | v3 | No | host |
-| `bfcl-v3-multi` | v3 | Yes | host |
-| `bfcl-v4` | v4 | No | host |
-| `bfcl-v4-multi` | v4 | Yes | host |
+| Slug | BFCL categories | Additional requirements |
+|------|-----------------|-------------------------|
+| `bfcl-multi-turn-base` | `multi_turn_base` | BFCL base runtime dependencies |
+| `bfcl-multi-turn-long-context` | `multi_turn_long_context` | BFCL base runtime dependencies |
+| `bfcl-memory` | `memory_vector`, `memory_kv`, `memory_rec_sum` | `faiss-cpu`, `sentence-transformers`, and `rank_bm25` |
+| `bfcl-web-search` | `web_search_base`, `web_search_no_snippet` | Supported web-search key, for example `SERPAPI_API_KEY` |
+
+BFCL is not vendored by this project. Clone the Gorilla repository separately
+and set `BFCL_REPO_PATH` to its root. The benchmark loader expects the Python
+package at
+`$BFCL_REPO_PATH/berkeley-function-call-leaderboard/bfcl_eval`.
 
 ```bash
-# Example: run BFCL v3 single-turn
+git clone https://github.com/ShishirPatil/gorilla.git /path/to/gorilla
+git -C /path/to/gorilla checkout <tested-gorilla-commit>
+git -C /path/to/gorilla rev-parse HEAD
+export BFCL_REPO_PATH=/path/to/gorilla
+```
+
+Install the BFCL dependencies needed by the selected category from that
+checkout. The checkout is treated as read-only by this project. This repository
+does not currently pin a known-compatible Gorilla commit, so each experiment
+must choose and record `<tested-gorilla-commit>` rather than relying on a
+moving branch.
+
+```bash
+# Example: run one BFCL multi-turn base task
+DEEPSEEK_API_KEY=... BFCL_REPO_PATH=/path/to/gorilla \
 PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
     --model deepseek-chat \
-    --benchmark bfcl-v3 \
+    --benchmark bfcl-multi-turn-base \
     --scaffold openclaw \
     --sample 1 \
     --mcp-config none
 ```
 
-See `configs/benchmarks/bfcl-*.yaml` for full benchmark configurations.
+Switch `--benchmark` to `bfcl-multi-turn-long-context` or
+`bfcl-web-search` to sample those plugins. The YAML files under
+`configs/benchmarks/bfcl-*.yaml` document iteration limits and plugin-specific
+requirements. Their `selection_n` and `selection_seed` fields are not currently
+applied by the trace-collection path; task selection is controlled only by
+`--sample` and `--instance-ids`.
+
+The current runner marks whether the OpenClaw conversation completed and
+records the full trace, timings, tool calls, and metadata. It does not call
+BFCL's separate official evaluator or emit its prediction-file format.
+Official BFCL scoring is therefore not currently supported by this collection
+CLI, and completion status must not be reported as leaderboard accuracy.
+
+### BFCL Memory Selection
+
+`bfcl-memory` is not safe to run with an arbitrary `--sample N`. Its dataset
+contains ordered prerequisite entries that populate persisted memory before
+later question entries. The current collection path slices tasks directly and
+does not invoke the plugin's chain-preserving `select_subset` method.
+
+Run the full loaded memory dataset sequentially by omitting both task-selection
+flags:
+
+```bash
+DEEPSEEK_API_KEY=... BFCL_REPO_PATH=/path/to/gorilla \
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek \
+    --model deepseek-chat \
+    --benchmark bfcl-memory \
+    --scaffold openclaw \
+    --mcp-config none
+```
+
+For a partial run, pass `--instance-ids` only when the list contains the
+complete prerequisite/question chain in prerequisite-first order. Do not
+derive a memory evaluation subset with `--sample`.
 
 ---
 
