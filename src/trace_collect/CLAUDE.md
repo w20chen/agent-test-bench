@@ -249,7 +249,12 @@ python -m trace_collect.cli simulate \
 | `--arrival-mode` | no | `closed_loop` | `closed_loop` or `poisson` |
 | `--arrival-rate-per-s` | no | — | Required for poisson mode |
 | `--arrival-seed` | no | — | RNG seed for reproducibility |
+| `--num-agents` | no | `0` | Spawn N agents; 0 = one agent per input trace (1:1) |
+| `--trace-assignment` | no | `manifest` | `manifest` (cycle) or `random` (pick with replacement) |
+| `--trace-assignment-seed` | no | — | RNG seed for `--trace-assignment=random` |
+| `--cpu-limit` | no | — | CPU core cap: `--cpus=N` for containers, `cpu_affinity` for host |
 | `--metrics-url` | no | — | vLLM Prometheus endpoint (local_model only; forbidden for cloud_model) |
+| `--serial` | no | off | Replay traces sequentially (one at a time) |
 
 LLM flags (`--provider`, `--api-base`, `--api-key`, `--model`) required for `local_model` only.
 
