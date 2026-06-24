@@ -12,6 +12,10 @@ by a YAML config in `configs/benchmarks/` and a Python plugin in
 ## Table of Contents
 
 - [Benchmark Catalog](#benchmark-catalog)
+- [SWE-Bench Verified](#swe-bench-verified)
+- [SWE-rebench](#swe-rebench)
+- [Terminal-Bench](#terminal-bench)
+- [Deep Research Bench & BrowseComp](#deep-research-bench--browsecomp)
 - [BFCL Function Calling Benchmarks](#bfcl-function-calling-benchmarks)
 - [Plugin Architecture](#plugin-architecture)
 
@@ -36,6 +40,82 @@ source, runtime environment, and supported agent scaffolds.
 
 Terminal-Bench requires Python 3.12+ (upstream `tb` CLI dependency) and only
 supports `--scaffold openclaw` with the Docker runtime in phase 1.
+
+---
+
+## SWE-Bench Verified
+
+Container-mode benchmark. Prepare tasks and repositories once:
+
+```bash
+conda activate ML
+make download-swebench-verified
+make setup-swebench-repos
+```
+
+Run with Docker (replace `--sample 1` with `--instance-ids <id>` to select a
+specific case):
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek --model deepseek-chat \
+    --benchmark swe-bench-verified --scaffold openclaw \
+    --container docker --mcp-config none \
+    --sample 1
+```
+
+---
+
+## SWE-rebench
+
+Container-mode benchmark on the filtered SWE-rebench split. Prepare once:
+
+```bash
+conda activate ML
+make setup-swe-rebench
+```
+
+Run:
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek --model deepseek-chat \
+    --benchmark swe-rebench --scaffold openclaw \
+    --container docker --mcp-config none \
+    --sample 1
+```
+
+Task images are pulled on demand. Prefetch with `make pull-swe-rebench-images`.
+On ARM hosts, see the QEMU or native setup in
+[Getting Started](getting-started.md).
+
+---
+
+## Terminal-Bench
+
+Requires Python 3.12+, the project dependencies (including the `terminal-bench`
+package), and a working Docker daemon. Its pinned `terminal-bench-core` dataset
+is resolved through `configs/benchmarks/terminal_bench_registry.json`.
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek --model deepseek-chat \
+    --benchmark terminal-bench --scaffold openclaw \
+    --container docker --mcp-config none \
+    --sample 1
+```
+
+For the repository's known smoke case, use `--instance-ids fix-git` instead of
+`--sample 1`.
+
+---
+
+## Deep Research Bench & BrowseComp
+
+Host-mode benchmarks — no Docker containers required. See the
+[Trace Collect](trace-collect.md#deep-research-bench) CLI reference for
+invocation examples. Deep Research Bench supports `--prompt-template`
+switching between `default` (spawn subagents) and `no_spawn` (single-agent).
 
 ---
 
