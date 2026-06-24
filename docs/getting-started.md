@@ -82,6 +82,8 @@ sudo sysctl -w kernel.perf_event_paranoid=-1
 export WEB_SEARCH_PROVIDER=tavily
 
 export TASK_CONTAINER_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+sudo chmod +x scripts/setup/*.sh
 ```
 
 ### Step 1 — One-Time Environment Setup

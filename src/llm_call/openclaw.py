@@ -15,6 +15,7 @@ import string
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import json_repair
@@ -122,6 +123,14 @@ def _get_openclaw_llm_timeout_s() -> float | None:
     return value
 
 
+def _uses_deepseek_api(api_base: str | None) -> bool:
+    """Return whether requests are sent directly to the DeepSeek API."""
+    if not api_base:
+        return False
+    hostname = (urlparse(api_base).hostname or "").lower().rstrip(".")
+    return hostname == "api.deepseek.com"
+
+
 def _get_openrouter_metadata_policy() -> dict[str, Any]:
     return {
         "retry_delays_s": list(_get_openrouter_metadata_retry_delays_s()),
@@ -223,7 +232,11 @@ class UnifiedProvider(LLMProvider):
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Strip non-standard keys, normalize tool_call IDs."""
-        sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
+        sanitized = LLMProvider._sanitize_request_messages(
+            messages,
+            _ALLOWED_MSG_KEYS,
+            strip_empty_reasoning_content=not _uses_deepseek_api(self.api_base),
+        )
         id_map: dict[str, str] = {}
 
         def map_id(value: Any) -> Any:
@@ -781,6 +794,7 @@ class UnifiedProvider(LLMProvider):
     def _parse_chunks(cls, chunks: list[Any]) -> LLMResponse:
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        reasoning_content_seen = False
         tc_bufs: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
@@ -843,7 +857,8 @@ class UnifiedProvider(LLMProvider):
                 if text:
                     content_parts.append(text)
                 rc = delta.get("reasoning_content")
-                if isinstance(rc, str) and rc:
+                if isinstance(rc, str):
+                    reasoning_content_seen = True
                     reasoning_parts.append(rc)
                 for idx, tc in enumerate(delta.get("tool_calls") or []):
                     _accum_tc(tc, idx)
@@ -861,12 +876,15 @@ class UnifiedProvider(LLMProvider):
                 content_parts.append(delta.content)
             if delta:
                 rc = getattr(delta, "reasoning_content", None)
-                if isinstance(rc, str) and rc:
+                if isinstance(rc, str):
+                    reasoning_content_seen = True
                     reasoning_parts.append(rc)
             for tc in (delta.tool_calls or []) if delta else []:
                 _accum_tc(tc, getattr(tc, "index", 0))
 
-        reasoning_content = "".join(reasoning_parts) or None
+        reasoning_content = (
+            "".join(reasoning_parts) if reasoning_content_seen else None
+        )
         return LLMResponse(
             content="".join(content_parts) or None,
             tool_calls=[

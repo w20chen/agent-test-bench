@@ -164,15 +164,17 @@ class LLMProvider(ABC):
     def _sanitize_request_messages(
         messages: list[dict[str, Any]],
         allowed_keys: frozenset[str],
+        *,
+        strip_empty_reasoning_content: bool = True,
     ) -> list[dict[str, Any]]:
         """Keep only provider-safe message keys and normalize assistant content."""
         sanitized = []
         for msg in messages:
             clean = {k: v for k, v in msg.items() if k in allowed_keys}
-            # Strip empty-string reasoning_content — some providers (DeepSeek)
-            # reject "reasoning_content": "" but accept the key being absent.
+            # Some OpenAI-compatible providers reject an empty reasoning field.
             if (
-                "reasoning_content" in clean
+                strip_empty_reasoning_content
+                and "reasoning_content" in clean
                 and isinstance(clean["reasoning_content"], str)
                 and not clean["reasoning_content"]
             ):
