@@ -19,6 +19,7 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Environment Variables (.env)](#environment-variables-env)
 - [Repository Layout](#repository-layout)
 - [Entry Points](#entry-points)
 - [Running Benchmarks](#running-benchmarks)
@@ -37,6 +38,34 @@ make lint    # ruff
 
 On a fresh server, run `bash scripts/setup/bootstrap.sh` once — it installs
 miniconda, creates env ML, and installs all deps.
+
+---
+
+## Environment Variables (.env)
+
+The project uses `python-dotenv` to load environment variables from a `.env`
+file at startup.  This file is **never committed** (it is in `.gitignore`).
+Copy the template and edit it with your keys:
+
+```bash
+cp .env.example .env
+# edit .env — fill in DEEPSEEK_API_KEY, TAVILY_API_KEY, etc.
+```
+
+**Precedence:** shell environment variables always take priority over `.env`.
+If you `export DEEPSEEK_API_KEY=...` in your shell, the `.env` value is
+ignored.  `.env` acts as a **fallback** for keys you haven't explicitly set.
+
+The template includes placeholders for:
+- `DEEPSEEK_API_KEY` — DeepSeek API key (used by `--provider deepseek`)
+- `TAVILY_API_KEY` — Tavily search API key (used by the web search tool)
+- `MODEL_PATH`, `VLLM_*`, `CONTINUUM_*`, `THUNDERAGENT_*` — serving stack configuration
+
+Without a `.env` file or shell exports, you must pass credentials inline:
+
+```bash
+DEEPSEEK_API_KEY=sk-... PYTHONPATH=src python -m trace_collect.cli ...
+```
 
 ---
 
