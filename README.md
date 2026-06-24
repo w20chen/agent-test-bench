@@ -16,6 +16,16 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
 
 ---
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Repository Layout](#repository-layout)
+- [Entry Points](#entry-points)
+- [Documentation](#documentation)
+- [Supported Benchmarks](#supported-benchmarks)
+
+---
+
 ## Quick Start
 
 ```bash
@@ -47,9 +57,45 @@ agent-sched-bench/
 
 ---
 
-## Manual
+## Entry Points
 
-Detailed documentation lives under `docs/`.  Pick your entry point:
+Three progressively deeper ways to interact with this repo:
+
+1. **Inspect cases** — browse benchmark tasks without running an agent.
+
+   ```bash
+   python scripts/inspect_swebench.py --benchmark swe-bench-verified list
+   ```
+
+   → [Case Inspection](docs/case-inspection.md)
+
+2. **Run an agent interactively** — send a one-shot prompt to OpenClaw:
+
+   ```bash
+   PYTHONPATH=src python -m agents.openclaw \
+       --prompt "Write a Python script to download web page and parse title" \
+       --provider deepseek --model deepseek-chat --workspace ./workspace
+   ```
+
+   → [Getting Started](docs/getting-started.md#end-to-end-walkthrough-arm-server)
+
+3. **Run a full benchmark** — execute the agent on many tasks with container
+   orchestration and trace collection:
+
+   ```bash
+   PYTHONPATH=src python -m trace_collect.cli \
+       --provider dashscope --model qwen-plus-latest \
+       --benchmark swe-rebench --scaffold openclaw \
+       --mcp-config none --sample 2
+   ```
+
+   → [Trace Collect](docs/trace-collect.md)
+
+---
+
+## Documentation
+
+Detailed documentation lives under `docs/`:
 
 | Document | What it covers |
 |----------|---------------|
@@ -59,32 +105,9 @@ Detailed documentation lives under `docs/`.  Pick your entry point:
 | [Benchmarks](docs/benchmarks.md) | Registered benchmarks, BFCL, plugin architecture |
 | [Resource Measurement](docs/resource-measurement.md) | CPU/memory/disk/network/PMU sampling architecture |
 
-### Three Entry Points
-
-1. **Inspect cases** — browse benchmark tasks without running an agent.
-   → [Case Inspection](docs/case-inspection.md)
-
-2. **Run an agent interactively** — send a one-shot prompt to OpenClaw:
-   ```bash
-   PYTHONPATH=src python -m agents.openclaw \
-       --prompt "Write a Python script to download web page and parse title" \
-       --provider deepseek --model deepseek-chat --workspace ./workspace
-   ```
-   → [Getting Started](docs/getting-started.md#quick-test-end-to-end-walkthrough-arm-server)
-
-3. **Run a full benchmark** — execute the agent on many tasks with container
-   orchestration and trace collection:
-   ```bash
-   PYTHONPATH=src python -m trace_collect.cli \
-       --provider dashscope --model qwen-plus-latest \
-       --benchmark swe-rebench --scaffold openclaw \
-       --mcp-config none --sample 2
-   ```
-   → [Trace Collect](docs/trace-collect.md)
-
 ---
 
-## Supported Benchmarks (at a glance)
+## Supported Benchmarks
 
 | Slug | Type | Runtime | Scaffolds |
 |------|------|---------|-----------|

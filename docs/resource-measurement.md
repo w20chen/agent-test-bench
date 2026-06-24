@@ -1,4 +1,4 @@
-# Resource Measurement Architecture
+# Resource Measurement
 
 > This document is part of the [Agent Sched Bench manual](../README.md).
 > For getting started, see [Getting Started](getting-started.md).
@@ -9,6 +9,23 @@ resource observability stack. Every benchmark attempt records time-series
 samples of CPU, memory, disk I/O, network I/O, context switches, host memory
 bandwidth, and CPU micro-architecture (PMU) metrics. Two sampler backends
 cover both containerised and host-process workloads.
+
+---
+
+## Table of Contents
+
+- [Sampler Topology](#sampler-topology)
+- [1. CPU & Memory](#1-cpu--memory)
+- [2. Disk I/O](#2-disk-io)
+- [3. Network I/O](#3-network-io)
+- [4. Context Switches](#4-context-switches)
+- [5. Host Memory Bandwidth](#5-host-memory-bandwidth)
+- [6. Micro-Architecture PMU Metrics](#6-micro-architecture-pmu-metrics)
+- [7. Metric Aggregation](#7-metric-aggregation)
+- [8. Architecture Support Matrix](#8-architecture-support-matrix)
+- [9. HTML Visualization](#9-html-visualization)
+
+---
 
 ## Sampler Topology
 
@@ -244,7 +261,7 @@ so remaining metrics in the group are still computed.
 
 ---
 
-## 7. Metric Aggregation (Summary)
+## 7. Metric Aggregation
 
 Each sampler's `stop()` method returns raw sample lists. The
 `summarize_samples()` function in `container_stats_sampler.py` computes

@@ -8,6 +8,20 @@ Run an agent scaffold on a benchmark and record a canonical v5 JSONL trace per
 task. The CLI requires an explicit `--provider` and `--model` and loads
 benchmark specifics from `configs/benchmarks/<slug>.yaml`.
 
+---
+
+## Table of Contents
+
+- [Basic Usage](#basic-usage)
+  - [CLI Flags Reference](#cli-flags-reference)
+  - [OpenClaw Standalone CLI](#openclaw-standalone-cli)
+  - [Deep Research Bench](#deep-research-bench)
+- [Concurrent Execution](#concurrent-execution)
+- [Recording Internals](#recording-internals)
+- [Ksys System Metrics](#ksys-system-metrics)
+
+---
+
 ## Basic Usage
 
 ```bash
@@ -23,7 +37,7 @@ PYTHONPATH=src python -m trace_collect.cli \
     --sample 2
 ```
 
-### Key Flags
+### CLI Flags Reference
 
 | Flag | Description |
 |------|-------------|
@@ -82,7 +96,7 @@ Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
 
 ---
 
-## Concurrent Agent Execution (`--concurrency`)
+## Concurrent Execution
 
 `--concurrency N` (default `1`) spawns **N agent instances simultaneously**
 for each benchmark task.  This is designed for hardware stress-testing:
@@ -124,7 +138,7 @@ These three flags are **orthogonal** and compose freely:
 --sample 10
 ```
 
-### When `--concurrency > 1`
+### Behavior With `--concurrency > 1`
 
 - Each task kicks off **N concurrent `run_attempt()` coroutines** via
   `asyncio.gather()`.  Every instance runs in its own container (or host
@@ -155,7 +169,9 @@ ARM_IMAGE_MODE=qemu DEEPSEEK_API_KEY=sk-... PYTHONPATH=src python -m trace_colle
     --concurrency 3
 ```
 
-### Output Layout (concurrent mode, `--concurrency 3 --instance-ids ...`)
+### Output Layout (Concurrent Mode)
+
+`--concurrency 3 --instance-ids ...`:
 
 ```text
 traces/<model>/<ts>/

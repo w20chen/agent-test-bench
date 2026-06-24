@@ -1,4 +1,4 @@
-# Case Inspection (SWE-bench)
+# Case Inspection
 
 > This document is part of the [Agent Sched Bench manual](../README.md).
 > For running benchmarks, see [Trace Collect](trace-collect.md).
@@ -10,6 +10,18 @@ needed — just Docker + HuggingFace datasets.
 
 **Use cases:** Reviewers who want to see what benchmark cases look like —
 repo structure, problem statements, and test details.
+
+---
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Usage Examples](#usage-examples)
+- [SWE-rebench Usage](#swe-rebench-usage)
+- [Using a Local Cache](#using-a-local-cache)
+- [Common Workflows](#common-workflows)
+
+---
 
 ## Prerequisites
 
@@ -59,17 +71,16 @@ python scripts/inspect_swebench.py --benchmark swe-bench-verified export django_
 python scripts/inspect_swebench.py --benchmark swe-bench-verified shell django__django-10097
 ```
 
-## SWE-rebench Works the Same Way
+## SWE-rebench Usage
 
 ```bash
-# SWE-rebench
 python scripts/inspect_swebench.py --benchmark swe-rebench list
 python scripts/inspect_swebench.py --benchmark swe-rebench info 12rambau__sepal_ui-411
 python scripts/inspect_swebench.py --benchmark swe-rebench pull 12rambau__sepal_ui-411
 python scripts/inspect_swebench.py --benchmark swe-rebench shell 12rambau__sepal_ui-411
 ```
 
-## Use Local Cache to Skip HF Download
+## Using a Local Cache
 
 If you've already downloaded data via `make download-swebench-verified`,
 use the local `tasks.json` cache to skip the HuggingFace download:
@@ -83,7 +94,7 @@ python scripts/inspect_swebench.py \
 
 ## Common Workflows
 
-### Workflow 1: Quickly browse a few cases
+### Workflow 1: Quickly Browse a Few Cases
 
 ```bash
 # 1. List some tasks
@@ -98,7 +109,7 @@ python scripts/inspect_swebench.py -b swe-bench-verified shell sympy__sympy-1248
 # Inside container: ls /testbed, cat /testbed/setup.py, git log, etc.
 ```
 
-### Workflow 2: Export all files for offline analysis
+### Workflow 2: Export All Files for Offline Analysis
 
 ```bash
 python scripts/inspect_swebench.py -b swe-bench-verified pull astropy__astropy-12907
@@ -106,14 +117,14 @@ python scripts/inspect_swebench.py -b swe-bench-verified export astropy__astropy
 # Then open ./case_astropy_12907/ in your local IDE
 ```
 
-### Workflow 3: See the gold fix patch (the expected solution)
+### Workflow 3: View the Gold Fix Patch
 
 ```bash
 # Shows both the code patch and the test patch from the dataset
 python scripts/inspect_swebench.py -b swe-bench-verified diff django__django-10097
 ```
 
-### Workflow 4: Understand what tests need to pass (FAIL_TO_PASS)
+### Workflow 4: Inspect FAIL_TO_PASS Tests
 
 ```bash
 # See which test files are involved and how many tests per file

@@ -5,13 +5,19 @@
 
 The repo ships with plugin-based benchmark support. Each benchmark is defined
 by a YAML config in `configs/benchmarks/` and a Python plugin in
-`src/agents/benchmarks/`. The table below lists all registered benchmarks,
-their task shape, data source, runtime environment, and supported scaffolds.
+`src/agents/benchmarks/`.
 
-To add a new benchmark, follow the plugin architecture: create a YAML config
-and a Python class inheriting from `agents.benchmarks.base.Benchmark`.
+---
 
-## Registered Benchmarks
+## Table of Contents
+
+- [Benchmark Catalog](#benchmark-catalog)
+- [BFCL Function Calling Benchmarks](#bfcl-function-calling-benchmarks)
+- [Plugin Architecture](#plugin-architecture)
+
+---
+
+## Benchmark Catalog
 
 | Slug | `task_shape` | Dataset | Split | Docker | Scaffolds | Scoring |
 |---|---|---|---|---|---|---|
@@ -26,7 +32,7 @@ supports `--scaffold openclaw` with the Docker runtime in phase 1.
 
 ---
 
-## BFCL via OpenClaw (host-mode)
+## BFCL Function Calling Benchmarks
 
 Four BFCL (Berkeley Function Calling Leaderboard) datasets are wired as
 host-mode benchmarks driven by the OpenClaw scaffold. BFCL runs as a read-only
@@ -35,12 +41,6 @@ backend instantiation, and backend implementations (simulated filesystem,
 booking, web search, vector/kv/rec_sum memory) are reused unmodified; OpenClaw
 provides the agent loop that interacts with these backends via the BFCL
 function-calling protocol.
-
-Run with `--benchmark bfcl-v3` (or `bfcl-v3-multi`, `bfcl-v4`, `bfcl-v4-multi`)
-and `--scaffold openclaw`.  See `configs/benchmarks/bfcl-*.yaml` for full
-benchmark configurations.
-
-### BFCL Benchmarks
 
 | Slug | BFCL Version | Multi-turn | Mode |
 |------|-------------|------------|------|
@@ -60,20 +60,19 @@ PYTHONPATH=src python -m trace_collect.cli \
     --mcp-config none
 ```
 
+See `configs/benchmarks/bfcl-*.yaml` for full benchmark configurations.
+
 ---
 
-## Benchmark Plugin Architecture
+## Plugin Architecture
 
 All benchmarks MUST be added via the plugin layer in `src/agents/benchmarks/`
-and `configs/benchmarks/<slug>.yaml`.
+and `configs/benchmarks/<slug>.yaml`. To add a new benchmark, create a YAML
+config and a Python class inheriting from `agents.benchmarks.base.Benchmark`.
 
-**FORBIDDEN:**
-- Hardcoding dataset names (`princeton-nlp/SWE-bench_Verified`,
-  `nebius/SWE-rebench`, etc.) in `src/trace_collect/collector.py`,
-  `src/trace_collect/cli.py`, or any scaffold module.
-- Adding `--harness-dataset` / `--harness-split` / `--harness-namespace`
-  or similar "per-benchmark" CLI flags — those belong in the YAML.
-- Adding a `from_<benchmark>_instance()` factory method on `EvalTask`.
-  The canonical entry point is `EvalTask.from_benchmark_instance(row,
-  workspace_base, benchmark=<plugin>)` which delegates to the plugin's
-  `normalize_task` for benchmark-specific quirks.
+Hardcoding dataset names or adding per-benchmark CLI flags is forbidden —
+benchmark specifics belong in the YAML config. The canonical entry point for
+creating evaluation tasks is `EvalTask.from_benchmark_instance(row,
+workspace_base, benchmark=<plugin>)`.
+
+See `AGENTS.md` for the full rules governing benchmark plugins.

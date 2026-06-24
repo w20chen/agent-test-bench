@@ -4,6 +4,26 @@
 > For CLI reference, see [Trace Collect](trace-collect.md).
 > For benchmark descriptions, see [Benchmarks](benchmarks.md).
 
+---
+
+## Table of Contents
+
+- [Development Workflow](#development-workflow)
+- [End-to-End Walkthrough (ARM Server)](#end-to-end-walkthrough-arm-server)
+  - [Step 0 — Global Configuration](#step-0--global-configuration)
+  - [Step 1 — One-Time Environment Setup](#step-1--one-time-environment-setup)
+  - [Step 1b — Pre-Pull Images (QEMU Mode)](#step-1b--pre-pull-images-qemu-mode)
+  - [Step 2 — Run](#step-2--run)
+  - [Step 2b — Replay](#step-2b--replay)
+- [ARM QEMU Architecture Details](#arm-qemu-architecture-details)
+  - [Bootstrap Timeline](#bootstrap-timeline)
+  - [Fixed Images](#fixed-images)
+  - [QEMU Binfmt Loss](#qemu-binfmt-loss)
+  - [Pre-Flight Checklist](#pre-flight-checklist)
+- [Troubleshooting](#troubleshooting)
+
+---
+
 ## Development Workflow
 
 All Python invocations run inside conda env "ML" (Python 3.12). On a fresh
@@ -18,23 +38,11 @@ make test    # run pytest
 make lint    # ruff
 ```
 
-## Using the Repo: Three Entry Points
-
-This repo supports three progressively deeper ways to interact with benchmarks:
-
-1. **Inspect cases** — browse benchmark tasks without running an agent.
-   See [Case Inspection](case-inspection.md).
-2. **Run an agent interactively** — send a one-shot prompt to the OpenClaw agent
-   via CLI (see [Quick Test](#quick-test) below).
-3. **Run a full benchmark** — execute the agent on many tasks with container
-   orchestration, trace collection, and result aggregation.
-   See [Trace Collect](trace-collect.md).
-
 ---
 
-## Quick Test: End-to-End Walkthrough (ARM Server)
+## End-to-End Walkthrough (ARM Server)
 
-End-to-end walkthrough for running a single SWE-rebench task on an ARM server.
+Step-by-step guide for running a single SWE-rebench task on an ARM server.
 
 **Prerequisites:** ARM server + DeepSeek API + Docker
 
@@ -72,7 +80,7 @@ export WEB_SEARCH_PROVIDER=tavily
 export TASK_CONTAINER_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### Step 1 — One-time environment setup
+### Step 1 — One-Time Environment Setup
 
 **Native mode (default):**
 
@@ -106,7 +114,7 @@ In QEMU mode the official `swerebench/sweb.eval.x86_64.<task>` images are
 pulled and executed via QEMU user-mode emulation.  The ARM base image
 (`make setup-arm-native`) is not needed.
 
-### Step 1b — Pre-pull images (recommended for QEMU mode)
+### Step 1b — Pre-Pull Images (QEMU Mode)
 
 In **QEMU mode** each SWE-rebench task uses its own ~2 GB Docker image
 (`swerebench/sweb.eval.x86_64.<task>:latest`).  Pulling them ahead of
@@ -232,14 +240,14 @@ PYTHONPATH=src python -m trace_collect.html_viz traces/swe-rebench/deepseek-chat
 
 ---
 
-## ARM (QEMU) Architecture Details
+## ARM QEMU Architecture Details
 
 When running on an ARM server in QEMU mode, each task container goes through
 a **bootstrap phase** before the agent sends its first LLM request.  During
 this phase you will observe rising memory, CPU activity, and network I/O —
 this is normal and expected.
 
-### Bootstrap Timeline (per task, first run only)
+### Bootstrap Timeline
 
 ```
 Container Start     Bootstrap Phase (~30–120s)          Agent Actions
@@ -269,7 +277,7 @@ the pipeline checks it before re-running any of steps ①–④.  You will see:
 bootstrap runtime: reuse existing site-packages
 ```
 
-### Fixed Images (QEMU Mode)
+### Fixed Images
 
 The pipeline uses **two layers of images** for each task:
 
@@ -299,7 +307,7 @@ docker images --format '{{.Repository}}:{{.Tag}}' | grep '^swebench-fixed-' | xa
 
 Source images are NOT affected and do NOT need re-pulling.
 
-### QEMU Binfmt Loss (Container exits immediately)
+### QEMU Binfmt Loss
 
 The x86_64 → ARM emulation depends on the kernel's `binfmt_misc` handler
 registered via `tonistiigi/binfmt`.  This registration can be lost after a
@@ -329,7 +337,7 @@ make setup-arm-host
 This runs `docker run --privileged --rm tonistiigi/binfmt --install amd64`.
 The `tonistiigi/binfmt` image may take a minute to pull on first use.
 
-### ARM QEMU Pre-flight Checklist
+### Pre-Flight Checklist
 
 ```bash
 # 1. Verify QEMU binfmt is alive
