@@ -24,6 +24,10 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
 
 ## Basic Usage
 
+The command below downloads benchmark data, sets up task repositories, and
+runs the agent scaffold on two sampled tasks. Output traces are written under
+`traces/<benchmark>/<model>/<timestamp>/`.
+
 ```bash
 conda activate ML
 make download-swe-rebench         # or download-swebench-verified
@@ -38,6 +42,9 @@ PYTHONPATH=src python -m trace_collect.cli \
 ```
 
 ### CLI Flags Reference
+
+The table below lists the most commonly used flags. For the complete
+reference, see `src/trace_collect/CLAUDE.md`.
 
 | Flag | Description |
 |------|-------------|
@@ -73,6 +80,9 @@ progress (see `openclaw --help`).
 
 ### Deep Research Bench
 
+The deep research benchmark is a host-mode benchmark — it does not require
+Docker containers. The following example demonstrates a typical invocation:
+
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
@@ -97,6 +107,10 @@ Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
 ---
 
 ## Concurrent Execution
+
+Beyond single-task runs, the CLI supports spawning multiple agent instances
+in parallel. This is primarily useful for stress-testing hardware under
+realistic multi-agent workloads.
 
 `--concurrency N` (default `1`) spawns **N agent instances simultaneously**
 for each benchmark task.  This is designed for hardware stress-testing:
@@ -200,6 +214,11 @@ per instance (output to `<instance_id>/`).
 
 ## Recording Internals
 
+In addition to trace-level observability, the harness can capture model
+internals — attention patterns and MoE routing decisions — for offline
+analysis. This feature uses a host-side HuggingFace backend with custom
+forward hooks.
+
 `--record-internals` switches OpenClaw model calls to a host-side HuggingFace
 backend and records reduced attention/MoE artifacts beside each attempt.
 It currently supports `--scaffold openclaw` only.
@@ -240,6 +259,10 @@ production throughput.
 ---
 
 ## Ksys System Metrics
+
+For Huawei Kunpeng hardware, the `--ksys` flag enables chip-level telemetry
+that complements the standard resource samplers. Ksys captures metrics that
+are not available through generic Linux PMU counters.
 
 `--ksys` starts `ksys collect -o <dir>` as a background process alongside
 the agent and stops it (SIGINT) when the agent finishes.

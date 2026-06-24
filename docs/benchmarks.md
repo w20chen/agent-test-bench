@@ -19,6 +19,9 @@ by a YAML config in `configs/benchmarks/` and a Python plugin in
 
 ## Benchmark Catalog
 
+The table below lists every registered benchmark, its task shape, data
+source, runtime environment, and supported agent scaffolds.
+
 | Slug | `task_shape` | Dataset | Split | Docker | Scaffolds | Scoring |
 |---|---|---|---|---|---|---|
 | `swe-bench-verified` | `swe_patch` | `princeton-nlp/SWE-bench_Verified` | `test` | `swebench/sweb.eval.x86.*` (namespace-prefixed) | openclaw | harness (pytest in container) |
@@ -33,6 +36,11 @@ supports `--scaffold openclaw` with the Docker runtime in phase 1.
 ---
 
 ## BFCL Function Calling Benchmarks
+
+In addition to the SWE-patch and QA benchmarks above, the repo also supports
+function-calling evaluation through the BFCL suite. These benchmarks test an
+agent's ability to use tools correctly across single-turn and multi-turn
+interactions.
 
 Four BFCL (Berkeley Function Calling Leaderboard) datasets are wired as
 host-mode benchmarks driven by the OpenClaw scaffold. BFCL runs as a read-only
@@ -65,6 +73,10 @@ See `configs/benchmarks/bfcl-*.yaml` for full benchmark configurations.
 ---
 
 ## Plugin Architecture
+
+New benchmarks are added through a plugin system rather than by modifying
+core harness code. This keeps benchmark-specific logic isolated and makes
+the harness reusable across different evaluation domains.
 
 All benchmarks MUST be added via the plugin layer in `src/agents/benchmarks/`
 and `configs/benchmarks/<slug>.yaml`. To add a new benchmark, create a YAML

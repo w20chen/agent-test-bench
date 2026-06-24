@@ -62,6 +62,9 @@ consumers (HTML viz, summary aggregation) can distinguish "absent" from
 
 ---
 
+The following sections describe each metric family in detail, covering data
+sources, fallback paths, and platform-specific behaviour.
+
 ## 1. CPU & Memory (per-sample, always available)
 
 | Metric | Container Mode | Host-Process Mode |
@@ -263,6 +266,9 @@ so remaining metrics in the group are still computed.
 
 ## 7. Metric Aggregation
 
+Once sampling stops, the raw time series are aggregated into summary
+statistics for quick inspection and cross-run comparison.
+
 Each sampler's `stop()` method returns raw sample lists. The
 `summarize_samples()` function in `container_stats_sampler.py` computes
 per-metric `{min, max, avg}` across all samples, plus `delta` (last − first)
@@ -274,6 +280,10 @@ consumed by the HTML Gantt viewer for resource overlay charts.
 ---
 
 ## 8. Architecture Support Matrix
+
+The table below summarises which metrics are available on each platform.
+Use it to determine whether a particular metric is meaningful for your
+hardware before running experiments.
 
 | Resource Metric | x86 Intel | x86 AMD | ARMv8 (Kunpeng 920) | Generic Linux | macOS/Windows |
 |---|---|---|---|---|---|
@@ -297,6 +307,11 @@ consumed by the HTML Gantt viewer for resource overlay charts.
 ---
 
 ## 9. HTML Visualization
+
+All collected metrics — both raw samples and aggregated summaries — are
+rendered in the interactive Gantt viewer. Each chart is a time-series aligned
+with the agent's trace timeline, making it possible to correlate resource
+usage with specific agent actions.
 
 The Gantt viewer (`src/trace_collect/html_viz.py`) renders all resource
 metrics as time-series charts below the Gantt chart:

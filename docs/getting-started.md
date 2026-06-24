@@ -42,6 +42,10 @@ make lint    # ruff
 
 ## End-to-End Walkthrough (ARM Server)
 
+The following walkthrough takes you from a fresh ARM server to a completed
+benchmark run. It covers both native ARM mode and QEMU-emulated x86_64 mode.
+If you are on an x86_64 host, skip the QEMU-specific steps.
+
 Step-by-step guide for running a single SWE-rebench task on an ARM server.
 
 **Prerequisites:** ARM server + DeepSeek API + Docker
@@ -193,6 +197,10 @@ transparently handles the x86_64 → ARM emulation via QEMU.
 
 ### Step 2b — Replay
 
+Once you have collected a trace, you can replay it under different arrival
+patterns or against a local serving stack. This is useful for measuring
+scheduling-sensitive timing without re-running the expensive agent loop.
+
 Export tasks and replay a trace:
 
 ```bash
@@ -234,6 +242,9 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
 
 ### Visualize Results
 
+After a run completes, generate an interactive HTML Gantt chart with resource
+overlays to inspect the trace timeline:
+
 ```bash
 PYTHONPATH=src python -m trace_collect.html_viz traces/swe-rebench/deepseek-chat/20260603T030206/12rambau__sepal_ui-411/attempt_1
 ```
@@ -241,6 +252,10 @@ PYTHONPATH=src python -m trace_collect.html_viz traces/swe-rebench/deepseek-chat
 ---
 
 ## ARM QEMU Architecture Details
+
+The sections below explain the internals of QEMU-mode execution. They are
+useful when diagnosing performance anomalies or debugging container startup
+failures. If you are running in native ARM mode, you can skip this section.
 
 When running on an ARM server in QEMU mode, each task container goes through
 a **bootstrap phase** before the agent sends its first LLM request.  During
@@ -357,6 +372,8 @@ ARM_IMAGE_MODE=qemu PYTHONPATH=src python -m trace_collect.cli ...
 ---
 
 ## Troubleshooting
+
+The commands below help diagnose common issues during benchmark runs.
 
 ```bash
 docker ps

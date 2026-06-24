@@ -41,6 +41,9 @@ miniconda, creates env ML, and installs all deps.
 
 ## Repository Layout
 
+The codebase is organised around a few top-level directories. Here is how
+they map to the capabilities described above:
+
 ```text
 agent-sched-bench/
 ├── configs/            # benchmark / system / trace_collect / sweep YAMLs
@@ -58,6 +61,10 @@ agent-sched-bench/
 ---
 
 ## Entry Points
+
+If you are new to the project, the quickest way to get oriented is to work
+through the three entry points below — from passive inspection to full
+benchmark runs:
 
 Three progressively deeper ways to interact with this repo:
 
@@ -95,6 +102,10 @@ Three progressively deeper ways to interact with this repo:
 
 ## Documentation
 
+Each entry point above links to a dedicated page that goes into depth. The
+full set of documentation pages is listed below — pick the one that matches
+your current task:
+
 Detailed documentation lives under `docs/`:
 
 | Document | What it covers |
@@ -108,6 +119,11 @@ Detailed documentation lives under `docs/`:
 ---
 
 ## Supported Benchmarks
+
+The following benchmarks are currently registered. Each benchmark has a
+corresponding YAML config and Python plugin — see the [Benchmarks
+documentation](docs/benchmarks.md) for full details including scoring
+methodology and runtime requirements.
 
 | Slug | Type | Runtime | Scaffolds |
 |------|------|---------|-----------|

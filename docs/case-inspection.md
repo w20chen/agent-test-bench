@@ -33,6 +33,10 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 ## Usage Examples
 
+The script supports several subcommands — `list`, `info`, `pull`, `shell`,
+`diff`, `tests`, `export`, and more. Examples below use `--benchmark
+swe-bench-verified`; all subcommands work identically for `swe-rebench`.
+
 ```bash
 # List the first 20 SWE-bench Verified tasks
 python scripts/inspect_swebench.py --benchmark swe-bench-verified list
@@ -73,6 +77,9 @@ python scripts/inspect_swebench.py --benchmark swe-bench-verified shell django__
 
 ## SWE-rebench Usage
 
+The same script works for SWE-rebench with identical subcommands — just
+change the `--benchmark` argument:
+
 ```bash
 python scripts/inspect_swebench.py --benchmark swe-rebench list
 python scripts/inspect_swebench.py --benchmark swe-rebench info 12rambau__sepal_ui-411
@@ -82,8 +89,9 @@ python scripts/inspect_swebench.py --benchmark swe-rebench shell 12rambau__sepal
 
 ## Using a Local Cache
 
-If you've already downloaded data via `make download-swebench-verified`,
-use the local `tasks.json` cache to skip the HuggingFace download:
+Downloading task metadata from HuggingFace on every invocation can be slow.
+If you have already run `make download-swebench-verified`, point the script
+at the local cache to skip the network round-trip:
 
 ```bash
 python scripts/inspect_swebench.py \
@@ -93,6 +101,10 @@ python scripts/inspect_swebench.py \
 ```
 
 ## Common Workflows
+
+The subcommands above can be combined into typical inspection workflows.
+Each workflow below assumes you have Docker running and the benchmark data
+downloaded.
 
 ### Workflow 1: Quickly Browse a Few Cases
 
