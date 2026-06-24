@@ -48,6 +48,10 @@ OPENROUTER_API_KEY=sk-... python -m trace_collect.cli \
 | `--api-base` | no | from provider | Override API base URL |
 | `--api-key` | no | from env | Override API key |
 | `--record-internals` | no | off | OpenClaw-only: record sampled HF attention/MoE artifacts under each attempt's `recordings/`; forces model request concurrency to 1 |
+| `--resource-monitoring` | no | `auto` | `auto|on|off` for CPU, memory, disk, network, and context-switch sampling |
+| `--pmu-monitoring` | no | `auto` | `auto|on|off` for PMU metrics; explicit `on` is forbidden in concurrent execution |
+| `--ksys-monitoring` | no | `auto` | `auto|on|off` for Kunpeng ksys; `auto` is off |
+| `--ksys` | no | off | Compatibility alias for `--ksys-monitoring on` |
 | `--kv-policy` | no | `none` | KV cache eviction policy for the HF recording backend. `none` (default) = stock `DynamicCache`. `random` = uniform random over-budget eviction (step 3 baseline). `streaming` = StreamingLLM (sink prefix + recent window, naive variant — no RoPE re-rotation). `h2o` = Heavy-Hitter Oracle (arXiv:2306.14048): keep sink + recent + top-k middle positions ranked by accumulated post-softmax attention; subscribes to the `AttentionBus` to share LayerCapturer's softmax. Requires `--record-internals`. |
 | `--kv-budget` | when `--kv-policy != none` | — | Per-layer KV budget in tokens. Required and must be `> 0` whenever `--kv-policy` is set. For `streaming`, this is the fixed cache capacity and must equal `sink_size + recent_window`. For `h2o`, post-eviction layer length is exactly `budget`; the heavy-hitter slot count is `budget - sink_size - recent_window`. Each call writes a `kv_eviction.npz` under `recordings/iter_<call>/` with the keep/evict audit. |
 | `--kv-sink-size` | no | `4` | Sink-prefix length (head tokens preserved). Used by `streaming` and `h2o`. Ignored by `random`. |
@@ -394,10 +398,13 @@ record has:
 
 ### Container Resource Sampling
 
-`ContainerStatsSampler` runs a background thread at 1s intervals:
+`ContainerStatsSampler` runs a background thread when resolved resource
+monitoring is enabled:
 - Metrics: CPU %, memory MB, disk I/O MB, network I/O MB, context switches
 - Prefers cgroup v2 host-side reads; falls back to `docker exec`-based aggregation
 - Output: `resources.json` with `{samples: [...], summary: {...}}`
+- PMU and host memory bandwidth are separate attachments and are always
+  disabled for concurrent collection or simulation.
 
 ### Key Dataclasses (simulator.py)
 

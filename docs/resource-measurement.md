@@ -5,10 +5,28 @@
 > For CLI usage, see [Trace Collect](trace-collect.md).
 
 The harness layer (`src/harness/`) provides a comprehensive, cross-platform
-resource observability stack. Every benchmark attempt records time-series
-samples of CPU, memory, disk I/O, network I/O, context switches, host memory
-bandwidth, and CPU micro-architecture (PMU) metrics. Two sampler backends
-cover both containerised and host-process workloads.
+resource observability stack. Depending on the resolved monitoring policy, an
+attempt can record CPU, memory, disk I/O, network I/O, context switches, host
+memory bandwidth, and CPU micro-architecture (PMU) metrics. Two sampler
+backends cover both containerised and host-process workloads.
+
+The CLI exposes three independent controls:
+
+- `--resource-monitoring auto|on|off` for CPU, memory, disk, network,
+  context switches, and host memory bandwidth.
+- `--pmu-monitoring auto|on|off` for micro-architecture counters.
+- `--ksys-monitoring auto|on|off` for Huawei Kunpeng ksys telemetry.
+
+Host memory bandwidth does **not** have its own CLI switch. It is
+automatically enabled whenever built-in resource monitoring is active in a
+non-concurrent execution mode. It cannot be enabled independently, nor can
+it be disabled while keeping other resource metrics.
+
+PMU and host memory bandwidth are never collected concurrently because both
+rely on system-level collectors that cannot be attributed correctly to
+parallel attempts. See
+[Trace Collect](trace-collect.md#resource-monitoring-defaults) for the full
+`auto` matrix.
 
 ---
 

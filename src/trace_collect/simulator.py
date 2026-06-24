@@ -15,6 +15,7 @@ from agents.base import TraceAction
 from harness.container_image_prep import ensure_fixed_image, normalize_image_reference
 from harness.container_stats_sampler import ContainerStatsSampler, summarize_samples
 from harness.gpu_resource_sampler import GpuResourceSampler
+from harness.ksys import KsysSession
 from harness.runner import build_arrival_offsets
 from harness.metrics_client import VLLMMetricsClient
 from harness.scheduler_hooks import GpuBaseline
@@ -24,6 +25,7 @@ from trace_collect import attempt_layout
 from trace_collect.attempt_pipeline import start_task_container, stop_task_container
 from trace_collect.exec_classifier import classify_exec_tool_name
 from trace_collect.html_viz import generate_html
+from trace_collect.monitoring import MonitoringPolicy, resolve_simulate_monitoring
 from trace_collect.openclaw_tools import HostAgent
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,7 @@ class PreparedTraceSession:
     host_agent: HostAgent | None = None
     sampler: ContainerStatsSampler | None = None
     task_output_dir: Path | None = None
+    monitoring_policy: MonitoringPolicy | None = None
 
 
 async def _call_local_model_streaming(
@@ -631,6 +634,7 @@ def _log_trace_metadata(
     trace_manifest: Path | None,
     api_base: str | None,
     model: str | None,
+    monitoring_policy: MonitoringPolicy,
     network_mode: str = "host",
 ) -> None:
     scaffolds = {session.scaffold for session in sessions}
@@ -650,6 +654,7 @@ def _log_trace_metadata(
         "source_trace_count": len(sessions),
         "source_models": source_models,
         "network_mode": network_mode,
+        "monitoring": monitoring_policy.to_dict(),
     }
     if source_trace is not None:
         metadata["source_trace"] = str(source_trace)
@@ -1448,6 +1453,9 @@ async def simulate(
     gpu_baseline: GpuBaseline | None = None,
     vllm_pid: int | None = None,
     gpu_sample_hz: float = 10.0,
+    resource_monitoring: str = "auto",
+    pmu_monitoring: str = "auto",
+    ksys_monitoring: str = "auto",
 ) -> Path:
     if source_trace is not None and trace_manifest is not None:
         raise ValueError("source_trace and trace_manifest are mutually exclusive")
@@ -1484,6 +1492,21 @@ async def simulate(
         mode=mode,
         replay_speed=replay_speed,
     )
+    concurrent = (
+        mode == "cloud_model" and not serial and len(loaded_sessions) > 1
+    )
+    has_host_session = any(_is_host_mode(session) for session in loaded_sessions)
+    has_container_session = any(
+        not _is_host_mode(session) for session in loaded_sessions
+    )
+    monitoring_policy = resolve_simulate_monitoring(
+        resource=resource_monitoring,
+        pmu=pmu_monitoring,
+        ksys=ksys_monitoring,
+        concurrent=concurrent,
+        has_host_session=has_host_session,
+        has_container_session=has_container_session,
+    )
 
     output_path = Path(output_dir)
     if structured_output:
@@ -1500,16 +1523,19 @@ async def simulate(
     # ── Helpers for session lifecycle ──────────────────────────────
     async def _prepare_one(loaded: LoadedTraceSession) -> PreparedTraceSession:
         if _is_host_mode(loaded):
-            return await _prepare_host_session(loaded)
-        if container_executable is None:
-            raise ValueError(
-                "container_executable is required for container-mode traces"
+            prepared = await _prepare_host_session(loaded)
+        else:
+            if container_executable is None:
+                raise ValueError(
+                    "container_executable is required for container-mode traces"
+                )
+            prepared = await _prepare_container_session(
+                loaded,
+                container_executable=container_executable,
+                network_mode=network_mode,
             )
-        return await _prepare_container_session(
-            loaded,
-            container_executable=container_executable,
-            network_mode=network_mode,
-        )
+        prepared.monitoring_policy = monitoring_policy
+        return prepared
 
     async def _setup_one(prepared: PreparedTraceSession) -> None:
         instance_dir = output_path / prepared.loaded.agent_id
@@ -1517,22 +1543,33 @@ async def simulate(
         task_dir = instance_dir / f"attempt_{attempt_n}"
         task_dir.mkdir(parents=True, exist_ok=True)
         prepared.task_output_dir = task_dir
-        if prepared.container is None:
+        if prepared.container is None or not monitoring_policy.resource_enabled:
             return
         sampler = ContainerStatsSampler(
             container_id=prepared.container.container_id,
             interval_s=0.5,
             executable=prepared.container.container_executable,
+            enable_pmu=monitoring_policy.pmu_enabled,
+            enable_memory_bandwidth=(
+                monitoring_policy.memory_bandwidth_enabled
+            ),
         )
         sampler.start()
         prepared.sampler = sampler
 
     async def _teardown_one(prepared: PreparedTraceSession) -> None:
+        session_resource_enabled = (
+            monitoring_policy.resource_enabled and prepared.container is not None
+        )
         if prepared.sampler is not None:
             samples = prepared.sampler.stop()
             prepared.sampler = None  # mark torn down
             if prepared.task_output_dir is not None:
                 summary = summarize_samples(samples)
+                summary["monitoring"] = {
+                    **monitoring_policy.to_dict(),
+                    "status": "collected" if samples else "enabled_no_samples",
+                }
                 attempt_layout.write_resources_json(
                     prepared.task_output_dir, samples, summary,
                 )
@@ -1542,10 +1579,20 @@ async def simulate(
                     prepared.task_output_dir / "resources.json",
                 )
         elif prepared.task_output_dir is not None:
+            summary = summarize_samples([])
+            summary["monitoring_disabled"] = not session_resource_enabled
+            summary["monitoring"] = {
+                **monitoring_policy.to_dict(),
+                "status": (
+                    "disabled"
+                    if not session_resource_enabled
+                    else "enabled_no_samples"
+                ),
+            }
             attempt_layout.write_resources_json(
                 prepared.task_output_dir,
                 samples=[],
-                summary=summarize_samples([]),
+                summary=summary,
             )
         ctr = prepared.container
         if ctr is None:
@@ -1574,6 +1621,12 @@ async def simulate(
         api_base=api_base,
         model=model,
         network_mode=network_mode,
+        monitoring_policy=monitoring_policy,
+    )
+    ksys_session = (
+        KsysSession.start(output_dir=output_path, log_dir=output_path)
+        if monitoring_policy.ksys_enabled
+        else None
     )
 
     try:
@@ -1657,6 +1710,8 @@ async def simulate(
                 arrival_offsets=offsets,
             )
     finally:
+        if ksys_session is not None:
+            ksys_session.stop()
         if trace_logger is not None:
             trace_logger.close()
             print(f"  [debug] combined trace -> {trace_logger.path}")

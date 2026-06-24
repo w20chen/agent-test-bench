@@ -143,6 +143,7 @@ def test_run_scaffold_tasks_allocates_next_attempt_dir(
         inner,
         min_free_disk_gb,
         container_executable,
+        **monitoring_kwargs,
     ) -> AttemptResult:
         seen["attempt"] = ctx.attempt
         seen["attempt_dir_name"] = ctx.attempt_dir.name
@@ -217,6 +218,7 @@ def test_run_scaffold_tasks_uses_max_sparse_attempt_dir(
         inner,
         min_free_disk_gb,
         container_executable,
+        **monitoring_kwargs,
     ) -> AttemptResult:
         seen["attempt"] = ctx.attempt
         seen["attempt_dir_name"] = ctx.attempt_dir.name
@@ -569,6 +571,7 @@ def test_run_scaffold_tasks_prefetches_next_image_and_cleans_after_run(
         inner,
         min_free_disk_gb,
         container_executable,
+        **monitoring_kwargs,
     ):
         events.append(("run_start", ctx.instance_id))
         if ctx.instance_id == "task-a":
@@ -667,6 +670,7 @@ def test_run_scaffold_tasks_reuses_source_image_for_consecutive_tasks(
         inner,
         min_free_disk_gb,
         container_executable,
+        **monitoring_kwargs,
     ):
         ctx.fixed_image = f"fixed-{ctx.instance_id}"
         events.append(("run_end", ctx.instance_id))
@@ -782,6 +786,7 @@ def test_run_scaffold_tasks_propagates_container_executable(
         inner,
         min_free_disk_gb,
         container_executable,
+        **monitoring_kwargs,
     ):
         seen.append(("run_attempt", container_executable))
         ctx.fixed_image = f"fixed-{ctx.source_image}"

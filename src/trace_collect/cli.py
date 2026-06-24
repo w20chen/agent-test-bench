@@ -17,6 +17,44 @@ from llm_call.config import (
     positive_int_arg,
     top_p_arg,
 )
+from trace_collect.monitoring import MONITORING_CHOICES, resolve_ksys_request
+
+
+def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--resource-monitoring",
+        choices=MONITORING_CHOICES,
+        default="auto",
+        help=(
+            "Built-in CPU, memory, disk, network, and context-switch sampling. "
+            "'auto' preserves scenario defaults; 'on' explicitly enables it; "
+            "'off' disables it."
+        ),
+    )
+    parser.add_argument(
+        "--pmu-monitoring",
+        choices=MONITORING_CHOICES,
+        default="auto",
+        help=(
+            "CPU PMU micro-architecture sampling. 'auto' enables it only for "
+            "supported serial runs with built-in resource sampling. PMU is "
+            "always forbidden in concurrent execution."
+        ),
+    )
+    parser.add_argument(
+        "--ksys-monitoring",
+        choices=MONITORING_CHOICES,
+        default="auto",
+        help=(
+            "Huawei Kunpeng ksys collection. 'auto' and 'off' disable it; "
+            "'on' enables it when ksys is installed."
+        ),
+    )
+    parser.add_argument(
+        "--ksys",
+        action="store_true",
+        help="Compatibility alias for --ksys-monitoring on.",
+    )
 
 
 def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -136,25 +174,16 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
             "concurrency to 1 for the run."
         ),
     )
-    parser.add_argument(
-        "--ksys",
-        action="store_true",
-        help=(
-            "Start `ksys collect` alongside the agent and stop it when the "
-            "agent finishes.  Output written to ksys_stdout.txt / "
-            "ksys_stderr.txt in the attempt directory.  No-op when ksys "
-            "is not installed on the host."
-        ),
-    )
+    _add_monitoring_arguments(parser)
     parser.add_argument(
         "--concurrency",
         type=positive_int_arg,
         default=1,
         help=(
             "Number of concurrent agent instances per task. "
-            "When > 1, all built-in resource monitoring (ContainerStatsSampler, "
-            "ProcessStatsSampler, MicroArchCollector, HostMemoryBandwidthCollector) "
-            "is disabled; only ksys (if --ksys) runs once for the concurrent batch. "
+            "With 'auto', built-in resource monitoring is disabled when > 1. "
+            "It may be explicitly enabled for isolated container attempts, "
+            "but PMU and host memory bandwidth always remain disabled. "
             "Default: 1 (sequential)."
         ),
     )
@@ -473,6 +502,7 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
             "--vllm-pid, and --vllm-startup-log. Forbidden in cloud_model mode."
         ),
     )
+    _add_monitoring_arguments(parser)
     parser.add_argument(
         "--gpu-sample-hz",
         type=float,
@@ -677,35 +707,47 @@ def _run_collect(args: argparse.Namespace) -> None:
     plugin_cls = get_benchmark_class(config.slug)
     benchmark = plugin_cls(config)
 
-    run_dir = asyncio.run(
-        collect_traces(
-            scaffold=args.scaffold,
-            container_executable=args.container,
-            provider_name=provider_config.name,
-            env_key=provider_config.env_key,
-            api_base=provider_config.api_base,
-            api_key=provider_config.api_key,
-            model=provider_config.model,
-            benchmark=benchmark,
-            max_iterations=args.max_iterations,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            repetition_penalty=args.repetition_penalty,
-            sample=args.sample,
-            instance_ids=args.instance_ids.split(",") if args.instance_ids else None,
-            run_id=args.run_id,
-            max_context_tokens=args.max_context_tokens,
-            mcp_config=args.mcp_config,
-            prompt_template=args.prompt_template,
-            min_free_disk_gb=args.min_free_disk_gb,
-            record_internals=args.record_internals,
-            enable_ksys=args.ksys,
-            concurrency=args.concurrency,
-            eviction_config=eviction_config,
-            sparse_attention_config=sparse_attention_config,
+    try:
+        effective_ksys_monitoring = resolve_ksys_request(
+            args.ksys_monitoring,
+            legacy_ksys=args.ksys,
         )
-    )
+        run_dir = asyncio.run(
+            collect_traces(
+                scaffold=args.scaffold,
+                container_executable=args.container,
+                provider_name=provider_config.name,
+                env_key=provider_config.env_key,
+                api_base=provider_config.api_base,
+                api_key=provider_config.api_key,
+                model=provider_config.model,
+                benchmark=benchmark,
+                max_iterations=args.max_iterations,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                repetition_penalty=args.repetition_penalty,
+                sample=args.sample,
+                instance_ids=(
+                    args.instance_ids.split(",") if args.instance_ids else None
+                ),
+                run_id=args.run_id,
+                max_context_tokens=args.max_context_tokens,
+                mcp_config=args.mcp_config,
+                prompt_template=args.prompt_template,
+                min_free_disk_gb=args.min_free_disk_gb,
+                record_internals=args.record_internals,
+                resource_monitoring=args.resource_monitoring,
+                pmu_monitoring=args.pmu_monitoring,
+                ksys_monitoring=effective_ksys_monitoring,
+                concurrency=args.concurrency,
+                eviction_config=eviction_config,
+                sparse_attention_config=sparse_attention_config,
+            )
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
     print(f"Traces written to: {run_dir}/")
     results_path = run_dir / "results.jsonl"
     if results_path.exists():
@@ -727,6 +769,10 @@ def _run_simulate(args: argparse.Namespace) -> None:
 
     try:
         validate_gpu_tracking_args(args)
+        effective_ksys_monitoring = resolve_ksys_request(
+            getattr(args, "ksys_monitoring", "auto"),
+            legacy_ksys=getattr(args, "ksys", False),
+        )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -748,6 +794,9 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "arrival_rate_per_s": args.arrival_rate_per_s,
         "arrival_seed": args.arrival_seed,
         "structured_output": args.output_dir == "traces/simulate",
+        "resource_monitoring": getattr(args, "resource_monitoring", "auto"),
+        "pmu_monitoring": getattr(args, "pmu_monitoring", "auto"),
+        "ksys_monitoring": effective_ksys_monitoring,
     }
 
     if args.mode == "cloud_model":
@@ -816,16 +865,20 @@ def _run_simulate(args: argparse.Namespace) -> None:
             "gpu_sample_hz": args.gpu_sample_hz,
         }
 
-    trace_file = asyncio.run(
-        simulate(
-            **simulate_kwargs,
-            api_base=llm_config.api_base,
-            api_key=llm_config.api_key,
-            model=llm_config.model,
-            metrics_url=args.metrics_url,
-            **gpu_tracking_kwargs,
+    try:
+        trace_file = asyncio.run(
+            simulate(
+                **simulate_kwargs,
+                api_base=llm_config.api_base,
+                api_key=llm_config.api_key,
+                model=llm_config.model,
+                metrics_url=args.metrics_url,
+                **gpu_tracking_kwargs,
+            )
         )
-    )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
     print(f"Simulate trace written to: {trace_file}")
 
 

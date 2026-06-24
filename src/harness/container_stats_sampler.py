@@ -622,12 +622,16 @@ class ContainerStatsSampler(threading.Thread):
         interval_s: float = 1.0,
         executable: str = "podman",
         subprocess_timeout_s: float = 5.0,
+        enable_memory_bandwidth: bool = True,
+        enable_pmu: bool = True,
     ) -> None:
         super().__init__(daemon=True, name=f"stats-{container_id[:12]}")
         self.container_id = container_id
         self.interval_s = interval_s
         self.executable = executable
         self.subprocess_timeout_s = subprocess_timeout_s
+        self.enable_memory_bandwidth = enable_memory_bandwidth
+        self.enable_pmu = enable_pmu
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._sample_count: int = 0
@@ -764,11 +768,13 @@ class ContainerStatsSampler(threading.Thread):
                 sample["net_rx_bytes"] = rx
             if tx is not None:
                 sample["net_tx_bytes"] = tx
-        attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
+        if self.enable_memory_bandwidth:
+            attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
         # Micro-arch PMU sampling runs at ≥ 2× the container-stats rate
         # to reduce stair-step artefacts from alternating group rotation.
-        _micro_arch_interval = max(0.5, self.interval_s / 2)
-        attach_micro_arch(sample, interval_s=_micro_arch_interval)
+        if self.enable_pmu:
+            micro_arch_interval = max(0.5, self.interval_s / 2)
+            attach_micro_arch(sample, interval_s=micro_arch_interval)
 
     def run(self) -> None:
         # Resolve cgroup path once at start.
@@ -798,11 +804,11 @@ class ContainerStatsSampler(threading.Thread):
                     self._samples.append(sample)
                 # Initialize micro-arch collector on first retained sample
                 # with per-container scoping when cgroup path is available.
-                if len(self._samples) == 1:
+                if self.enable_pmu and len(self._samples) == 1:
                     try:
-                        _micro_arch_interval = max(0.5, self.interval_s / 2)
+                        micro_arch_interval = max(0.5, self.interval_s / 2)
                         get_micro_arch_collector(
-                            interval_s=_micro_arch_interval,
+                            interval_s=micro_arch_interval,
                             cgroup_path=self._cgroup_path,
                             container_pid=self._container_pid,
                         )

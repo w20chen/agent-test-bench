@@ -339,6 +339,8 @@ class ProcessStatsSampler(threading.Thread):
         interval_s: float = 1.0,
         exclude_pids: set[int] | None = None,
         include_children: bool = True,
+        enable_memory_bandwidth: bool = True,
+        enable_pmu: bool = True,
     ) -> None:
         target_pid = os.getpid() if pid is None else pid
         super().__init__(daemon=True, name=f"proc-stats-{target_pid}")
@@ -346,6 +348,8 @@ class ProcessStatsSampler(threading.Thread):
         self.interval_s = interval_s
         self._exclude_pids: set[int] = exclude_pids or set()
         self._include_children = include_children
+        self.enable_memory_bandwidth = enable_memory_bandwidth
+        self.enable_pmu = enable_pmu
         self._stop_event = threading.Event()
         self._samples: list[dict[str, Any]] = []
         self._sample_count: int = 0
@@ -420,11 +424,13 @@ class ProcessStatsSampler(threading.Thread):
         if net is not None:
             sample["net_rx_bytes"] = net["net_rx_bytes"]
             sample["net_tx_bytes"] = net["net_tx_bytes"]
-        attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
+        if self.enable_memory_bandwidth:
+            attach_host_memory_bandwidth(sample, interval_s=self.interval_s)
         # Micro-arch PMU sampling runs at ≥ 2× the process-stats rate
         # to reduce stair-step artefacts from alternating group rotation.
-        _micro_arch_interval = max(0.5, self.interval_s / 2)
-        attach_micro_arch(sample, interval_s=_micro_arch_interval)
+        if self.enable_pmu:
+            micro_arch_interval = max(0.5, self.interval_s / 2)
+            attach_micro_arch(sample, interval_s=micro_arch_interval)
         return sample
 
     def run(self) -> None:

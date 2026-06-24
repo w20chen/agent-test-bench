@@ -35,13 +35,17 @@ from harness.container_image_prep import (
     resolve_arm_base_image,
     use_arm_qemu,
 )
+from harness.ksys import KsysSession
 from trace_collect.attempt_pipeline import (
     AttemptContext,
     AttemptResult,
-    _stop_ksys,
     run_attempt,
     start_task_container,
     stop_task_container,
+)
+from trace_collect.monitoring import (
+    MonitoringPolicy,
+    resolve_collect_monitoring,
 )
 from trace_collect.runtime.task_container import (
     bootstrap_task_container_python,
@@ -462,7 +466,7 @@ async def _run_scaffold_tasks(
     container_executable: str | None,
     prompt_template: str | None,
     min_free_disk_gb: float,
-    enable_ksys: bool = False,
+    monitoring_policy: MonitoringPolicy,
     concurrency: int = 1,
     inner_factory,
     recording_provider: Any | None = None,
@@ -470,10 +474,9 @@ async def _run_scaffold_tasks(
     """Iterate over tasks, wrapping each in ``run_attempt``.
 
     When ``concurrency > 1``, each task spawns *concurrency* agent instances
-    simultaneously.  Built-in resource monitoring (ContainerStatsSampler,
-    ProcessStatsSampler, MicroArchCollector, HostMemoryBandwidthCollector)
-    is disabled in this mode; only ``ksys`` (if ``--ksys``) runs once for
-    the entire concurrent batch.
+    simultaneously. The resolved policy may enable isolated container
+    CPU/memory/I/O sampling, but PMU and host memory bandwidth are always off.
+    Ksys, when enabled, runs once for the entire concurrent batch.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     completed = load_completed_ids(run_dir)
@@ -490,50 +493,19 @@ async def _run_scaffold_tasks(
     )
 
     # ── ksys system metrics (concurrent mode) ──────────────────────
-    # When concurrency > 1, built-in resource samplers are disabled
-    # and ksys is the sole monitoring channel.  It runs ONCE for the
-    # entire batch (not per-task), capturing system-wide metrics.
-    ksys_proc: subprocess.Popen | None = None
-    if concurrency > 1 and enable_ksys:
-        logger.info("ksys enabled (concurrent mode), looking for ksys on $PATH …")
-        ksys_bin = shutil.which("ksys")
-        if ksys_bin is None:
-            logger.warning(
-                "ksys not found on $PATH — "
-                "no system metrics will be collected. "
-                "Install ksys or remove --ksys flag."
+    # In concurrent mode ksys runs once for the entire batch (not per-task),
+    # capturing system-wide metrics independently from per-container samplers.
+    ksys_session: KsysSession | None = None
+    if concurrency > 1 and monitoring_policy.ksys_enabled:
+        ksys_session = KsysSession.start(
+            output_dir=run_dir.resolve(),
+            log_dir=run_dir,
+        )
+        if ksys_session is not None:
+            logger.info(
+                "ksys collect started for concurrent batch (×%d)",
+                concurrency,
             )
-        else:
-            logger.info("ksys found at %s", ksys_bin)
-            ksys_out_dir = run_dir.resolve()
-            ksys_out_dir.mkdir(parents=True, exist_ok=True)
-            ksys_stdout = (run_dir / "ksys_stdout.txt").open("wb")
-            ksys_stderr = (run_dir / "ksys_stderr.txt").open("wb")
-            try:
-                ksys_cmd = [ksys_bin, "collect", "-o", str(ksys_out_dir)]
-                logger.info("spawning: %s", " ".join(ksys_cmd))
-                ksys_proc = subprocess.Popen(
-                    ksys_cmd,
-                    stdout=ksys_stdout,
-                    stderr=ksys_stderr,
-                    cwd=str(ksys_out_dir),
-                )
-                logger.info(
-                    "ksys collect -o %s started (pid=%d) for "
-                    "concurrent batch (×%d)",
-                    ksys_out_dir,
-                    ksys_proc.pid,
-                    concurrency,
-                )
-            except Exception:
-                logger.warning(
-                    "ksys collect failed to start",
-                    exc_info=True,
-                )
-                ksys_proc = None
-            finally:
-                ksys_stdout.close()
-                ksys_stderr.close()
 
     with ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="image-prefetch"
@@ -638,9 +610,8 @@ async def _run_scaffold_tasks(
 
                 if concurrency > 1:
                     # ── concurrent mode ──────────────────────────────────
-                    # Built-in resource monitoring is disabled; ksys
-                    # (if enabled) was started once before the task loop
-                    # and captures system-wide metrics for the whole batch.
+                    # The resolved policy controls per-container monitoring.
+                    # Ksys, if enabled, was started once before the task loop.
                     base_attempt = next_attempt_number(run_dir, instance_id)
                     concurrent_coros: list[
                         tuple[int, AttemptContext, dict[str, Any]]
@@ -675,7 +646,16 @@ async def _run_scaffold_tasks(
                             "min_free_disk_gb": min_free_disk_gb,
                             "container_executable": container_executable,
                             "enable_ksys": False,
-                            "disable_resource_monitoring": True,
+                            "disable_resource_monitoring": (
+                                not monitoring_policy.resource_enabled
+                            ),
+                            "enable_pmu_monitoring": (
+                                monitoring_policy.pmu_enabled
+                            ),
+                            "enable_memory_bandwidth_monitoring": (
+                                monitoring_policy.memory_bandwidth_enabled
+                            ),
+                            "monitoring_policy": monitoring_policy.to_dict(),
                         }
                         if recording_provider is not None:
                             concurrent_kwargs["recording_provider"] = (
@@ -791,7 +771,15 @@ async def _run_scaffold_tasks(
                         "inner": _inner,
                         "min_free_disk_gb": min_free_disk_gb,
                         "container_executable": container_executable,
-                        "enable_ksys": enable_ksys,
+                        "enable_ksys": monitoring_policy.ksys_enabled,
+                        "disable_resource_monitoring": (
+                            not monitoring_policy.resource_enabled
+                        ),
+                        "enable_pmu_monitoring": monitoring_policy.pmu_enabled,
+                        "enable_memory_bandwidth_monitoring": (
+                            monitoring_policy.memory_bandwidth_enabled
+                        ),
+                        "monitoring_policy": monitoring_policy.to_dict(),
                     }
                     if recording_provider is not None:
                         run_attempt_kwargs["recording_provider"] = (
@@ -888,8 +876,8 @@ async def _run_scaffold_tasks(
                 )
 
     # ── stop ksys after all tasks complete ─────────────────────────
-    if ksys_proc is not None:
-        _stop_ksys(ksys_proc)
+    if ksys_session is not None:
+        ksys_session.stop()
 
     write_results_jsonl(results, run_dir / "results.jsonl")
     logger.info("Results written to %s", run_dir / "results.jsonl")
@@ -919,7 +907,9 @@ async def collect_traces(
     prompt_template: str | None = None,
     min_free_disk_gb: float = 30.0,
     record_internals: bool = False,
-    enable_ksys: bool = False,
+    resource_monitoring: str = "auto",
+    pmu_monitoring: str = "auto",
+    ksys_monitoring: str = "auto",
     concurrency: int = 1,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
@@ -952,6 +942,15 @@ async def collect_traces(
         execution_environment == "container" or runtime_mode == "task_container_agent"
     ) and container_executable is None:
         raise ValueError("--container required for container-mode benchmarks")
+
+    effective_ksys = ksys_monitoring
+    monitoring_policy = resolve_collect_monitoring(
+        resource=resource_monitoring,
+        pmu=pmu_monitoring,
+        ksys=effective_ksys,
+        concurrency=concurrency,
+        execution_environment=execution_environment,
+    )
 
     run_dir = Path(run_id) if run_id else build_run_dir(benchmark, model)
     generation_config = _generation_config(
@@ -1088,7 +1087,7 @@ async def collect_traces(
             container_executable=container_executable,
             prompt_template=prompt_template,
             min_free_disk_gb=min_free_disk_gb,
-            enable_ksys=enable_ksys,
+            monitoring_policy=monitoring_policy,
             concurrency=concurrency,
             inner_factory=make_inner,
             recording_provider=recording_provider,
@@ -1259,6 +1258,8 @@ async def _run_openclaw_in_task_container(
             container_id=container_id,
             interval_s=0.5,
             executable=container_executable,
+            enable_pmu=ctx.enable_pmu_monitoring,
+            enable_memory_bandwidth=ctx.enable_memory_bandwidth_monitoring,
         )
         _stats_sampler.start()
 

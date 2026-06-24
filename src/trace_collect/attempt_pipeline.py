@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import shutil
-import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -27,6 +26,7 @@ from harness.container_stats_sampler import (
     summarize_samples,
 )
 from harness.process_stats_sampler import ProcessStatsSampler
+from harness.ksys import KsysSession
 from harness.disk_preflight import DiskSpaceError, preflight_disk
 from trace_collect import attempt_layout
 from trace_collect.exec_classifier import rewrite_trace_with_exec_classification
@@ -63,6 +63,29 @@ def _utcnow_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "")
 
 
+def _stamp_trace_monitoring(
+    trace_path: Path,
+    monitoring_policy: dict[str, object],
+) -> None:
+    """Record resolved monitoring policy in canonical trace metadata."""
+    if not monitoring_policy:
+        return
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    output: list[str] = []
+    stamped = False
+    for line in lines:
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if not stamped and record.get("type") == "trace_metadata":
+            run_config = dict(record.get("run_config") or {})
+            run_config["monitoring"] = monitoring_policy
+            record["run_config"] = run_config
+            stamped = True
+        output.append(json.dumps(record, ensure_ascii=False))
+    trace_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
 @dataclass
 class AttemptContext:
     """Shared per-task state between ``run_attempt`` and scaffold code."""
@@ -80,7 +103,10 @@ class AttemptContext:
     fixed_image: str | None = None
     container_id: str | None = None
     samples: list[dict[str, Any]] | None = None
-    disable_resource_monitoring: bool = False
+    disable_resource_monitoring: bool = True
+    enable_pmu_monitoring: bool = False
+    enable_memory_bandwidth_monitoring: bool = False
+    monitoring_policy: dict[str, object] = field(default_factory=dict)
     attempt_dir: Path = field(init=False)
     start_time: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     end_time: datetime | None = None
@@ -276,6 +302,8 @@ async def _watch_for_container_ready(
     stop_event: threading.Event,
     *,
     container_executable: str,
+    enable_pmu: bool,
+    enable_memory_bandwidth: bool,
 ) -> ContainerStatsSampler | None:
     """Wait for ``ctx.container_id`` and start sampling once it appears."""
     while not stop_event.is_set():
@@ -288,6 +316,8 @@ async def _watch_for_container_ready(
                     container_id=ctx.container_id,
                     interval_s=0.5,
                     executable=container_executable,
+                    enable_pmu=enable_pmu,
+                    enable_memory_bandwidth=enable_memory_bandwidth,
                 )
                 sampler.start()
                 return sampler
@@ -322,20 +352,6 @@ def _container_is_inspectable(
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def _stop_ksys(proc: subprocess.Popen) -> None:
-    """Send SIGINT to *proc*, wait for graceful shutdown, force-kill if stuck."""
-    try:
-        proc.send_signal(signal.SIGINT)
-        logger.info("ksys sent SIGINT, waiting up to 30s for graceful shutdown …")
-        try:
-            proc.wait(timeout=30)
-            logger.info("ksys exited cleanly after SIGINT")
-        except subprocess.TimeoutExpired:
-            logger.warning("ksys did not exit after 30s, sending SIGKILL")
-            proc.kill()
-            proc.wait(timeout=10)
-    except Exception:
-        logger.warning("ksys stop failed", exc_info=True)
 
 
 async def _wait_for_recording_provider_idle(
@@ -359,6 +375,9 @@ async def run_attempt(
     recording_provider: Any | None = None,
     enable_ksys: bool = False,
     disable_resource_monitoring: bool = False,
+    enable_pmu_monitoring: bool = True,
+    enable_memory_bandwidth_monitoring: bool = True,
+    monitoring_policy: dict[str, object] | None = None,
 ) -> AttemptResult:
     """Execute one scaffold attempt and write its artifacts.
 
@@ -370,6 +389,9 @@ async def run_attempt(
     # Propagate to ctx so _run_openclaw_in_task_container (and other
     # inner functions) can also skip their own sampler initialisation.
     ctx.disable_resource_monitoring = disable_resource_monitoring
+    ctx.enable_pmu_monitoring = enable_pmu_monitoring
+    ctx.enable_memory_bandwidth_monitoring = enable_memory_bandwidth_monitoring
+    ctx.monitoring_policy = dict(monitoring_policy or {})
 
     if recording_provider is not None:
         await _wait_for_recording_provider_idle(
@@ -450,48 +472,25 @@ async def run_attempt(
                 ctx,
                 stop_watcher,
                 container_executable=container_executable,
+                enable_pmu=enable_pmu_monitoring,
+                enable_memory_bandwidth=enable_memory_bandwidth_monitoring,
             )
         )
 
     # ksys system metrics collector (Huawei Kunpeng).  Started alongside
     # other samplers so its timeline aligns with the Gantt chart's t0.
     # Gracefully no-ops when ksys is not installed on the host.
-    # Controlled by --ksys flag (default: off).
-    ksys_proc: subprocess.Popen | None = None
+    # Controlled by --ksys-monitoring flag (default: off).
+    ksys_session: KsysSession | None = None
     ksys_pid: int | None = None
     if enable_ksys:
-        logger.info("ksys enabled, looking for ksys on $PATH …")
-        ksys_bin = shutil.which("ksys")
-        if ksys_bin is None:
-            logger.warning(
-                "ksys not found on $PATH — "
-                "no system metrics will be collected. "
-                "Install ksys or remove --ksys flag."
-            )
-        else:
-            logger.info("ksys found at %s", ksys_bin)
-            ksys_out_dir = ctx.attempt_dir.parent.resolve()
-            ksys_stdout = (ctx.attempt_dir / "ksys_stdout.txt").open("wb")
-            ksys_stderr = (ctx.attempt_dir / "ksys_stderr.txt").open("wb")
-            try:
-                ksys_cmd = [ksys_bin, "collect", "-o", str(ksys_out_dir)]
-                logger.info("spawning: %s", " ".join(ksys_cmd))
-                ksys_proc = subprocess.Popen(
-                    ksys_cmd,
-                    stdout=ksys_stdout,
-                    stderr=ksys_stderr,
-                    cwd=str(ksys_out_dir),
-                )
-                ksys_pid = ksys_proc.pid
-                logger.info("ksys collect started (pid=%d) → %s", ksys_pid, ksys_out_dir)
-            except Exception:
-                logger.warning("ksys collect failed to start", exc_info=True)
-                ksys_proc = None
-            finally:
-                # Parent no longer needs these handles — the child has its
-                # own copies.  Closing avoids a file-descriptor leak.
-                ksys_stdout.close()
-                ksys_stderr.close()
+        ksys_out_dir = ctx.attempt_dir.parent.resolve()
+        ksys_session = KsysSession.start(
+            output_dir=ksys_out_dir,
+            log_dir=ctx.attempt_dir,
+        )
+        if ksys_session is not None:
+            ksys_pid = ksys_session.process.pid
 
     process_sampler: ProcessStatsSampler | None = None
     if ctx.execution_environment == "host" and not disable_resource_monitoring:
@@ -503,6 +502,8 @@ async def run_attempt(
             # pollute the agent's own metrics.  Agent-spawned
             # children (tool calls, etc.) remain included.
             exclude_pids={ksys_pid} if ksys_pid is not None else None,
+            enable_pmu=enable_pmu_monitoring,
+            enable_memory_bandwidth=enable_memory_bandwidth_monitoring,
         )
         process_sampler.start()
     if recording_provider is not None:
@@ -553,8 +554,8 @@ async def run_attempt(
             process_samples = process_sampler.stop()
             if not samples:
                 samples = process_samples
-        if ksys_proc is not None:
-            _stop_ksys(ksys_proc)
+        if ksys_session is not None:
+            ksys_session.stop()
         ctx.end_time = datetime.now(tz=timezone.utc)
 
     status = "completed"
@@ -593,6 +594,7 @@ async def run_attempt(
             "min_free_disk_gb": min_free_disk_gb,
             "agent_runtime_mode": ctx.agent_runtime_mode,
             "runtime_proof": result.runtime_proof if result is not None else {},
+            "monitoring": ctx.monitoring_policy,
         },
         "replay": {
             "replay_ready": bool(ctx.fixed_image),
@@ -679,6 +681,7 @@ async def run_attempt(
     # after the scaffold has finished writing so downstream consumers
     # (visualisers, tool_calls.json, simulators) see classified names.
     if copied_trace_path is not None and copied_trace_path.exists():
+        _stamp_trace_monitoring(copied_trace_path, ctx.monitoring_policy)
         n_changed = rewrite_trace_with_exec_classification(copied_trace_path)
         if n_changed:
             logger.debug(
@@ -697,6 +700,10 @@ async def run_attempt(
     attempt_layout.write_run_manifest(ctx.attempt_dir, manifest)
     attempt_layout.write_results_json(ctx.attempt_dir, results_payload)
     if samples:
+        resources_summary["monitoring"] = {
+            **ctx.monitoring_policy,
+            "status": "collected",
+        }
         attempt_layout.write_resources_json(
             ctx.attempt_dir, samples, summary=resources_summary
         )
@@ -705,10 +712,22 @@ async def run_attempt(
         # disable_resource_monitoring=True).  Write a minimal marker
         # so downstream consumers can distinguish "no data" from
         # "zero utilisation".
+        monitoring_status = (
+            "disabled"
+            if disable_resource_monitoring
+            else "enabled_no_samples"
+        )
         attempt_layout.write_resources_json(
             ctx.attempt_dir,
             [],
-            summary={"monitoring_disabled": True, "sample_count": 0},
+            summary={
+                **resources_summary,
+                "monitoring_disabled": disable_resource_monitoring,
+                "monitoring": {
+                    **ctx.monitoring_policy,
+                    "status": monitoring_status,
+                },
+            },
         )
     attempt_layout.write_tool_calls_json(ctx.attempt_dir, tool_calls)
     attempt_layout.write_container_stdout(ctx.attempt_dir, ctx.container_stdout)

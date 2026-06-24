@@ -17,6 +17,7 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [OpenClaw Standalone CLI](#openclaw-standalone-cli)
   - [Deep Research Bench](#deep-research-bench)
 - [Concurrent Execution](#concurrent-execution)
+  - [Resource-monitoring defaults](#resource-monitoring-defaults)
 - [Recording Internals](#recording-internals)
 - [Ksys System Metrics](#ksys-system-metrics)
 
@@ -55,7 +56,10 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--instance-ids a,b,c` | Run only specified instance(s) |
 | `--run-id <path>` | Resume an interrupted run |
 | `--prompt-template <name>` | Override the benchmark default prompt |
-| `--ksys` | Enable Huawei Kunpeng system metrics |
+| `--resource-monitoring auto\|on\|off` | Control CPU, memory, disk, network, context-switch, and host memory bandwidth sampling |
+| `--pmu-monitoring auto\|on\|off` | Control PMU sampling; concurrent `on` is forbidden |
+| `--ksys-monitoring auto\|on\|off` | Control Huawei Kunpeng system metrics |
+| `--ksys` | Compatibility alias for `--ksys-monitoring on` |
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |
 | `--model` | Model identifier |
@@ -152,15 +156,66 @@ These three flags are **orthogonal** and compose freely:
 --sample 10
 ```
 
+### Resource-monitoring defaults
+
+The CLI exposes three independent tri-state switches for resource monitoring:
+
+| Flag | Controls | Default |
+|------|----------|---------|
+| `--resource-monitoring auto\|on\|off` | CPU, memory, disk I/O, network I/O, context switches, and host memory bandwidth | `auto` |
+| `--pmu-monitoring auto\|on\|off` | CPU micro-architecture PMU counters (cache, branch, instructions) | `auto` |
+| `--ksys-monitoring auto\|on\|off` | Huawei Kunpeng ksys system-level telemetry | `auto` |
+| `--ksys` | Compatibility alias for `--ksys-monitoring on` | — |
+
+Host memory bandwidth does **not** have its own CLI switch. It is
+automatically enabled whenever built-in resource monitoring is active
+in a non-concurrent execution mode (see table below). It cannot be
+enabled independently.
+
+**`auto` resolution matrix:**
+
+| Scenario | Built-in (CPU/Mem/Disk/Net/CTX) | PMU | Mem BW | ksys |
+|---|---:|---:|---:|---:|
+| Serial collection (container) | on | on | on | off |
+| Serial collection (host) | on | on | on | off |
+| Concurrent collection | off | off | off | off |
+| Serial container simulation | on | on | on | off |
+| Concurrent container simulation | on | off | off | off |
+| Host simulation | off | off | off | off |
+
+**Hard constraints (explicit `on` is rejected with a clear error before work starts):**
+
+| Condition | Error |
+|-----------|-------|
+| `--pmu-monitoring on` with `--concurrency > 1` | PMU uses system-level `perf`; cannot isolate per-attempt measurements |
+| `--pmu-monitoring on` with concurrent simulation | Same reason |
+| `--resource-monitoring on` with host simulation | Host agent has no isolated process PID |
+| `--resource-monitoring on` with concurrent host collection | Attempts cannot be isolated by PID |
+| `--pmu-monitoring on` with `--resource-monitoring off` | PMU requires base resource sampling |
+| `--ksys` + `--ksys-monitoring off` | Conflicting flags |
+
+**Where monitoring policy is recorded:**
+
+| Artifact | Collection | Simulation |
+|----------|:---:|:---:|
+| `run_manifest.json` → `runtime.monitoring` | ✅ | ❌ (not written) |
+| `resources.json` → `monitoring` (full policy + `status` field) | ✅ | ✅ |
+| `trace.jsonl` → trace metadata `monitoring` field | ✅ | ✅ |
+
+The `resources.json` `status` field distinguishes three states:
+- `"collected"` — monitoring was enabled and samples were captured
+- `"enabled_no_samples"` — monitoring was enabled but the sampler yielded no data (e.g., container not inspectable, unsupported hardware)
+- `"disabled"` — monitoring was explicitly turned off by policy
+
 ### Behavior With `--concurrency > 1`
 
 - Each task kicks off **N concurrent `run_attempt()` coroutines** via
   `asyncio.gather()`.  Every instance runs in its own container (or host
   process) with an independent `attempt_N/` output directory.
-- **All built-in resource monitoring is disabled** — `ContainerStatsSampler`,
-  `ProcessStatsSampler`, `MicroArchCollector`, and
-  `HostMemoryBandwidthCollector` are skipped.  Their module-level singleton
-  design is incompatible with concurrent per-container scoping.
+- With `--resource-monitoring auto`, per-attempt resource monitoring is
+  disabled. It may be explicitly enabled for isolated container attempts.
+- PMU and host memory-bandwidth monitoring are always disabled because their
+  system-wide collectors cannot produce isolated concurrent measurements.
 - **`--ksys` runs once** for the entire concurrent batch (not per-task),
   writing `ksys_stdout.txt` / `ksys_stderr.txt` to the trace root
   directory (alongside `results.jsonl`).
@@ -198,7 +253,7 @@ traces/<model>/<ts>/
     ├── attempt_1/                   # agent instance 1
     │   ├── trace.jsonl
     │   ├── run_manifest.json
-    │   ├── resources.json           # {"monitoring_disabled": true, ...}
+    │   ├── resources.json           # {"monitoring": {"status": "disabled", ...}, ...}
     │   └── trace_viz.html
     ├── attempt_2/                   # agent instance 2
     │   └── ...
@@ -260,14 +315,15 @@ production throughput.
 
 ## Ksys System Metrics
 
-For Huawei Kunpeng hardware, the `--ksys` flag enables chip-level telemetry
+For Huawei Kunpeng hardware, `--ksys-monitoring on` enables chip-level telemetry
 that complements the standard resource samplers. Ksys captures metrics that
 are not available through generic Linux PMU counters.
 
-`--ksys` starts `ksys collect -o <dir>` as a background process alongside
+The legacy `--ksys` alias, or `--ksys-monitoring on`, starts
+`ksys collect -o <dir>` as a background process alongside
 the agent and stops it (SIGINT) when the agent finishes.
 
-- **Default: off.**  Pass `--ksys` to enable.
+- **Default: off.** Pass `--ksys-monitoring on` or `--ksys` to enable.
 - **No-op when `ksys` is not installed** on the host (graceful degradation).
 - **Timeline alignment:** ksys starts at the same point as other resource
   samplers, so its data shares the Gantt chart's t0 (time origin).
