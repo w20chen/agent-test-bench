@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -42,6 +43,7 @@ class KsysSession:
                 stdout=stdout,
                 stderr=stderr,
                 cwd=str(output_dir.resolve()),
+                start_new_session=True,
             )
         except Exception:
             logger.warning("ksys collect failed to start", exc_info=True)
@@ -53,13 +55,23 @@ class KsysSession:
         return cls(process=process)
 
     def stop(self) -> None:
-        """Stop ksys gracefully, then force termination if necessary."""
+        """Stop ksys gracefully, then force termination if necessary.
+
+        Sends SIGINT to the entire process group so that child processes
+        spawned by ksys (hardware collectors, etc.) also receive the
+        signal.  Falls back to SIGKILL if the group does not exit within
+        30 seconds.
+        """
         try:
-            self.process.send_signal(signal.SIGINT)
+            pgid = os.getpgid(self.process.pid)
+            os.killpg(pgid, signal.SIGINT)
             self.process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             logger.warning("ksys did not exit after SIGINT; killing it")
-            self.process.kill()
+            os.killpg(pgid, signal.SIGKILL)
             self.process.wait(timeout=10)
+        except ProcessLookupError:
+            # Process already gone — nothing to do.
+            pass
         except Exception:
             logger.warning("ksys stop failed", exc_info=True)
