@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import random
 import re
 import time
@@ -519,7 +520,13 @@ def _ensure_unique_agent_ids(sessions: list[LoadedTraceSession]) -> None:
         aid = session.agent_id
         count = seen.get(aid, 0)
         if count > 0:
-            session.agent_id = f"{aid}--a{i}"
+            new_id = f"{aid}--a{i}"
+            logger.warning(
+                "Renamed duplicate agent_id %r -> %r "
+                "(session %d of %d sharing this id).",
+                aid, new_id, i, len(sessions),
+            )
+            session.agent_id = new_id
         seen[aid] = count + 1
 
 
@@ -1581,11 +1588,18 @@ async def simulate(
         try:
             import psutil
             p = psutil.Process()
-            num_cores = min(int(cpu_limit), psutil.cpu_count() or int(cpu_limit))
-            p.cpu_affinity(list(range(num_cores)))
+            # CPU affinity does not support fractional cores — round up
+            # so that --cpu-limit 0.5 pins to at least 1 logical core
+            # rather than setting an empty (unrestricted) mask.
+            effective_cores = max(1, math.ceil(cpu_limit))
+            total_cores = psutil.cpu_count()
+            if total_cores is not None:
+                effective_cores = min(effective_cores, total_cores)
+            p.cpu_affinity(list(range(effective_cores)))
             logger.info(
-                "Set CPU affinity to cores 0-%d (cpu_limit=%.1f)",
-                num_cores - 1, cpu_limit,
+                "Set CPU affinity to cores 0-%d "
+                "(cpu_limit=%.1f, effective=%d)",
+                effective_cores - 1, cpu_limit, effective_cores,
             )
         except Exception as exc:
             logger.warning(

@@ -427,7 +427,9 @@ regardless of how many source traces exist.  This enables:
 
 > **Guard:** `--num-agents > 1` is rejected in `local_model` mode (which
 > inherently supports only a single trace).  Use `cloud_model` for multi-agent runs.
-
+>
+> **Guard:** `--num-agents < 0` is rejected — the count must be non-negative.
+>
 > **Guard:** `--trace-assignment random` **requires** `--num-agents > 0`.
 
 ### `--trace-assignment` Strategies
@@ -473,7 +475,8 @@ Agent 2 → "django__django-12345--a2"    # duplicate: suffixed
 ```
 
 This ensures every agent writes to a unique output directory without manual
-intervention.
+intervention.  A `WARNING`-level log message is emitted for each rename so
+that unexpected duplication is visible in the run output.
 
 ### Examples: N:M Mapping
 
@@ -539,11 +542,14 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
     --cpu-limit 4
 ```
 
+> **Guard:** `--cpu-limit <= 0` is rejected — the limit must be positive.
+
 ### Host-mode traces
 
 Sets CPU affinity on the current process via `psutil.Process().cpu_affinity()`.
-Pins the process to cores `[0, 1, ..., floor(N)-1]`.  Fractional values are
-truncated (e.g., `--cpu-limit 3.7` pins to cores 0, 1, 2).
+Pins the process to cores `[0, 1, ..., ceil(N)-1]`.  Fractional values are
+rounded **up** to ensure at least 1 core is pinned (e.g., `--cpu-limit 0.5`
+pins to 1 core; `--cpu-limit 3.2` pins to cores 0, 1, 2, 3).
 
 ```bash
 # Pin simulate process to cores 0-3

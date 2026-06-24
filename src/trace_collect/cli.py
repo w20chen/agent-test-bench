@@ -846,6 +846,18 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "cpu_limit": args.cpu_limit,
     }
 
+    if args.num_agents < 0:
+        print(
+            "ERROR: --num-agents must be >= 0 (got %d)." % args.num_agents,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.cpu_limit is not None and args.cpu_limit <= 0:
+        print(
+            "ERROR: --cpu-limit must be > 0 (got %.1f)." % args.cpu_limit,
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if args.trace_assignment == "random" and args.num_agents <= 0:
         print(
             "ERROR: --trace-assignment random requires --num-agents > 0.",
