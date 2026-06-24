@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -477,6 +478,51 @@ def _discover_traces(
     return [(p, default_task_source, None) for p in found]
 
 
+def _expand_trace_inputs(
+    trace_inputs: list[tuple[Path, Path, str | None]],
+    *,
+    num_agents: int = 0,
+    trace_assignment: str = "manifest",
+    trace_assignment_seed: int | None = None,
+) -> list[tuple[Path, Path, str | None]]:
+    """Expand *trace_inputs* for N:M trace-to-agent mapping.
+
+    When *num_agents* ≤ 0, returns *trace_inputs* unchanged (1:1 mapping).
+    When *num_agents* > 0, creates exactly *num_agents* entries using the
+    assignment strategy.
+
+    ``manifest`` cycles through the input list; ``random`` picks uniformly
+    with replacement using an optional seed for reproducibility.
+    """
+    if num_agents <= 0:
+        return list(trace_inputs)
+    if not trace_inputs:
+        raise ValueError("num_agents > 0 but no trace inputs available")
+    if trace_assignment == "manifest":
+        return [trace_inputs[i % len(trace_inputs)] for i in range(num_agents)]
+    if trace_assignment == "random":
+        rng = random.Random(trace_assignment_seed)
+        return [rng.choice(trace_inputs) for _ in range(num_agents)]
+    raise ValueError(f"Unknown trace_assignment: {trace_assignment!r}")
+
+
+def _ensure_unique_agent_ids(sessions: list[LoadedTraceSession]) -> None:
+    """Suffix duplicate *agent_id* values with ``--a{N}`` for uniqueness.
+
+    When multiple agents replay the same trace they share the original
+    *agent_id* from the source trace.  This function mutates each session's
+    ``agent_id`` in-place so that every session has a distinct identity
+    for output directories and trace records.
+    """
+    seen: dict[str, int] = {}
+    for i, session in enumerate(sessions):
+        aid = session.agent_id
+        count = seen.get(aid, 0)
+        if count > 0:
+            session.agent_id = f"{aid}--a{i}"
+        seen[aid] = count + 1
+
+
 def _resolve_docker_image(loaded: LoadedTraceSession) -> str | None:
     """Resolve docker image: manifest override > task[image_name] > task[docker_image]."""
     return (
@@ -568,6 +614,7 @@ async def _prepare_container_session(
     *,
     container_executable: str,
     network_mode: str = "host",
+    cpu_limit: float | None = None,
 ) -> PreparedTraceSession:
     """Prepare a Docker/Podman container and start a persistent replay agent."""
     from trace_collect.openclaw_tools import ContainerAgent
@@ -583,11 +630,15 @@ async def _prepare_container_session(
         normalized,
         container_executable=container_executable,
     )
+    extra_args: list[str] | None = None
+    if cpu_limit is not None:
+        extra_args = [f"--cpus={cpu_limit}"]
     container_id = await asyncio.to_thread(
         start_task_container,
         fixed_name,
         executable=container_executable,
         network_mode=network_mode,
+        extra_args=extra_args,
     )
 
     agent = ContainerAgent(container_id, container_executable)
@@ -636,6 +687,7 @@ def _log_trace_metadata(
     model: str | None,
     monitoring_policy: MonitoringPolicy,
     network_mode: str = "host",
+    cpu_limit: float | None = None,
 ) -> None:
     scaffolds = {session.scaffold for session in sessions}
     source_models = [
@@ -654,6 +706,7 @@ def _log_trace_metadata(
         "source_trace_count": len(sessions),
         "source_models": source_models,
         "network_mode": network_mode,
+        "cpu_limit": cpu_limit,
         "monitoring": monitoring_policy.to_dict(),
     }
     if source_trace is not None:
@@ -1456,6 +1509,10 @@ async def simulate(
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
     ksys_monitoring: str = "auto",
+    num_agents: int = 0,
+    trace_assignment: str = "manifest",
+    trace_assignment_seed: int | None = None,
+    cpu_limit: float | None = None,
 ) -> Path:
     if source_trace is not None and trace_manifest is not None:
         raise ValueError("source_trace and trace_manifest are mutually exclusive")
@@ -1483,10 +1540,20 @@ async def simulate(
         assert source_trace is not None
         trace_inputs = [(source_trace, task_source, None)]
 
+    # Expand trace_inputs for N:M mapping (num_agents > 0).
+    trace_inputs = _expand_trace_inputs(
+        trace_inputs,
+        num_agents=num_agents,
+        trace_assignment=trace_assignment,
+        trace_assignment_seed=trace_assignment_seed,
+    )
+
     loaded_sessions = [
         _load_trace_session(source_path, task_path, docker_image_override=img)
         for source_path, task_path, img in trace_inputs
     ]
+    # Ensure unique agent_ids after possible N:M expansion.
+    _ensure_unique_agent_ids(loaded_sessions)
     _validate_loaded_sessions(
         loaded_sessions,
         mode=mode,
@@ -1507,6 +1574,24 @@ async def simulate(
         has_host_session=has_host_session,
         has_container_session=has_container_session,
     )
+
+    # Apply host-side CPU affinity when --cpu-limit is set and at least
+    # one session runs in host mode (container sessions get --cpus below).
+    if cpu_limit is not None and has_host_session:
+        try:
+            import psutil
+            p = psutil.Process()
+            num_cores = min(int(cpu_limit), psutil.cpu_count() or int(cpu_limit))
+            p.cpu_affinity(list(range(num_cores)))
+            logger.info(
+                "Set CPU affinity to cores 0-%d (cpu_limit=%.1f)",
+                num_cores - 1, cpu_limit,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to set CPU affinity (cpu_limit=%.1f): %s",
+                cpu_limit, exc,
+            )
 
     output_path = Path(output_dir)
     if structured_output:
@@ -1529,10 +1614,15 @@ async def simulate(
                 raise ValueError(
                     "container_executable is required for container-mode traces"
                 )
+            prepare_kwargs: dict[str, Any] = {
+                "container_executable": container_executable,
+                "network_mode": network_mode,
+            }
+            if cpu_limit is not None:
+                prepare_kwargs["cpu_limit"] = cpu_limit
             prepared = await _prepare_container_session(
                 loaded,
-                container_executable=container_executable,
-                network_mode=network_mode,
+                **prepare_kwargs,
             )
         prepared.monitoring_policy = monitoring_policy
         return prepared
@@ -1622,6 +1712,7 @@ async def simulate(
         model=model,
         network_mode=network_mode,
         monitoring_policy=monitoring_policy,
+        cpu_limit=cpu_limit,
     )
     ksys_session = (
         KsysSession.start(output_dir=output_path, log_dir=output_path)

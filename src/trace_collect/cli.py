@@ -525,6 +525,44 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--num-agents",
+        type=int,
+        default=0,
+        help=(
+            "Number of agents to spawn. 0 (default) = one agent per input "
+            "trace (1:1 mapping). When > 0, exactly this many agents are "
+            "created and --trace-assignment controls which trace each "
+            "agent replays."
+        ),
+    )
+    parser.add_argument(
+        "--trace-assignment",
+        choices=["manifest", "random"],
+        default="manifest",
+        help=(
+            "How to assign traces to agents when --num-agents is set. "
+            "'manifest' (default): cycle through the input trace list. "
+            "'random': each agent randomly picks from the pool."
+        ),
+    )
+    parser.add_argument(
+        "--trace-assignment-seed",
+        type=int,
+        default=None,
+        help="RNG seed for --trace-assignment=random (for reproducibility).",
+    )
+    parser.add_argument(
+        "--cpu-limit",
+        type=float,
+        default=None,
+        help=(
+            "CPU core limit for the entire simulate run. "
+            "For container-mode traces: passed as --cpus=N to docker/podman. "
+            "For host-mode traces: sets CPU affinity on the current process. "
+            "Example: --cpu-limit 4 limits to 4 CPU cores."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -802,7 +840,18 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "resource_monitoring": getattr(args, "resource_monitoring", "auto"),
         "pmu_monitoring": getattr(args, "pmu_monitoring", "auto"),
         "ksys_monitoring": effective_ksys_monitoring,
+        "num_agents": args.num_agents,
+        "trace_assignment": args.trace_assignment,
+        "trace_assignment_seed": args.trace_assignment_seed,
+        "cpu_limit": args.cpu_limit,
     }
+
+    if args.trace_assignment == "random" and args.num_agents <= 0:
+        print(
+            "ERROR: --trace-assignment random requires --num-agents > 0.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.mode == "cloud_model":
         if args.metrics_url:
@@ -824,6 +873,13 @@ def _run_simulate(args: argparse.Namespace) -> None:
     if args.source_dir:
         print(
             "ERROR: local_model mode accepts only --source-trace, not --source-dir.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.num_agents > 1:
+        print(
+            "ERROR: --num-agents > 1 is not supported in local_model mode. "
+            "local_model replays a single trace with a live LLM endpoint.",
             file=sys.stderr,
         )
         sys.exit(2)
