@@ -207,6 +207,54 @@ The `resources.json` `status` field distinguishes three states:
 - `"enabled_no_samples"` — monitoring was enabled but the sampler yielded no data (e.g., container not inspectable, unsupported hardware)
 - `"disabled"` — monitoring was explicitly turned off by policy
 
+### Practical usage examples
+
+Given a typical serial collection command:
+
+```bash
+ARM_IMAGE_MODE=qemu PYTHONPATH=src python -m trace_collect.cli \
+    --provider deepseek --model deepseek-v4-flash \
+    --benchmark swe-rebench --scaffold openclaw \
+    --instance-ids "12rambau__sepal_ui-411" \
+    --mcp-config none --verbose --container docker
+```
+
+**Default (no flags):** all built-in resources + PMU + MemBW are on;
+ksys is off.  This matches the "Serial collection (container)" row in
+the `auto` matrix above.
+
+| Goal | Flags to add |
+|------|-------------|
+| Disable everything | `--resource-monitoring off --pmu-monitoring off` |
+| CPU/Mem/Disk/Net/CTX + MemBW only, no PMU | `--resource-monitoring on --pmu-monitoring off` |
+| CPU/Mem/Disk/Net/CTX only, no PMU or MemBW | (not possible — MemBW has no independent switch; use `--resource-monitoring off` and accept losing base metrics) |
+| All built-in + PMU + ksys (Kunpeng) | `--resource-monitoring on --pmu-monitoring on --ksys-monitoring on` |
+| ksys only, no built-in (Kunpeng stress test) | `--resource-monitoring off --pmu-monitoring off --ksys` |
+| Concurrent stress test with base metrics only | `--concurrency 3 --resource-monitoring on` |
+| Concurrent with everything off | `--concurrency 3` (all `auto` → off) |
+
+**Verifying the resolved policy:** after a run, inspect
+`<instance_id>/attempt_N/resources.json` — the `"monitoring"` key
+contains the full resolved policy and `"status"` tells you whether
+samples were actually collected.
+
+### PMU and memory bandwidth prerequisites
+
+PMU and host memory bandwidth both rely on Linux `perf`.  On most
+systems you must lower the kernel's perf-event paranoia level:
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=-1
+```
+
+Without this, `perf` returns zeros silently — the samplers still run,
+but `resources.json` will show `"status": "enabled_no_samples"` and
+the sample arrays will be empty.
+
+ksys is only available on Huawei Kunpeng hardware.  On other platforms
+it degrades gracefully: a warning is logged and collection proceeds
+without ksys metrics.
+
 ### Behavior With `--concurrency > 1`
 
 - Each task kicks off **N concurrent `run_attempt()` coroutines** via
