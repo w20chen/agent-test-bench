@@ -578,6 +578,11 @@ def parse_import_claude_code_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> None:
+    # Load .env as a fallback — never overrides env vars already set in
+    # the shell, so `export DEEPSEEK_API_KEY=...` still takes precedence.
+    from dotenv import load_dotenv
+    load_dotenv()
+
     sub = sys.argv[1] if len(sys.argv) > 1 else None
     if sub == "simulate":
         _run_simulate(parse_simulate_args(sys.argv[2:]))

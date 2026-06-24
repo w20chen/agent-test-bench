@@ -20,6 +20,7 @@ dependencies = [
   "pydantic>=2.0,<3.0",
   "psutil>=5.9,<7.0",
   "json-repair>=0.30,<1.0",
+  "python-dotenv>=1.0,<2.0",
   "tiktoken>=0.7,<1.0",
   "terminal-bench>=0.2.18; python_version >= '3.12'",
   # Spike Q3 (kv_cache_subclass_spike.md): SinkCache became a stub in 4.58
