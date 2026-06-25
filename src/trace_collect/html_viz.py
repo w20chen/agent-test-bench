@@ -199,18 +199,16 @@ def generate_html(attempt_dir: Path) -> str:
     resource_samples = resources.get("samples", [])
     resource_summary = resources.get("summary", {})
 
-    # Determine time origin: earliest of (first action ts_start, first resource epoch)
+    # Determine time origin: first action's ts_start.
+    # Resource samples may start earlier (sampler runs during container
+    # setup), but the Gantt chart should anchor on the first real action.
+    # This matches the behaviour of demo/gantt_viewer/backend/payload.py
+    # (_compute_t0) which also prefers the first action over any event.
     t0 = 0.0
     for a in actions:
         ts = a.get("ts_start", 0)
         if ts > 0:
             t0 = ts
-            break
-    for s in resource_samples:
-        epoch = s.get("epoch", 0)
-        if isinstance(epoch, (int, float)) and epoch > 0:
-            if t0 == 0 or epoch < t0:
-                t0 = epoch
             break
     if t0 == 0:
         for a in actions:
@@ -218,6 +216,19 @@ def generate_html(attempt_dir: Path) -> str:
             if ts > 0:
                 t0 = ts
                 break
+
+    # Drop resource samples whose epoch falls before the first action
+    # so the resource charts don't extend into pre-action setup time.
+    _filtered_samples: list[dict[str, Any]] = []
+    for s in resource_samples:
+        ts_val = s.get("epoch", s.get("timestamp", 0))
+        if isinstance(ts_val, str):
+            ts_val = _parse_iso(ts_val)
+        elif not isinstance(ts_val, (int, float)):
+            ts_val = 0.0
+        if float(ts_val) >= t0:
+            _filtered_samples.append(s)
+    resource_samples = _filtered_samples
 
     # ── Extract summary ───────────────────────────────────────────
     summary: dict[str, Any] = {}
