@@ -38,11 +38,14 @@ _NONCOMPLETED_EXIT_STATUSES = frozenset(
         "error",
         "tool_error",
         "empty_final_response",
-        "max_iterations",
         "timeout",
         "failed",
     }
 )
+
+# max_iterations is handled separately: it produces status "exhausted"
+# (not "error") so that resume via --run-id skips it — re-running a task
+# that already consumed its full iteration budget is wasteful.
 
 _TASK_CONTAINER_ENV_PASSTHROUGH = (
     "HTTP_PROXY",
@@ -561,6 +564,11 @@ async def run_attempt(
     status = "completed"
     if inner_error is not None:
         status = "error"
+    elif result is not None and result.exit_status == "max_iterations":
+        # Agent exhausted its iteration budget — a legitimate terminal
+        # state, not a transient error.  Mark it "exhausted" so that
+        # resume via --run-id skips it (re-running would waste compute).
+        status = "exhausted"
     elif result is not None and (
         not result.success
         or (

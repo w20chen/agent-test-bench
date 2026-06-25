@@ -396,7 +396,7 @@ def test_run_attempt_noncompleted_exit_status_writes_error_manifest(
 
     assert result.success is False
     manifest = json.loads((ctx.attempt_dir / "run_manifest.json").read_text())
-    assert manifest["status"] == "error"
+    assert manifest["status"] == "exhausted"
     assert manifest["result_summary"]["exit_code"] == 1
     assert manifest["result_summary"]["error"] == (
         "I reached the maximum number of tool call iterations."

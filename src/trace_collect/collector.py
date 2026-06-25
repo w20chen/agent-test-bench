@@ -184,9 +184,13 @@ def build_run_dir(benchmark: "Benchmark", model: str) -> Path:
 
 
 def load_completed_ids(run_dir: Path) -> set[str]:
-    """Return instance_ids whose ``attempt_*/run_manifest.json`` is ``completed``.
+    """Return instance_ids whose ``attempt_*/run_manifest.json`` is ``completed`` or ``exhausted``.
 
     Only the nested attempt layout is supported — no legacy flat scan.
+
+    ``exhausted`` (max_iterations reached) is treated as done because
+    re-running a task that already consumed its full iteration budget
+    would waste compute without changing the outcome.
     """
     completed: set[str] = set()
     if not run_dir.exists():
@@ -202,7 +206,7 @@ def load_completed_ids(run_dir: Path) -> set[str]:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if manifest.get("status") == "completed":
+            if manifest.get("status") in ("completed", "exhausted"):
                 completed.add(instance_dir.name)
                 break
     return completed

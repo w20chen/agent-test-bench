@@ -35,6 +35,15 @@ def test_load_completed_ids_reads_attempt_manifests(tmp_path: Path) -> None:
     assert completed == {"mozilla__bleach-259", "tobymao__sqlglot-3425"}
 
 
+def test_load_completed_ids_accepts_exhausted_status(tmp_path: Path) -> None:
+    """``exhausted`` (max_iterations) is treated as done — no point re-running."""
+    _write_manifest(
+        tmp_path / "org__repo-42" / "attempt_1" / "run_manifest.json",
+        status="exhausted",
+    )
+    assert load_completed_ids(tmp_path) == {"org__repo-42"}
+
+
 def test_load_completed_ids_skips_instances_without_manifest(tmp_path: Path) -> None:
     (tmp_path / "half__written" / "attempt_1").mkdir(parents=True)
     (tmp_path / "no__attempts_dir").mkdir()
