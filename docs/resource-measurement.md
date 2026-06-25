@@ -346,3 +346,22 @@ metrics as time-series charts below the Gantt chart:
 
 Each chart gracefully degrades when its data source is unavailable, showing
 a descriptive error message with the specific reason and remediation hint.
+
+---
+
+## 10. System-Level Resource Monitor
+
+The per-attempt samplers described above measure resources **attributed to a
+single container or process**.  When running N:M simulation sweeps (many
+agents replaying concurrently), a complementary whole-host monitor captures
+**aggregate system behavior** — total CPU utilization across all containers,
+system memory pressure, combined disk/network I/O, and Docker container count
+over time.
+
+`scripts/system_resource_monitor.py` is a standalone background process that
+samples via `psutil` at 1 Hz and writes a JSONL log.  It is designed to run
+alongside `simulate` during sweep experiments, started before and stopped after
+each run.
+
+For the full sweep workflow and integration with the `simulate` CLI, see
+[Trace Collect &mdash; N:M Simulation Sweep](trace-collect.md#nm-simulation-sweep).

@@ -18,6 +18,14 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [Deep Research Bench](#deep-research-bench)
 - [Concurrent Execution](#concurrent-execution)
   - [Resource-monitoring defaults](#resource-monitoring-defaults)
+- [Simulate: Trace Replay](#simulate-trace-replay)
+  - [Two Simulation Modes](#two-simulation-modes)
+  - [Trace Sources](#trace-sources)
+  - [Simulate CLI Flags](#simulate-cli-flags)
+  - [Arrival Modes](#arrival-modes)
+- [N:M Trace-to-Agent Mapping](#nm-trace-to-agent-mapping)
+- [CPU Core Limiting](#cpu-core-limiting)
+- [N:M Simulation Sweep](#nm-simulation-sweep)
 - [Recording Internals](#recording-internals)
 - [Ksys System Metrics](#ksys-system-metrics)
 
@@ -575,6 +583,138 @@ When `--cpu-limit` is set, the combined `trace.jsonl` metadata records:
   "cpu_limit": 4.0
 }
 ```
+
+---
+
+## N:M Simulation Sweep
+
+When benchmarking system behavior under scaled multi-agent workloads, a
+single `simulate` run answers "what happens with N agents?" — but resource
+contention curves require **multiple N values** with consistent methodology.
+This section documents the sweep workflow and its supporting scripts.
+
+### Motivation
+
+Running N:M simulation at a single concurrency level shows point-in-time
+resource usage.  Sweeping across N ∈ {40, 80, 160, 320} reveals:
+
+- **CPU contention curve** — how aggregate CPU utilization scales with agent count
+- **Memory pressure threshold** — at what N does the system begin swapping
+- **Tail latency** — p95/p99 agent completion time vs. agent count
+- **Docker daemon saturation** — container startup and teardown overhead
+
+Each config runs **independently** with clean output directories, so results
+are directly comparable across N values.
+
+### Architecture
+
+```
+┌───────────────────────────────────────────────────┐
+│  run_simulate_sweep.sh (orchestrator)              │
+│                                                     │
+│  for N in 40 80 160 320:                           │
+│    ┌──────────────────────────────────────┐        │
+│    │ 1. system_resource_monitor.py (1 Hz) │        │
+│    │    └→ whole-host CPU/mem/disk/net    │        │
+│    │                                      │        │
+│    │ 2. trace_collect.cli simulate        │        │
+│    │    --num-agents $N --cpu-limit 1     │        │
+│    │    └→ per-container resources.json   │        │
+│    │                                      │        │
+│    │ 3. extract_agent_timeline.py         │        │
+│    │    └→ per-agent start/end/elapsed    │        │
+│    └──────────────────────────────────────┘        │
+└───────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+```bash
+# 1. Point to your pre-collected traces (40 SWE-rebench traces)
+export SOURCE_TRACES_DIR=/path/to/traces/swe-rebench/model/timestamp
+
+# 2. (Optional) override defaults
+export SWEEP_VALUES="40 80 160 320"   # default
+export CPU_LIMIT=1                    # default: 1 core per agent
+export CONTAINER_EXE=docker           # default
+
+# 3. Run the sweep
+bash scripts/run_simulate_sweep.sh
+```
+
+The script validates prerequisites (trace count, Docker availability, host
+cores/memory) before starting, then runs each N sequentially.  On interrupt
+(Ctrl+C), it cleanly stops the active system monitor and exits.
+
+### Output Per Experiment
+
+Each N produces a self-contained output directory:
+
+```text
+traces/simulate/swe-rebench/sweep_${N}a_1cpu/
+├── system_resources.jsonl       # whole-host resource timeline (new)
+├── agent_timeline.jsonl         # per-agent lifecycle log (new)
+├── simulate_cloud_model_*.jsonl # combined trace
+├── simulate.log                 # full simulate stdout/stderr
+├── monitor.log                  # system monitor debug log
+└── <agent_id>--a*/attempt_1/
+    ├── trace.jsonl              # per-agent canonical trace
+    ├── resources.json           # per-container CPU/mem/disk/net
+    └── trace_viz.html           # interactive Gantt + charts
+```
+
+**`system_resources.jsonl`** — one JSON record per second:
+
+```json
+{"ts": 1719000000.123, "cpu_percent": 45.2, "cpu_count": 320,
+ "mem_percent": 62.3, "mem_used_gb": 800.4, "mem_total_gb": 1008.0,
+ "disk_read_mb": 123456.7, "disk_write_mb": 78901.2,
+ "net_rx_mb": 5000.1, "net_tx_mb": 3000.4,
+ "container_count": 320,
+ "load_1m": 180.5, "load_5m": 150.2, "load_15m": 120.8}
+```
+
+**`agent_timeline.jsonl`** — one JSON record per agent, sorted by start time:
+
+```json
+{"agent_id": "django__django-12345--a7",
+ "start_ts": 1719000000.123, "end_ts": 1719000120.456,
+ "elapsed_s": 120.333,
+ "n_actions": 42, "n_llm_calls": 21, "n_tool_execs": 19,
+ "source_trace": "/path/to/original/trace.jsonl",
+ "source_agent_id": "django__django-12345"}
+```
+
+A summary is printed to stdout after each N completes:
+
+```
+Total agents:          320
+Agents with actions:   320
+Experiment wall time:  847.2s (14.1 min)
+Agent elapsed (mean):  234.5s
+Agent elapsed (min):   45.2s
+Agent elapsed (max):   812.3s
+Agent elapsed (p50):   210.0s
+Agent elapsed (p95):   650.1s
+Agent elapsed (p99):   780.4s
+Total actions:         13440 (llm=6720, tool=6400)
+```
+
+A global sweep summary is written to
+`traces/simulate/swe-rebench/sweep_summary_<ts>.txt`.
+
+### Script Reference
+
+| Script | Purpose | CLI |
+|--------|---------|-----|
+| `scripts/system_resource_monitor.py` | Background process that samples system-wide CPU%, memory%, disk I/O, network I/O, Docker container count, and load averages at 1 Hz via `psutil`. Writes JSONL. Stops on SIGTERM/SIGINT or when a stop-file appears. | `--output <path> [--interval 1.0] [--stop-file <path>] [--verbose]` |
+| `scripts/extract_agent_timeline.py` | Post-processes a simulation output directory. Scans `*/attempt_*/trace.jsonl`, extracts first/last action wall-clock timestamp per agent, and writes an agent lifecycle JSONL with summary statistics. | `--input-dir <dir> --output <path> [--verbose]` |
+| `scripts/run_simulate_sweep.sh` | Orchestrator that loops over N values, starts the system monitor, runs `simulate` with `--cpu-limit`, `--resource-monitoring on`, `--pmu-monitoring off`, `--ksys-monitoring off`, then stops the monitor and extracts the agent timeline. All parameters are configurable via environment variables. | `SOURCE_TRACES_DIR=<dir> bash scripts/run_simulate_sweep.sh` |
+
+All three scripts are committed to the repository and ready to use on the
+target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed
+design document covering rationale, risk assessment, and implementation
+notes.
 
 ---
 
