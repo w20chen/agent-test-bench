@@ -100,6 +100,7 @@ class PreparedTraceSession:
     sampler: ContainerStatsSampler | None = None
     task_output_dir: Path | None = None
     monitoring_policy: MonitoringPolicy | None = None
+    _resources_written: bool = False
 
 
 async def _call_local_model_streaming(
@@ -1347,6 +1348,30 @@ async def _replay_cloud_model_session(
 
     wall_end = time.time()
 
+    # Stop the resource sampler immediately so resources.json doesn't
+    # include the idle gap between replay end and container teardown.
+    if prepared_session.sampler is not None:
+        samples = prepared_session.sampler.stop()
+        prepared_session.sampler = None
+        if (
+            prepared_session.task_output_dir is not None
+            and prepared_session.monitoring_policy is not None
+        ):
+            summary = summarize_samples(samples)
+            summary["monitoring"] = {
+                **prepared_session.monitoring_policy.to_dict(),
+                "status": "collected" if samples else "enabled_no_samples",
+            }
+            attempt_layout.write_resources_json(
+                prepared_session.task_output_dir, samples, summary,
+            )
+            logger.info(
+                "Wrote %d resource samples → %s",
+                len(samples),
+                prepared_session.task_output_dir / "resources.json",
+            )
+        prepared_session._resources_written = True
+
     trace_logger.log_summary(
         loaded.agent_id,
         _make_trace_summary(
@@ -1682,7 +1707,7 @@ async def simulate(
                     len(samples),
                     prepared.task_output_dir / "resources.json",
                 )
-        elif prepared.task_output_dir is not None:
+        elif prepared.task_output_dir is not None and not prepared._resources_written:
             summary = summarize_samples([])
             summary["monitoring_disabled"] = not session_resource_enabled
             summary["monitoring"] = {
