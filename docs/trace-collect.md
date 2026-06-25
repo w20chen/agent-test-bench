@@ -653,6 +653,7 @@ Each N produces a self-contained output directory:
 ```text
 traces/simulate/swe-rebench/sweep_${N}a_1cpu/
 ├── system_resources.jsonl       # whole-host resource timeline (new)
+├── system_viz.html              # interactive system resource charts (new)
 ├── agent_timeline.jsonl         # per-agent lifecycle log (new)
 ├── simulate_cloud_model_*.jsonl # combined trace
 ├── simulate.log                 # full simulate stdout/stderr
@@ -707,9 +708,10 @@ A global sweep summary is written to
 
 | Script | Purpose | CLI |
 |--------|---------|-----|
-| `scripts/system_resource_monitor.py` | Background process that samples system-wide CPU%, memory%, disk I/O, network I/O, Docker container count, and load averages at 1 Hz via `psutil`. Writes JSONL. Stops on SIGTERM/SIGINT or when a stop-file appears. | `--output <path> [--interval 1.0] [--stop-file <path>] [--verbose]` |
+| `scripts/system_resource_monitor.py` | Background process that samples system-wide CPU%, memory%, disk I/O, network I/O, Docker container count, and load averages at 1 Hz via `psutil`. Writes JSONL. Stops on SIGTERM/SIGINT or when a stop-file appears. Overhead is negligible (&lt;&lt; 0.1% of one core) — dominated by `sleep(1)`. | `--output <path> [--interval 1.0] [--stop-file <path>] [--verbose]` |
+| `scripts/plot_system_resources.py` | Generates a self-contained interactive HTML page from `system_resources.jsonl`. Renders 5 Chart.js time-series panels: CPU + Load, Memory, Container Count, Network I/O rate, Disk I/O rate. No dependencies beyond stdlib (Chart.js loaded from CDN). | `--input <jsonl> --output <html>` |
 | `scripts/extract_agent_timeline.py` | Post-processes a simulation output directory. Scans `*/attempt_*/trace.jsonl`, extracts first/last action wall-clock timestamp per agent, and writes an agent lifecycle JSONL with summary statistics. | `--input-dir <dir> --output <path> [--verbose]` |
-| `scripts/run_simulate_sweep.sh` | Orchestrator that loops over N values, starts the system monitor, runs `simulate` with `--cpu-limit`, `--resource-monitoring on`, `--pmu-monitoring off`, `--ksys-monitoring off`, then stops the monitor and extracts the agent timeline. All parameters are configurable via environment variables. | `SOURCE_TRACES_DIR=<dir> bash scripts/run_simulate_sweep.sh` |
+| `scripts/run_simulate_sweep.sh` | Orchestrator that loops over N values, starts the system monitor, runs `simulate` with `--cpu-limit`, `--resource-monitoring on`, `--pmu-monitoring off`, `--ksys-monitoring off`, stops the monitor, extracts the agent timeline, and auto-generates `system_viz.html`. All parameters are configurable via environment variables. | `SOURCE_TRACES_DIR=<dir> bash scripts/run_simulate_sweep.sh` |
 
 All three scripts are committed to the repository and ready to use on the
 target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed

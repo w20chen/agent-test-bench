@@ -55,6 +55,7 @@ BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-${REPO_ROOT}/traces/simulate/swe-rebench}"
 
 MONITOR_SCRIPT="${REPO_ROOT}/scripts/system_resource_monitor.py"
 TIMELINE_SCRIPT="${REPO_ROOT}/scripts/extract_agent_timeline.py"
+PLOT_SCRIPT="${REPO_ROOT}/scripts/plot_system_resources.py"
 SIMULATE_MODULE="trace_collect.cli"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -225,6 +226,16 @@ for N in ${SWEEP_VALUES}; do
     --input-dir "${OUTPUT_DIR}" \
     --output "${TIMELINE_OUTPUT}" \
     >> "${RUN_LOG}" 2>&1
+
+  # ── Generate system resource visualization ────────────────────────────
+  if [[ -f "${MONITOR_OUTPUT}" ]] && [[ -s "${MONITOR_OUTPUT}" ]]; then
+    echo "[$(date +%H:%M:%S)] Generating system resource visualization..."
+    "${PYTHON_BIN}" "${PLOT_SCRIPT}" \
+      --input "${MONITOR_OUTPUT}" \
+      --output "${OUTPUT_DIR}/system_viz.html" \
+      >> "${RUN_LOG}" 2>&1
+    echo "  → ${OUTPUT_DIR}/system_viz.html"
+  fi
 
   # ── Print summary ───────────────────────────────────────────────────────
   echo
