@@ -556,10 +556,12 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "CPU core limit for the entire simulate run. "
-            "For container-mode traces: passed as --cpus=N to docker/podman. "
-            "For host-mode traces: sets CPU affinity on the current process. "
-            "Example: --cpu-limit 4 limits to 4 CPU cores."
+            "CPU limit applied per container (Docker --cpus=N) or per-process "
+            "(host-mode CPU affinity). "
+            "Container mode: each container is limited to N CPUs; total "
+            "allocation = N × num_agents. "
+            "Host mode: the entire process is pinned to N cores. "
+            "Example: --num-agents 40 --cpu-limit 1 → 40 containers × 1 core each."
         ),
     )
     parser.add_argument(
@@ -858,6 +860,16 @@ def _run_simulate(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    if args.cpu_limit is not None and args.num_agents > 0 and args.container:
+        total_alloc = args.cpu_limit * args.num_agents
+        host_cores = os.cpu_count() or 1
+        if total_alloc > host_cores * 4:
+            logging.warning(
+                "Total CPU allocation (%.0f = --cpu-limit %.1f × --num-agents %d) "
+                "far exceeds host cores (%d). "
+                "Consider --cpu-limit 1 for 1 core per agent.",
+                total_alloc, args.cpu_limit, args.num_agents, host_cores,
+            )
     if args.trace_assignment == "random" and args.num_agents <= 0:
         print(
             "ERROR: --trace-assignment random requires --num-agents > 0.",

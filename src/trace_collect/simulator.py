@@ -1794,11 +1794,39 @@ async def simulate(
                     # Immediately write per-task trace for this session
                     _flush_session_trace(trace_logger.path, prepared)
         else:
-            # ── Concurrent cloud-model: batch prepare → concurrent replay ──
-            for loaded in loaded_sessions:
-                prepared = await _prepare_one(loaded)
-                await _setup_one(prepared)
-                prepared_sessions.append(prepared)
+            # ── Concurrent cloud-model: concurrent prepare → concurrent replay ──
+            # Container preparation is I/O-bound (docker run, agent start).
+            # A semaphore caps concurrency to avoid overwhelming the Docker
+            # daemon while still being orders of magnitude faster than serial
+            # preparation for high --num-agents values.
+            prep_sem = asyncio.Semaphore(min(20, max(1, len(loaded_sessions))))
+
+            async def _prepare_with_limit(
+                loaded: LoadedTraceSession,
+            ) -> PreparedTraceSession:
+                async with prep_sem:
+                    prepared = await _prepare_one(loaded)
+                    await _setup_one(prepared)
+                    return prepared
+
+            results = await asyncio.gather(*[
+                _prepare_with_limit(loaded) for loaded in loaded_sessions
+            ], return_exceptions=True)
+
+            for i, result in enumerate(results):
+                if isinstance(result, BaseException):
+                    # Tear down any sessions that were already prepared so
+                    # containers don't leak, then surface the first failure.
+                    for ps in prepared_sessions:
+                        try:
+                            await _teardown_one(ps)
+                        except Exception:
+                            pass
+                    raise SimulateError(
+                        f"Preparation failed for session {i} "
+                        f"({loaded_sessions[i].agent_id}): {result}"
+                    ) from result
+                prepared_sessions.append(result)
 
             offsets = build_arrival_offsets(
                 len(prepared_sessions),

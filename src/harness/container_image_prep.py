@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,20 @@ from harness.container_runtime import image_exists_command
 logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE: dict[str, tuple[str, float]] = {}
+# Per-image locks so concurrent callers don't race to build/pull the same
+# image.  The fast-path cache-hit check above is lock-free and safe under
+# the CPython GIL; only cache-miss → build → insert is serialised per image.
+_IMAGE_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_IMAGE_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _get_image_cache_lock(normalized_image: str) -> threading.Lock:
+    """Return the per-image lock for *normalized_image*, creating it if needed."""
+    with _IMAGE_CACHE_LOCKS_GUARD:
+        if normalized_image not in _IMAGE_CACHE_LOCKS:
+            _IMAGE_CACHE_LOCKS[normalized_image] = threading.Lock()
+        return _IMAGE_CACHE_LOCKS[normalized_image]
+
 _PULL_ATTEMPTS = 3
 _PULL_BACKOFF_SECONDS = 1.0
 _ARCH_ALIASES = {
@@ -256,43 +271,53 @@ def ensure_fixed_image(
     because the container always needs the ``/testbed`` ownership fix.
     """
     source_image = normalize_image_reference(source_image)
+    # Fast path: lock-free cache hit (safe under CPython GIL for dict reads).
     if source_image in _IMAGE_CACHE:
         return _IMAGE_CACHE[source_image]
 
-    fixed_name = fixed_image_name_for(source_image)
+    # Serialise per-image so concurrent callers don't race to build/pull
+    # the same image while still allowing different images to build in
+    # parallel (each image has its own lock).
+    lock = _get_image_cache_lock(source_image)
+    with lock:
+        # Double-check: another thread may have finished while we waited.
+        if source_image in _IMAGE_CACHE:
+            return _IMAGE_CACHE[source_image]
 
-    if _image_exists(fixed_name, container_executable):
-        _IMAGE_CACHE[source_image] = (fixed_name, 0.0)
-        return _IMAGE_CACHE[source_image]
+        fixed_name = fixed_image_name_for(source_image)
 
-    ensure_source_image(
-        source_image,
-        container_executable=container_executable,
-    )
-    image_platform = _inspect_image_platform(source_image, container_executable)
+        if _image_exists(fixed_name, container_executable):
+            _IMAGE_CACHE[source_image] = (fixed_name, 0.0)
+            return _IMAGE_CACHE[source_image]
 
-    uid = host_uid if host_uid is not None else os.getuid()
-    gid = host_gid if host_gid is not None else os.getgid()
-
-    t0 = time.time()
-    try:
-        _build_fixed_image(
+        ensure_source_image(
             source_image,
-            fixed_name,
-            container_executable,
-            uid,
-            gid,
-            image_platform,
+            container_executable=container_executable,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        # Fall back to the source image rather than leave the caller hanging.
-        _IMAGE_CACHE[source_image] = (source_image, 0.0)
-        raise RuntimeError(
-            f"Failed to build fixed derivative image for {source_image}: {exc}"
-        ) from exc
-    elapsed = time.time() - t0
-    _IMAGE_CACHE[source_image] = (fixed_name, elapsed)
-    return _IMAGE_CACHE[source_image]
+        image_platform = _inspect_image_platform(source_image, container_executable)
+
+        uid = host_uid if host_uid is not None else os.getuid()
+        gid = host_gid if host_gid is not None else os.getgid()
+
+        t0 = time.time()
+        try:
+            _build_fixed_image(
+                source_image,
+                fixed_name,
+                container_executable,
+                uid,
+                gid,
+                image_platform,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            # Fall back to the source image rather than leave the caller hanging.
+            _IMAGE_CACHE[source_image] = (source_image, 0.0)
+            raise RuntimeError(
+                f"Failed to build fixed derivative image for {source_image}: {exc}"
+            ) from exc
+        elapsed = time.time() - t0
+        _IMAGE_CACHE[source_image] = (fixed_name, elapsed)
+        return _IMAGE_CACHE[source_image]
 
 
 def clear_image_cache() -> None:
