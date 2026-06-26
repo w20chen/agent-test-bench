@@ -1127,7 +1127,11 @@ async def _run_cloud_model_replay(
                 warmup_skip_iterations=warmup_skip_iterations,
             )
     else:
-        await asyncio.gather(
+        # return_exceptions=True prevents the cascade failure where one
+        # task raising causes trace_logger.close() in the outer finally
+        # block while other tasks are still writing ("I/O operation on
+        # closed file").
+        results = await asyncio.gather(
             *[
                 _delayed_replay(
                     offsets[i],
@@ -1139,8 +1143,31 @@ async def _run_cloud_model_replay(
                     warmup_skip_iterations=warmup_skip_iterations,
                 )
                 for i in range(len(prepared_sessions))
-            ]
+            ],
+            return_exceptions=True,
         )
+
+        # Surface the first exception after all tasks have completed (and
+        # the shared trace_logger is still open so other sessions can log
+        # their partial results cleanly).
+        exceptions = [
+            (i, r) for i, r in enumerate(results)
+            if isinstance(r, BaseException)
+        ]
+        if exceptions:
+            for i, exc in exceptions:
+                logger.error(
+                    "Replay failed for session %d (%s): %s",
+                    i,
+                    prepared_sessions[i].loaded.agent_id,
+                    exc,
+                )
+            first_i, first_exc = exceptions[0]
+            raise SimulateError(
+                f"{len(exceptions)}/{len(results)} replay sessions failed; "
+                f"first: session {first_i} "
+                f"({prepared_sessions[first_i].loaded.agent_id}): {first_exc}"
+            ) from first_exc
 
 
 async def _replay_cloud_model_session(
@@ -1366,57 +1393,69 @@ async def _replay_cloud_model_session(
 
     wall_end = time.time()
 
+    _elapsed = wall_end - wall_start
     print(
         f"  [{loaded.agent_id}] done: {succeeded_actions}/{total_actions} "
-        f"actions in {wall_end - wall_start:.1f}s "
+        f"actions in {_elapsed:.1f}s "
         f"({failed_actions} failed)",
         flush=True,
     )
 
-    # Stop the resource sampler immediately so resources.json doesn't
-    # include the idle gap between replay end and container teardown.
-    if prepared_session.sampler is not None:
-        samples = prepared_session.sampler.stop()
-        prepared_session.sampler = None
-        if (
-            prepared_session.task_output_dir is not None
-            and prepared_session.monitoring_policy is not None
-        ):
-            summary = summarize_samples(samples)
-            summary["monitoring"] = {
-                **prepared_session.monitoring_policy.to_dict(),
-                "status": "collected" if samples else "enabled_no_samples",
-            }
-            attempt_layout.write_resources_json(
-                prepared_session.task_output_dir, samples, summary,
-            )
-            logger.info(
-                "Wrote %d resource samples → %s",
-                len(samples),
-                prepared_session.task_output_dir / "resources.json",
-            )
-        prepared_session._resources_written = True
+    # Post-loop cleanup and logging.  Wrapped in try/except so an
+    # exception here (e.g. sampler I/O error) doesn't cascade into
+    # other concurrent sessions via the shared trace_logger close.
+    try:
+        # Stop the resource sampler immediately so resources.json doesn't
+        # include the idle gap between replay end and container teardown.
+        if prepared_session.sampler is not None:
+            samples = prepared_session.sampler.stop()
+            prepared_session.sampler = None
+            if (
+                prepared_session.task_output_dir is not None
+                and prepared_session.monitoring_policy is not None
+            ):
+                summary = summarize_samples(samples)
+                summary["monitoring"] = {
+                    **prepared_session.monitoring_policy.to_dict(),
+                    "status": "collected" if samples else "enabled_no_samples",
+                }
+                attempt_layout.write_resources_json(
+                    prepared_session.task_output_dir, samples, summary,
+                )
+                logger.info(
+                    "Wrote %d resource samples → %s",
+                    len(samples),
+                    prepared_session.task_output_dir / "resources.json",
+                )
+            prepared_session._resources_written = True
 
-    trace_logger.log_summary(
-        loaded.agent_id,
-        _make_trace_summary(
-            loaded=loaded,
-            success=failed_actions == 0,
-            elapsed_s=wall_end - wall_start,
-            source_model=source_model,
-            extra={
-                "replay_mode": "cloud_model",
-                "replay_speed": replay_speed,
-                "succeeded_actions": succeeded_actions,
-                "failed_actions": failed_actions,
-                "total_tokens": total_tokens,
-                "total_llm_ms": total_llm_ms,
-                "total_tool_ms": total_tool_ms,
-                "tool_ms_by_name": tool_ms_by_name,
-                "llm_call_time_count": llm_call_time_count,
-            },
-        ),
-    )
+        trace_logger.log_summary(
+            loaded.agent_id,
+            _make_trace_summary(
+                loaded=loaded,
+                success=failed_actions == 0,
+                elapsed_s=_elapsed,
+                source_model=source_model,
+                extra={
+                    "replay_mode": "cloud_model",
+                    "replay_speed": replay_speed,
+                    "succeeded_actions": succeeded_actions,
+                    "failed_actions": failed_actions,
+                    "total_tokens": total_tokens,
+                    "total_llm_ms": total_llm_ms,
+                    "total_tool_ms": total_tool_ms,
+                    "tool_ms_by_name": tool_ms_by_name,
+                    "llm_call_time_count": llm_call_time_count,
+                },
+            ),
+        )
+    except Exception as exc:
+        logger.error(
+            "Post-replay cleanup failed for %s: %s",
+            loaded.agent_id,
+            exc,
+        )
+        raise
 
 
 def _split_trace_by_agent(
