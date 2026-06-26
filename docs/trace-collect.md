@@ -610,20 +610,20 @@ are directly comparable across N values.
 
 ```
 ┌───────────────────────────────────────────────────┐
-│  run_simulate_sweep.sh (orchestrator)              │
-│                                                     │
-│  for N in 40 80 160 320:                           │
-│    ┌──────────────────────────────────────┐        │
-│    │ 1. system_resource_monitor.py (1 Hz) │        │
-│    │    └→ whole-host CPU/mem/disk/net    │        │
-│    │                                      │        │
-│    │ 2. trace_collect.cli simulate        │        │
-│    │    --num-agents $N --cpu-limit 1     │        │
-│    │    └→ per-container resources.json   │        │
-│    │                                      │        │
-│    │ 3. extract_agent_timeline.py         │        │
-│    │    └→ per-agent start/end/elapsed    │        │
-│    └──────────────────────────────────────┘        │
+│  run_simulate_sweep.sh (orchestrator)             │
+│                                                   │
+│  for N in 40 80 160 320:                          │
+│    ┌──────────────────────────────────────┐       │
+│    │ 1. system_resource_monitor.py (1 Hz) │       │
+│    │    └→ whole-host CPU/mem/disk/net    │       │
+│    │                                      │       │
+│    │ 2. trace_collect.cli simulate        │       │
+│    │    --num-agents $N --cpu-limit 1     │       │
+│    │    └→ per-container resources.json   │       │
+│    │                                      │       │
+│    │ 3. extract_agent_timeline.py         │       │
+│    │    └→ per-agent start/end/elapsed    │       │
+│    └──────────────────────────────────────┘       │
 └───────────────────────────────────────────────────┘
 ```
 

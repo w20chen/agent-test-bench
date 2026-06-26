@@ -654,6 +654,24 @@ class ContainerStatsSampler(threading.Thread):
         self._prev_cpu_mono: float | None = None
         self._nproc: int = _ncpus()
 
+    def start(self) -> None:
+        """Resolve cgroup path and collect a priming sample synchronously.
+
+        The priming sample establishes the CPU-usage baseline so the
+        first sample produced by the background thread has a valid
+        CPU% value.  Without this the thread discards its first sample,
+        which delays the first retained data point by one full interval.
+        """
+        self._resolve_cgroup_path()
+        # Read the CPU counter once to seed _prev_cpu_usec / _prev_cpu_mono.
+        # We do NOT call _sample_io here — the priming sample doesn't need
+        # disk/network/ctx-switch data, and _ensure_io_source can be slow
+        # (Docker exec round-trip).
+        if self._cgroup_path is not None:
+            tick_start = time.monotonic()
+            self._sample_via_cgroup(tick_start)
+        super().start()
+
     # Consolidate per-PID context-switch high-water marks every N
     # samples to bound dict growth on long-running containers that
     # spawn many short-lived processes.
@@ -777,13 +795,7 @@ class ContainerStatsSampler(threading.Thread):
             attach_micro_arch(sample, interval_s=micro_arch_interval)
 
     def run(self) -> None:
-        # Resolve cgroup path once at start.
-        self._resolve_cgroup_path()
-
-        # Skip the first sample — the first reading primes the CPU% baseline
-        # (prev_cpu_usec / prev_cpu_mono) but produces a meaningless 0% CPU
-        # value that would bias the min/avg in the summary.
-        _first_tick = True
+        # Cgroup path and CPU priming already handled by start().
 
         while not self._stop_event.is_set():
             tick_start = time.monotonic()
@@ -798,10 +810,7 @@ class ContainerStatsSampler(threading.Thread):
 
             if sample is not None:
                 self._sample_io(sample)
-                if _first_tick:
-                    _first_tick = False
-                else:
-                    self._samples.append(sample)
+                self._samples.append(sample)
                 # Initialize micro-arch collector on first retained sample
                 # with per-container scoping when cgroup path is available.
                 if self.enable_pmu and len(self._samples) == 1:
@@ -905,6 +914,22 @@ class ContainerStatsSampler(threading.Thread):
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout=self.subprocess_timeout_s + self.interval_s + 1.0)
+        # Collect a final catch-up sample so the returned data covers up to
+        # the stop time.  Without this the last sample can be up to
+        # interval_s stale, which is a meaningful fraction of the total
+        # observation window for short-lived samplers (e.g. fast cloud_model
+        # replays that complete in 1-2 seconds).
+        if self._samples:
+            last_epoch = self._samples[-1].get("epoch", 0.0)
+            if time.time() - float(last_epoch) > self.interval_s * 0.5:
+                tick_start = time.monotonic()
+                if self._cgroup_path is not None:
+                    sample = self._sample_via_cgroup(tick_start)
+                else:
+                    sample = self._sample_via_docker()
+                if sample is not None:
+                    self._sample_io(sample)
+                    self._samples.append(sample)
         return list(self._samples)
 
     def get_summary(self) -> dict[str, Any]:
