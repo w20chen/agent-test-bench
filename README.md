@@ -13,7 +13,7 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
    (`python -m trace_collect.cli simulate`).
 3. **Gantt viewer demo** — an interactive FastAPI + Solid.js viewer under
    `demo/gantt_viewer/` for inspecting traces as multi-lane Gantt charts with
-   resource overlays.
+   resource overlays. (*This is deprecated. Use `src/trace_collect/html_viz.py` instead. See [HTML Visualization](docs/resource-measurement.md#9-html-visualization) for the detail.*)
 
 `AGENTS.md` and `CLAUDE.md` define research-integrity and process rules.
 
@@ -69,6 +69,8 @@ Without a `.env` file or shell exports, you must pass credentials inline:
 ```bash
 DEEPSEEK_API_KEY=sk-... PYTHONPATH=src python -m trace_collect.cli ...
 ```
+
+*Note that other LLM providers (e.g., openrouter, dashscope) and web search providers (e.g., brave, duckduckgo) are also supported.*
 
 ---
 
