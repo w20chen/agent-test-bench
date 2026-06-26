@@ -244,6 +244,21 @@ def _build_fixed_image(
             check=True,
             timeout=120,
         )
+        # Ensure `python` → `python3` symlink so that tool commands using
+        # bare `python` (common in SWE-bench test scripts written for older
+        # distros) work regardless of host PATH leakage via ~/.local/bin.
+        _run(
+            [
+                executable,
+                "exec",
+                container_id,
+                "bash",
+                "-c",
+                'ln -sf "$(which python3)" /usr/local/bin/python',
+            ],
+            check=True,
+            timeout=30,
+        )
         _run(
             [executable, "commit", container_id, fixed_name],
             check=True,
@@ -541,6 +556,22 @@ def ensure_arm_fixed_image(
             ],
             check=True,
             timeout=120,
+        )
+
+        # Ensure `python` → `python3` symlink (same rationale as
+        # _build_fixed_image above — SWE-bench task images based on
+        # python:3.11-slim lack a bare `python` command).
+        _run(
+            [
+                container_executable,
+                "exec",
+                container_id,
+                "bash",
+                "-c",
+                'ln -sf "$(which python3)" /usr/local/bin/python',
+            ],
+            check=True,
+            timeout=30,
         )
 
         # 5. Commit the prepared container as a reusable image.
