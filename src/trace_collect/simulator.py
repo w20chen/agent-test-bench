@@ -219,10 +219,20 @@ def _parse_trace_session_file(
     if first_agent_id is None or not actions:
         raise SimulateError(f"No action records with agent_id found in {trace_path}")
 
+    # Safe float coercion so non-numeric timestamps (e.g. None, str) don't
+    # crash the sort before _validate_loaded_sessions can produce a clear
+    # error message.  Malformed actions sort to the front (0.0) and are
+    # caught during validation.
+    def _safe_ts(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+
     actions.sort(
         key=lambda action: (
-            float(action.get("ts_start", 0.0)),
-            float(action.get("ts_end", 0.0)),
+            _safe_ts(action.get("ts_start", 0.0)),
+            _safe_ts(action.get("ts_end", 0.0)),
             int(action.get("iteration", 0)),
             str(action.get("action_id", "")),
         )
@@ -1831,7 +1841,14 @@ async def simulate(
             ) -> PreparedTraceSession:
                 async with prep_sem:
                     prepared = await _prepare_one(loaded)
-                    await _setup_one(prepared)
+                    try:
+                        await _setup_one(prepared)
+                    except Exception:
+                        # _setup_one failed after the container was already
+                        # started by _prepare_one — tear down to avoid a
+                        # container leak.
+                        await _teardown_one(prepared)
+                        raise
                     return prepared
 
             results = await asyncio.gather(*[

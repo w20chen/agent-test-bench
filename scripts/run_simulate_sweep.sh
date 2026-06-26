@@ -189,8 +189,8 @@ for N in ${SWEEP_VALUES}; do
     --ksys-monitoring off \
     --replay-speed "${REPLAY_SPEED}" \
     --output-dir "${OUTPUT_DIR}" \
-    > "${RUN_LOG}" 2> >(tee -a "${RUN_LOG}" >&2)
-  SIMULATE_EXIT=$?
+    2>&1 | tee "${RUN_LOG}"
+  SIMULATE_EXIT=${PIPESTATUS[0]}
   set -e
 
   RUN_END=$(date +%s)

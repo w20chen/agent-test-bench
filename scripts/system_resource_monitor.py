@@ -86,6 +86,8 @@ def run_monitor(
     # net_io_counters() return counters since boot.
     first_disk = psutil.disk_io_counters()
     first_net = psutil.net_io_counters()
+    _first_disk_ok = first_disk is not None
+    _first_net_ok = first_net is not None
     if first_disk is None:
         first_disk_read = 0.0
         first_disk_write = 0.0
@@ -136,24 +138,24 @@ def run_monitor(
                 # Disk I/O — cumulative bytes since boot, offset by first sample
                 disk_read = (
                     (disk.read_bytes - first_disk_read) / (1024 * 1024)
-                    if disk and first_disk_read > 0
+                    if disk and _first_disk_ok
                     else 0.0
                 )
                 disk_write = (
                     (disk.write_bytes - first_disk_write) / (1024 * 1024)
-                    if disk and first_disk_write > 0
+                    if disk and _first_disk_ok
                     else 0.0
                 )
 
                 # Network I/O — cumulative bytes since boot, offset by first sample
                 net_rx = (
                     (net.bytes_recv - first_net_rx) / (1024 * 1024)
-                    if net and first_net_rx > 0
+                    if net and _first_net_ok
                     else 0.0
                 )
                 net_tx = (
                     (net.bytes_sent - first_net_tx) / (1024 * 1024)
-                    if net and first_net_tx > 0
+                    if net and _first_net_ok
                     else 0.0
                 )
 
