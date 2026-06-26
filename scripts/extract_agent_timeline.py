@@ -174,6 +174,8 @@ def print_summary(records: list[dict[str, object]]) -> None:
     print(f"Total agents:          {len(records)}")
     print(f"Agents with actions:   {len(valid)}")
     print(f"Experiment wall time:  {elapsed_s_all:.1f}s ({elapsed_s_all/60:.1f} min)")
+    print(f"Throughput:            {len(valid)/elapsed_s_all:.3f} agents/s "
+          f"({len(valid)/elapsed_s_all*60:.1f} agents/min)")
     print(f"Agent elapsed (mean):  {sum(elapsed_list)/len(elapsed_list):.1f}s")
     print(f"Agent elapsed (min):   {min(elapsed_list):.1f}s")
     print(f"Agent elapsed (max):   {max(elapsed_list):.1f}s")

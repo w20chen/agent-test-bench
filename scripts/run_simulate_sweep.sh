@@ -173,7 +173,7 @@ for N in ${SWEEP_VALUES}; do
   fi
 
   # ── Run simulate ────────────────────────────────────────────────────────
-  echo "[$(date +%H:%M:%S)] Running simulate with ${N} agents..."
+  echo "[$(date +%H:%M:%S)] Running simulate with ${N} agents (stderr shown below, full log → ${RUN_LOG})..."
   RUN_START=$(date +%s)
 
   set +e  # capture exit code without aborting the sweep
@@ -189,7 +189,7 @@ for N in ${SWEEP_VALUES}; do
     --ksys-monitoring off \
     --replay-speed "${REPLAY_SPEED}" \
     --output-dir "${OUTPUT_DIR}" \
-    > "${RUN_LOG}" 2>&1
+    > "${RUN_LOG}" 2> >(tee -a "${RUN_LOG}" >&2)
   SIMULATE_EXIT=$?
   set -e
 
@@ -267,3 +267,31 @@ echo
 echo "Summary log: ${SUMMARY_FILE}"
 echo
 cat "${SUMMARY_FILE}"
+
+# ── Throughput summary ───────────────────────────────────────────────────────
+
+echo
+echo "═══════════════════════════════════════════════"
+echo "  Throughput Summary"
+echo "═══════════════════════════════════════════════"
+printf "  %-6s  %-12s  %-14s  %-14s\n" "N" "Wall Time" "Agents/s" "Agents/min"
+echo "  ──────  ────────────  ──────────────  ──────────────"
+while IFS= read -r line; do
+  n_val=$(echo "${line}" | sed -n 's/^N=\([0-9]*\): OK.*/\1/p')
+  elapsed_str=$(echo "${line}" | sed -n 's/.*elapsed=\([0-9:]*\).*/\1/p')
+  if [[ -n "${n_val}" && -n "${elapsed_str}" ]]; then
+    h=$(echo "${elapsed_str}" | cut -d: -f1 | sed 's/^0*//')
+    m=$(echo "${elapsed_str}" | cut -d: -f2 | sed 's/^0*//')
+    s=$(echo "${elapsed_str}" | cut -d: -f3 | sed 's/^0*//')
+    h=${h:-0}; m=${m:-0}; s=${s:-0}
+    total_s=$((h * 3600 + m * 60 + s))
+    if [[ ${total_s} -gt 0 ]]; then
+      aps=$(echo "scale=3; ${n_val} / ${total_s}" | bc -l 2>/dev/null || echo "N/A")
+      apm=$(echo "scale=1; ${n_val} / ${total_s} * 60" | bc -l 2>/dev/null || echo "N/A")
+    else
+      aps="N/A"; apm="N/A"
+    fi
+    printf "  %-6s  %-12s  %-14s  %-14s\n" "${n_val}" "${elapsed_str}" "${aps}" "${apm}"
+  fi
+done < "${SUMMARY_FILE}"
+echo
