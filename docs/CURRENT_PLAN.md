@@ -220,6 +220,41 @@ The original audit found that `run_attempt()` wrote the same summary for
 - Final diff review and scope audit
 - `run_manifest.json` in simulation path (awaiting user decision)
 
+---
+
+## Concurrent Replay Cascade Failure Fix (2026-06-26)
+
+### Bug
+
+In `_run_cloud_model_replay()` (`src/trace_collect/simulator.py`),
+`asyncio.gather` was called without `return_exceptions=True`. When any
+single replay session raised an unhandled exception (typically from post-loop
+cleanup: sampler stop, `write_resources_json`, or `log_summary`), the gather
+immediately propagated it. The outer `finally` block then called
+`trace_logger.close()` on the **shared** `TraceLogger`, but other sessions
+were still running — every subsequent `trace_logger.log_trace_action()` call
+failed with `"I/O operation on closed file"`.
+
+This produced a cascade: one real exception → shared file closed → *all*
+remaining sessions report `"I/O operation on closed file"` for every action.
+
+### Fix (commit `52755be`)
+
+1. **`_run_cloud_model_replay`**: `asyncio.gather` now uses `return_exceptions=True`.
+   All sessions complete before the gather returns. Exceptions are collected,
+   logged individually, and the first is re-raised as `SimulateError`.
+
+2. **`_replay_cloud_model_session`**: Post-loop cleanup code (sampler stop,
+   `write_resources_json`, `log_summary`) is wrapped in `try/except` that
+   logs and re-raises — so a single session's cleanup failure is clearly
+   attributed and does not corrupt other sessions' data.
+
+### Documentation Updated
+
+- `docs/trace-collect.md` — Added "Interpreting Sweep Output" section (system_viz.html
+  metrics, measurement methodology, duration vs wall time, throughput data locations)
+  and "Concurrent Replay: Cascade Failure Prevention" section.
+
 ## Scope guard
 
 - Do not change benchmark plugin behavior or benchmark-specific YAML.

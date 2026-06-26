@@ -827,6 +827,122 @@ target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed
 design document covering rationale, risk assessment, and implementation
 notes.
 
+### Interpreting Sweep Output
+
+This section explains how to read the metrics produced by each sweep run,
+what their baseline values mean, and where to find throughput data.
+
+#### system_viz.html Metrics
+
+The HTML page renders 5 time-series charts with a summary stats header.
+
+**Summary Cards:**
+
+| Card | Meaning |
+|------|---------|
+| CPU Avg (max X%) | Whole-host CPU utilization averaged over the experiment. 320 cores fully saturated = 100%. |
+| Mem Avg (max X GB) | Average and peak used memory (includes page cache, not just process RSS). |
+| Max Containers | Peak number of concurrently running Docker containers. |
+| Duration | Time span from the monitor's first sample to its last sample (slightly longer than simulate wall time — see below). |
+
+**Chart 1 — CPU Utilization & System Load:**
+
+- **CPU %** (blue): Whole-host CPU utilization per sample.
+- **Load 1m / 5m / 15m** (orange/red/brown; 5m/15m hidden by default — toggle in legend): Linux load average — the exponentially-weighted moving average of processes in runnable (R) or uninterruptible sleep (D) state over 1, 5, and 15 minutes.
+
+> **load vs cpu_count:** `load ≈ cpu_count` means CPU is saturated with no queueing. `load >> cpu_count` means severe CPU contention — processes are waiting.
+>
+> **load vs CPU%:** CPU% is instantaneous utilization (like a speedometer). Load average is a smoothed queue-depth metric (like a congestion index). Both should be consulted together.
+
+**Chart 2 — Memory Usage:**
+
+- **Mem Used (GB)** (green): `psutil.virtual_memory().used` — includes page cache. This is NOT process-exclusive memory.
+- **Mem Total (GB)** (grey): Total physical RAM.
+
+> **Why memory starts high at t=0:** The system monitor starts ~1 second before `simulate`. The t=0 reading reflects the host's pre-existing memory usage (OS page cache, Docker daemon, other users' processes, etc.). SWE-bench containers are lightweight (tens of MB each) and Docker uses copy-on-write image layers, so 320 containers add relatively little incremental memory.
+
+**Chart 3 — Container Count:**
+
+- **Containers** (purple): Tracks the container lifecycle — ramp-up (rate-limited by `asyncio.Semaphore(20)`), steady state, and teardown.
+
+**Chart 4 — Network I/O Rate (MB/s):**
+
+- **Net RX** (cyan) / **Net TX** (teal): Per-second deltas computed from cumulative `/proc/net/dev` counters.
+
+> **Why SWE-bench coding tasks have network IO:** Even in `cloud_model` mode (no real LLM API calls), network traffic comes from Docker daemon communication (`docker exec` stdout/stderr streaming), container image pulls, SSH session traffic, and NFS/distributed storage if traces or outputs reside on network mounts. ~20 MB/s RX is expected with 320 concurrent containers.
+
+**Chart 5 — Disk I/O Rate (MB/s):**
+
+- **Disk Read / Write**: Per-second deltas from cumulative `/proc/diskstats` counters. Peaks typically align with container startup (image layer reads) and teardown.
+
+#### Measurement Methodology
+
+All system-level metrics are collected by `scripts/system_resource_monitor.py` using:
+
+| Metric | Python API | Underlying Source | Accuracy |
+|--------|-----------|-------------------|----------|
+| `cpu_percent` | `psutil.cpu_percent(interval=None)` | `/proc/stat` | Same as `top`/`htop`. Non-blocking call returns utilization since last call. 1 Hz sampling may miss sub-second spikes. |
+| `mem_used_gb` | `psutil.virtual_memory()` | `/proc/meminfo` | Byte-accurate. **Includes page cache** — not process-exclusive RSS. |
+| `load_1m/5m/15m` | `os.getloadavg()` | `/proc/loadavg` | Kernel-maintained EMA. Not available on Windows (falls back to 0). |
+| `disk_read_mb` / `disk_write_mb` | `psutil.disk_io_counters()` | `/proc/diskstats` | Cumulative bytes since first sample. Accurate for whole-disk I/O. |
+| `net_rx_mb` / `net_tx_mb` | `psutil.net_io_counters()` | `/proc/net/dev` | Cumulative bytes across ALL interfaces (including loopback). Does NOT isolate per-container traffic. |
+| `container_count` | `subprocess.run([docker, ps, -q])` | Docker CLI | Accurate count of running containers. |
+
+**Key caveats:**
+- `cpu_percent(interval=None)` is non-blocking — it compares against the previous call. The very first reading may be unreliable; discard if needed.
+- `mem_used_gb` includes OS page cache. For process-exclusive memory, subtract cached/buffered.
+- Network IO aggregates ALL interfaces (eth0, docker0, lo, etc.). Container-level network is available in per-container `resources.json` instead.
+
+#### Duration vs Wall Time
+
+There are **two distinct duration values**:
+
+| Metric | Source | Scope |
+|--------|--------|-------|
+| **system_viz.html Duration** | `last_sample_ts - first_sample_ts` from monitor JSONL | Monitor startup (~1s before simulate) through monitor shutdown (after simulate exits). Includes everything. |
+| **Throughput Wall Time** | `RUN_END - RUN_START` from shell script | Container preparation + all replays + container teardown + trace split + HTML viz generation. Does NOT include monitor startup/teardown or post-processing scripts. |
+
+For throughput analysis, use the **shell Wall Time** (reported in the sweep summary table and `sweep_summary_*.txt`).
+
+#### Throughput Data Locations
+
+| What | Where |
+|------|-------|
+| **Per-sweep summary** | `traces/simulate/swe-rebench/sweep_summary_<ts>.txt` — lists each N with wall time, exit code, monitor samples |
+| **Terminal output** | After all N complete, the script prints a `Throughput Summary` table with `Agents/s` and `Agents/min` |
+| **Agent-level timing** | `agent_timeline.jsonl` — per-agent `start_ts`, `end_ts`, `elapsed_s` for P50/P95/P99 analysis |
+| **System resource timeline** | `system_resources.jsonl` — per-second samples for CPU saturation analysis |
+| **Per-agent trace** | `<agent_id>--aN/attempt_1/trace.jsonl` — full action sequence with per-action timing |
+
+### Concurrent Replay: Cascade Failure Prevention
+
+In cloud-model concurrent replay (`_run_cloud_model_replay`), all sessions
+write to a **shared** `TraceLogger` (a single JSONL file).  Prior to the fix
+described below, `asyncio.gather` was called **without** `return_exceptions=True`.
+When any single session raised an unhandled exception (typically from post-loop
+cleanup: sampler stop, resource JSON write, or `log_summary`), the gather
+immediately propagated it.  The outer `finally` block then called
+`trace_logger.close()`, but **other sessions were still running** — every
+subsequent `trace_logger.log_trace_action()` call failed with:
+
+```
+I/O operation on closed file
+```
+
+This produced a cascade: one real exception → shared file closed → *all*
+remaining sessions report "I/O operation on closed file" for every action.
+
+**Fix (commit `52755be`):**
+
+1. `_run_cloud_model_replay`: `asyncio.gather` now uses `return_exceptions=True`.
+   All sessions complete before the gather returns.  Exceptions are collected,
+   logged individually, and the first is re-raised as `SimulateError`.
+
+2. `_replay_cloud_model_session`: post-loop cleanup code (sampler stop,
+   `write_resources_json`, `log_summary`) is wrapped in `try/except` that
+   logs and re-raises — so a single session's cleanup failure is clearly
+   attributed and does not corrupt other sessions' data.
+
 ---
 
 ## Recording Internals
