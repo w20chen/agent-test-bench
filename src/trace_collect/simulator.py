@@ -1179,7 +1179,12 @@ async def _replay_cloud_model_session(
     tool_ms_by_name: dict[str, float] = {}
     llm_call_time_count = 0
 
+    total_actions = len(loaded.actions)
+    report_interval = max(1, total_actions // 10)
+    _action_seq = 0  # sequential counter for progress reporting
+
     for action in loaded.actions:
+        _action_seq += 1
         action_id = str(action.get("action_id", ""))
         action_type = str(action.get("action_type", ""))
         iteration = int(action.get("iteration", 0))
@@ -1198,6 +1203,18 @@ async def _replay_cloud_model_session(
         )
         source_duration_s = max(0.0, action_ts_end - action_ts_start)
 
+        # Periodic progress: first action + every report_interval actions
+        if _action_seq == 1:
+            print(
+                f"  [{loaded.agent_id}] started ({total_actions} actions)",
+                flush=True,
+            )
+        elif _action_seq % report_interval == 0:
+            print(
+                f"  [{loaded.agent_id}] {_action_seq}/{total_actions} actions",
+                flush=True,
+            )
+
         # Event-driven: each action starts immediately after the previous
         # one completes.  Tool execution may be faster or slower than the
         # original trace — we don't wait for the original ts_start.
@@ -1209,11 +1226,6 @@ async def _replay_cloud_model_session(
                 record_ts_end = time.time()
                 prompt_tokens = int(data.get("prompt_tokens") or 0)
                 completion_tokens = int(data.get("completion_tokens") or 0)
-                print(
-                    f"  [{iteration}] llm_call: {prompt_tokens} prompt + "
-                    f"{completion_tokens} completion tokens "
-                    f"({source_duration_s:.1f}s source)"
-                )
                 record = _make_trace_action(
                     loaded=loaded,
                     action_type="llm_call",
@@ -1307,10 +1319,6 @@ async def _replay_cloud_model_session(
                     await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
                 duration_ms = (time.time() - record_ts_start) * 1000
             record_ts_end = time.time()
-            print(
-                f"  [{iteration}] tool_exec: {tool_name} "
-                f"({duration_ms:.0f}ms, {replay_source})"
-            )
             _classified_name = classify_exec_tool_name(tool_name, tool_args)
             tool_record = _make_trace_action(
                 loaded=loaded,
@@ -1357,6 +1365,13 @@ async def _replay_cloud_model_session(
             failed_actions += 1
 
     wall_end = time.time()
+
+    print(
+        f"  [{loaded.agent_id}] done: {succeeded_actions}/{total_actions} "
+        f"actions in {wall_end - wall_start:.1f}s "
+        f"({failed_actions} failed)",
+        flush=True,
+    )
 
     # Stop the resource sampler immediately so resources.json doesn't
     # include the idle gap between replay end and container teardown.
@@ -1889,35 +1904,60 @@ async def simulate(
             ksys_session.stop()
         if trace_logger is not None:
             trace_logger.close()
-            print(f"  [debug] combined trace -> {trace_logger.path}")
+            logger.info("Combined trace -> %s", trace_logger.path)
             n = _split_trace_by_agent(trace_logger.path, prepared_sessions)
-            print(f"  [debug] split: {n} per-task trace files written")
+            logger.info("Split: %d per-task trace files written", n)
         # Teardown any sessions that weren't cleaned up inline
         # (in serial mode these have already been torn down; in concurrent
         # mode they haven't).
-        for prepared in prepared_sessions:
-            if prepared.sampler is not None or prepared.container is not None:
-                await _teardown_one(prepared)
+        pending_teardown = [
+            prepared
+            for prepared in prepared_sessions
+            if prepared.sampler is not None or prepared.container is not None
+        ]
+        if pending_teardown:
+            logger.info(
+                "Tearing down %d sessions (containers + samplers)...",
+                len(pending_teardown),
+            )
+            await asyncio.gather(
+                *[_teardown_one(p) for p in pending_teardown],
+                return_exceptions=True,
+            )
+            logger.info("Teardown complete.")
 
     trace_file = output_path / f"{run_id}.jsonl"
     logger.info("Simulate complete [%s] -> %s", mode, trace_file)
 
-    # ── Auto-generate HTML viz ───────────────────────────────────
+    # ── Auto-generate HTML viz (concurrent, offloaded to threads) ─
+    viz_tasks: list[tuple[Path, Path]] = []
     for prepared in prepared_sessions:
         task_dir = prepared.task_output_dir
         if task_dir is None or not task_dir.is_dir():
             continue
         trace_jsonl = task_dir / "trace.jsonl"
-        if not trace_jsonl.exists():
-            continue
-        try:
-            html = generate_html(task_dir)
-            viz_path = task_dir / "trace_viz.html"
-            viz_path.write_text(html, encoding="utf-8")
-            logger.info("HTML viz written -> %s", viz_path)
-        except Exception:
-            logger.warning(
-                "Failed to generate HTML viz for %s", task_dir, exc_info=True,
-            )
+        if trace_jsonl.exists():
+            viz_tasks.append((task_dir, task_dir / "trace_viz.html"))
+
+    if viz_tasks:
+        logger.info("Generating HTML viz for %d sessions...", len(viz_tasks))
+
+        async def _gen_viz(task_dir: Path, viz_path: Path) -> None:
+            try:
+                html = await asyncio.to_thread(generate_html, task_dir)
+                viz_path.write_text(html, encoding="utf-8")
+                logger.info("HTML viz written -> %s", viz_path)
+            except Exception:
+                logger.warning(
+                    "Failed to generate HTML viz for %s",
+                    task_dir,
+                    exc_info=True,
+                )
+
+        await asyncio.gather(
+            *[_gen_viz(d, p) for d, p in viz_tasks],
+            return_exceptions=True,
+        )
+        logger.info("HTML viz complete.")
 
     return trace_file

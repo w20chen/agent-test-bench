@@ -177,7 +177,7 @@ for N in ${SWEEP_VALUES}; do
   RUN_START=$(date +%s)
 
   set +e  # capture exit code without aborting the sweep
-  PYTHONPATH="${REPO_ROOT}/src" "${PYTHON_BIN}" -m "${SIMULATE_MODULE}" simulate \
+  PYTHONPATH="${REPO_ROOT}/src" PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${SIMULATE_MODULE}" simulate \
     --source-dir "${SOURCE_TRACES_DIR}" \
     --mode cloud_model \
     --container "${CONTAINER_EXE}" \
