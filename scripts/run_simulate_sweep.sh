@@ -246,9 +246,14 @@ for N in ${SWEEP_VALUES}; do
   # ── Generate system resource visualization ────────────────────────────
   if [[ -f "${MONITOR_OUTPUT}" ]] && [[ -s "${MONITOR_OUTPUT}" ]]; then
     echo "[$(date +%H:%M:%S)] Generating system resource visualization..."
+    PLOT_EXTRA=()
+    if [[ -f "${TIMELINE_OUTPUT}" ]]; then
+      PLOT_EXTRA=(--timeline "${TIMELINE_OUTPUT}")
+    fi
     "${PYTHON_BIN}" "${PLOT_SCRIPT}" \
       --input "${MONITOR_OUTPUT}" \
       --output "${OUTPUT_DIR}/system_viz.html" \
+      "${PLOT_EXTRA[@]}" \
       >> "${RUN_LOG}" 2>&1
     echo "  → ${OUTPUT_DIR}/system_viz.html"
   fi

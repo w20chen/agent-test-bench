@@ -3,12 +3,17 @@
 
 Reads the JSONL file produced by ``scripts/system_resource_monitor.py`` and
 writes an interactive HTML page with Chart.js time-series charts for CPU,
-memory, load, network I/O, disk I/O, and container count.
+memory, load, network I/O, disk I/O, and container count.  Metric
+descriptions are included inline so every chart is self-documenting.
+
+Optionally accepts ``--timeline agent_timeline.jsonl`` to add an agent
+throughput & latency summary section.
 
 Usage::
 
     python scripts/plot_system_resources.py \\
         --input traces/simulate/swe-rebench/sweep_320a_1cpu/system_resources.jsonl \\
+        --timeline traces/simulate/swe-rebench/sweep_320a_1cpu/agent_timeline.jsonl \\
         --output traces/simulate/swe-rebench/sweep_320a_1cpu/system_viz.html
 
 Dependencies: none beyond the Python standard library.  Chart.js is loaded
@@ -36,6 +41,36 @@ def _load_samples(input_path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return samples
+
+
+def _load_timeline(timeline_path: Path) -> list[dict] | None:
+    """Read agent_timeline.jsonl, or return None if unavailable."""
+    if not timeline_path.is_file():
+        return None
+    records: list[dict] = []
+    with timeline_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records if records else None
+
+
+def _percentile(data: list[float], p: float) -> float:
+    """Compute the *p*-th percentile of *data* (linear interpolation)."""
+    if not data:
+        return 0.0
+    s = sorted(data)
+    k = (p / 100.0) * (len(s) - 1)
+    f = int(k)
+    c = k - f
+    if f + 1 < len(s):
+        return s[f] + c * (s[f + 1] - s[f])
+    return s[f]
 
 
 def _build_dataset(
@@ -67,8 +102,8 @@ def _build_dataset(
     })
 
 
-def generate_html(samples: list[dict]) -> str:
-    """Build a self-contained HTML page with resource charts."""
+def generate_html(samples: list[dict], timeline: list[dict] | None = None) -> str:
+    """Build a self-contained HTML page with resource charts and optional agent summary."""
     if not samples:
         return "<html><body><h2>No samples found</h2></body></html>"
 
@@ -77,18 +112,81 @@ def generate_html(samples: list[dict]) -> str:
     ts_labels = json.dumps([f"{t:.0f}s" for t in timestamps])
 
     n = len(samples)
-    last = samples[-1]
 
-    # Summary stats
+    # Summary stats from system monitor
     cpu_vals = [s.get("cpu_percent", 0) or 0 for s in samples]
     mem_vals = [s.get("mem_used_gb", 0) or 0 for s in samples]
     container_vals = [s.get("container_count") for s in samples]
     max_containers = max((v for v in container_vals if v is not None), default=0)
+    load_vals = [s.get("load_1m", 0) or 0 for s in samples]
+    load_max = max(load_vals) if load_vals else 0
+    cpu_count = samples[0].get("cpu_count", 0) or 1
 
     cpu_avg = sum(cpu_vals) / n if n else 0
     cpu_max = max(cpu_vals) if cpu_vals else 0
     mem_avg = sum(mem_vals) / n if n else 0
     mem_max = max(mem_vals) if mem_vals else 0
+
+    # ── Agent timeline summary (if available) ─────────────────────
+    agent_summary_html = ""
+    if timeline:
+        valid = [r for r in timeline if r.get("start_ts") is not None]
+        if valid:
+            elapsed_list = [float(r["elapsed_s"]) for r in valid]
+            start_all = min(float(r["start_ts"]) for r in valid)
+            end_all = max(float(r["end_ts"]) for r in valid)
+            wall_s = end_all - start_all
+            wall_min = wall_s / 60.0
+            total_agents = len(valid)
+            aps = total_agents / wall_s if wall_s > 0 else 0
+            apm = aps * 60
+            total_actions = sum(int(r.get("n_actions", 0)) for r in valid)
+            total_llm = sum(int(r.get("n_llm_calls", 0)) for r in valid)
+            total_tool = sum(int(r.get("n_tool_execs", 0)) for r in valid)
+
+            agent_summary_html = (
+                f'<div class="section-title">Throughput &amp; Agent Summary</div>'
+                f'<div class="stats">'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#E91E63">{aps:.3f}</div>'
+                f'<div class="label">Throughput (agents/s)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#E91E63">{apm:.1f}</div>'
+                f'<div class="label">Throughput (agents/min)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#FF9800">{wall_s:.0f}s</div>'
+                f'<div class="label">Wall Time ({wall_min:.1f} min)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#9C27B0">{total_agents}</div>'
+                f'<div class="label">Total Agents</div></div>'
+                f'</div>'
+                f'<div class="stats">'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#4CAF50">{sum(elapsed_list)/len(elapsed_list):.1f}s</div>'
+                f'<div class="label">Agent Elapsed (mean)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#4CAF50">{_percentile(elapsed_list, 50):.1f}s</div>'
+                f'<div class="label">Agent Elapsed (p50)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#FF5722">{_percentile(elapsed_list, 95):.1f}s</div>'
+                f'<div class="label">Agent Elapsed (p95)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#FF5722">{_percentile(elapsed_list, 99):.1f}s</div>'
+                f'<div class="label">Agent Elapsed (p99)</div></div>'
+                f'</div>'
+                f'<div class="stats">'
+                f'<div class="stat-box">'
+                f'<div class="value">{total_actions}</div>'
+                f'<div class="label">Total Actions (llm={total_llm}, tool={total_tool})</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value">{max(elapsed_list):.1f}s</div>'
+                f'<div class="label">Agent Elapsed (max)</div></div>'
+                f'<div class="stat-box">'
+                f'<div class="value" style="color:#795548">{load_max:.1f}</div>'
+                f'<div class="label">Load 1m Peak (cpu_count={cpu_count})</div></div>'
+                f'<div class="stat-box"></div>'
+                f'</div>'
+            )
 
     datasets = []
 
@@ -164,6 +262,8 @@ def generate_html(samples: list[dict]) -> str:
 
     datasets_js = ",\n        ".join(datasets)
 
+    duration_s = f"{timestamps[-1]:.0f}" if timestamps else "0"
+
     return _HTML_TEMPLATE.format(
         title="System Resource Timeline",
         ts_labels=ts_labels,
@@ -174,7 +274,10 @@ def generate_html(samples: list[dict]) -> str:
         mem_max=f"{mem_max:.1f}",
         max_containers=str(max_containers),
         total_samples=str(n),
-        duration_s=f"{timestamps[-1]:.0f}" if timestamps else "0",
+        duration_s=duration_s,
+        cpu_count=str(cpu_count),
+        load_max=f"{load_max:.1f}",
+        agent_summary_section=agent_summary_html,
     )
 
 
@@ -223,6 +326,8 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
              padding: 20px 28px; border-radius: 10px; margin-bottom: 24px; }}
   .header h1 {{ font-size: 22px; font-weight: 600; }}
   .header .meta {{ font-size: 13px; opacity: 0.8; margin-top: 6px; }}
+  .section-title {{ font-size: 16px; font-weight: 600; color: #555; margin-bottom: 12px;
+                     padding-bottom: 6px; border-bottom: 2px solid #e0e0e0; }}
   .stats {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }}
   .stat-box {{ background: #fff; border-radius: 8px; padding: 14px 20px; flex: 1;
                min-width: 130px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
@@ -232,8 +337,12 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
   .chart-row.full {{ grid-template-columns: 1fr; }}
   .chart-card {{ background: #fff; border-radius: 8px; padding: 16px;
                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-  .chart-card h3 {{ font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #555; }}
+  .chart-card h3 {{ font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555; }}
   .chart-card canvas {{ width: 100%; max-height: 280px; }}
+  .info-note {{ font-size: 11px; color: #999; line-height: 1.5; margin-top: 8px;
+                padding: 6px 10px; background: #fafafa; border-left: 3px solid #e0e0e0;
+                border-radius: 3px; }}
+  .info-note code {{ background: #eee; padding: 1px 4px; border-radius: 2px; font-size: 10px; }}
   @media (max-width: 900px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
 </style>
 </head>
@@ -242,11 +351,14 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
 <div class="header">
   <h1>{title}</h1>
   <div class="meta">
-    Samples: {total_samples} &middot; Duration: {duration_s}s
+    Samples: {total_samples} &middot; Monitor Duration: {duration_s}s
     &middot; Max Containers: {max_containers}
   </div>
 </div>
 
+{agent_summary_section}
+
+<div class="section-title">System Resource Metrics</div>
 <div class="stats">
   <div class="stat-box">
     <div class="value" style="color:#2196F3">{cpu_avg}%</div>
@@ -262,7 +374,7 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
   </div>
   <div class="stat-box">
     <div class="value" style="color:#FF9800">{duration_s}s</div>
-    <div class="label">Duration</div>
+    <div class="label">Monitor Duration</div>
   </div>
 </div>
 
@@ -270,10 +382,25 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
   <div class="chart-card">
     <h3>CPU Utilization &amp; System Load</h3>
     <canvas id="chart_cpu"></canvas>
+    <div class="info-note">
+      <strong>CPU %</strong> (blue, left axis): Whole-host utilization &mdash; 100% = all cores saturated.<br>
+      <strong>Load 1m/5m/15m</strong> (right axis): Linux load average &mdash;
+      exponentially-weighted count of runnable + I/O-waiting processes.
+      <strong>load &asymp; cpu_count ({cpu_count})</strong> = saturated, no queueing;
+      <strong>load &gt;&gt; cpu_count</strong> = severe contention. Peak load 1m: <strong>{load_max}</strong>.
+      Toggle 5m / 15m in the legend.
+    </div>
   </div>
   <div class="chart-card">
     <h3>Memory Usage</h3>
     <canvas id="chart_mem"></canvas>
+    <div class="info-note">
+      <strong>Mem Used</strong> (green): <code>psutil.virtual_memory().used</code> &mdash;
+      includes OS page cache, not just process RSS. High t=0 values reflect
+      pre-existing host memory usage. Docker CoW image sharing means N containers
+      add relatively little incremental memory.<br>
+      <strong>Mem Total</strong> (grey): physical RAM installed.
+    </div>
   </div>
 </div>
 
@@ -281,10 +408,22 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
   <div class="chart-card">
     <h3>Container Count</h3>
     <canvas id="chart_containers"></canvas>
+    <div class="info-note">
+      Running Docker containers (<code>docker ps -q</code>).  Ramp-up is
+      rate-limited by <code>asyncio.Semaphore(20)</code>.  Steady state = all
+      agents replaying concurrently.  Tear-down aligns with replay completion.
+    </div>
   </div>
   <div class="chart-card">
     <h3>Network I/O Rate</h3>
     <canvas id="chart_net"></canvas>
+    <div class="info-note">
+      Per-second delta from <code>/proc/net/dev</code> cumulative counters,
+      all interfaces.  In <code>cloud_model</code> (no real LLM API calls),
+      traffic comes from Docker daemon communication (<code>docker exec</code>
+      stdout/stderr streaming), image pulls, SSH, and NFS if outputs are on
+      network mounts.  ~20 MB/s RX is expected with 320 concurrent containers.
+    </div>
   </div>
 </div>
 
@@ -292,7 +431,21 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
   <div class="chart-card">
     <h3>Disk I/O Rate</h3>
     <canvas id="chart_disk"></canvas>
+    <div class="info-note">
+      Per-second delta from <code>/proc/diskstats</code> cumulative counters.
+      Peaks typically align with container startup (image layer reads) and
+      teardown (log flushing).
+    </div>
   </div>
+</div>
+
+<div class="info-note" style="margin-top: 20px; font-size: 12px;">
+  <strong>Measurement:</strong> All system metrics via <code>psutil</code> at 1 Hz
+  (same as <code>top</code>/<code>htop</code>). <strong>Monitor Duration</strong>
+  = last sample &minus; first sample &mdash; includes ~1s of monitor warm-up
+  before simulate starts and the trace-split/teardown tail after it exits.
+  For throughput calculations use the <strong>Wall Time</strong> reported in the
+  agent summary above (derived from per-agent <code>trace.jsonl</code> timestamps).
 </div>
 
 <script>
@@ -367,6 +520,10 @@ def main() -> None:
         "--output", type=Path, required=True,
         help="Path to write the output HTML file.",
     )
+    parser.add_argument(
+        "--timeline", type=Path, default=None,
+        help="Optional path to agent_timeline.jsonl for throughput summary.",
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -377,7 +534,9 @@ def main() -> None:
     if not samples:
         print(f"WARNING: {args.input} is empty, generating placeholder.", file=sys.stderr)
 
-    html = generate_html(samples)
+    timeline = _load_timeline(args.timeline) if args.timeline else None
+
+    html = generate_html(samples, timeline=timeline)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(html, encoding="utf-8")
     print(f"Written: {args.output} ({len(samples)} samples, {len(html)} bytes)")
