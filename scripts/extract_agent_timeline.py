@@ -51,6 +51,14 @@ def extract_agent_timeline(input_dir: Path) -> list[dict[str, object]]:
         logger.warning("No trace.jsonl files found under %s", input_dir)
         return []
 
+    # Keep only the latest attempt per agent (glob may find attempt_1,
+    # attempt_2, ... from previous runs).  Sorted order guarantees that
+    # the last match for each agent_dir is the highest attempt number.
+    _latest: dict[str, Path] = {}
+    for tf in trace_files:
+        _latest[str(tf.parent.parent)] = tf
+    trace_files = list(_latest.values())
+
     records: list[dict[str, object]] = []
 
     for trace_path in trace_files:
