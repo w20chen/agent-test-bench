@@ -252,23 +252,65 @@ _IDEMPOTENT_TOOLS = frozenset({"read_file", "list_dir"})
 
 class ContainerAgent:
 
+    # Container Python interpreter candidates, searched in order.
+    # Mirrors the probing logic in task_container.resolve_running_container_exec_config.
+    _PYTHON_CANDIDATES: tuple[str, ...] = (
+        "/usr/bin/python3",
+        "/usr/bin/python",
+        "/usr/local/bin/python3",
+        "/usr/local/bin/python",
+        "python3",
+        "python",
+    )
+
     def __init__(self, container_id: str, container_executable: str) -> None:
         self._container_id = container_id
         self._executable = container_executable
         self._process: asyncio.subprocess.Process | None = None
+        self._python_runtime: str = "python3"  # fallback, overwritten in start()
+
+    async def _probe_python(self) -> str:
+        """Find a working Python >=3.11 interpreter inside the container."""
+        probe_script = (
+            "import sys; "
+            "raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+        )
+        for cand in self._PYTHON_CANDIDATES:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self._executable, "exec", "-i", "-w", "/testbed",
+                    self._container_id, cand, "-c", probe_script,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=30)
+                if proc.returncode == 0:
+                    logger.info(
+                        "ContainerAgent python probe: %s (cid=%s)",
+                        cand, self._container_id[:12],
+                    )
+                    return cand
+            except (asyncio.TimeoutError, OSError):
+                continue
+        raise RuntimeError(
+            "ContainerAgent: no Python >=3.11 found in container "
+            f"{self._container_id[:12]}.  Tried: "
+            + ", ".join(self._PYTHON_CANDIDATES)
+        )
 
     async def start(self) -> None:
+        self._python_runtime = await self._probe_python()
         self._process = await asyncio.create_subprocess_exec(
             self._executable, "exec", "-i", "-w", "/testbed",
-            self._container_id, "python3", "-u", "-c", _REPLAY_AGENT_SCRIPT,
+            self._container_id, self._python_runtime, "-u", "-c", _REPLAY_AGENT_SCRIPT,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=1024 * 1024,  # 1MB — agent responses can exceed default 64KB
         )
         logger.info(
-            "ContainerAgent started: cid=%s pid=%s",
-            self._container_id[:12], self._process.pid,
+            "ContainerAgent started: cid=%s pid=%s runtime=%s",
+            self._container_id[:12], self._process.pid, self._python_runtime,
         )
 
     async def stop(self) -> None:

@@ -36,12 +36,16 @@ _ARCH_ALIASES = {
     "aarch64": "arm64",
 }
 _CONTAINER_PYTHON_CANDIDATES = (
-    "/usr/bin/python3",
+    # Absolute paths for common Python installations in container images.
+    # Ordered by likelihood: python:3.11-slim places python3 in /usr/local/bin,
+    # Debian/Ubuntu in /usr/bin.  PATH-based fallbacks (python3, python) are
+    # tried last so an explicit path is preferred when available.
+    "/usr/local/bin/python3",   # python:3.11-slim (official SWE-bench images)
+    "/usr/local/bin/python",    # symlink created by ensure_fixed_image()
+    "/usr/bin/python3",         # Debian/Ubuntu default
     "/usr/bin/python",
-    "/opt/conda/bin/python",
-    "/opt/conda/envs/ML/bin/python",
-    "python3",
-    "python",
+    "python3",                  # PATH-based fallback
+    "python",                   # PATH-based fallback (last resort)
 )
 
 
@@ -222,7 +226,17 @@ def project_mount_args(
     *,
     include_host_system_mounts: bool | None = None,
 ) -> list[str]:
-    """Return extra `podman run` args for parity mode."""
+    """Return extra `podman run` args for container execution.
+
+    By default, host system directories are NEVER mounted into the container.
+    This guarantees identical tool resolution across host architectures
+    (x86_64 vs ARM64).  Host system mounts were historically enabled in
+    "parity mode" (same-arch) but produced host-dependent behaviour that
+    broke cross-architecture trace replay.
+
+    Set *include_host_system_mounts* to ``True`` only for interactive
+    debugging when you need host tools inside the container.
+    """
 
     task_container_runtime_dir(attempt_dir, "bootstrap").mkdir(
         parents=True, exist_ok=True
@@ -235,7 +249,7 @@ def project_mount_args(
         (repo_root, False),
     ]
     if include_host_system_mounts is None:
-        include_host_system_mounts = platform.system() == "Linux"
+        include_host_system_mounts = False
     if include_host_system_mounts:
         for raw in ("/usr", "/lib", "/lib64", "/etc", "/bin", "/sbin", "/tmp", "/var"):
             path = Path(raw)
@@ -258,32 +272,28 @@ def resolve_task_container_exec_config(
     image: str,
     container_executable: str,
 ) -> TaskContainerExecConfig:
+    """Resolve the execution config for running code inside a task container.
+
+    Always uses bootstrap mode (container's own Python) regardless of host
+    architecture.  This guarantees that the same SWE-bench task image produces
+    identical tool resolution on x86_64 and ARM64 hosts.
+
+    The previous "parity mode" (host Python + host system mounts when
+    image platform matched host platform) was removed because it introduced
+    host-dependent behaviour that broke cross-architecture trace replay.
+    """
     image_platform = _inspect_image_platform(
         image,
         container_executable=container_executable,
     )
-    host_platform = _host_linux_platform()
-    use_host_runtime = host_platform is not None and (
-        image_platform is None or image_platform == host_platform
-    )
     start_args = list(
         project_mount_args(
             attempt_dir,
-            include_host_system_mounts=use_host_runtime,
+            include_host_system_mounts=False,
         )
     )
     if image_platform is not None:
         start_args = ["--platform", image_platform, *start_args]
-
-    if use_host_runtime:
-        return TaskContainerExecConfig(
-            runtime=current_container_python_runtime(),
-            pythonpath=_DEFAULT_RUNTIME_PYTHONPATH,
-            start_extra_args=tuple(start_args),
-            bootstrap=False,
-            bootstrap_site_dir=None,
-            image_platform=image_platform,
-        )
 
     site_dir = _SHARED_BOOTSTRAP_CACHE / "pydeps"
     return TaskContainerExecConfig(
