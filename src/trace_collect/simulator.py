@@ -64,6 +64,50 @@ def validate_gpu_tracking_args(args: Any) -> None:
         raise ValueError("--gpu-tracking on requires --vllm-startup-log")
 
 
+def _ensure_fd_headroom(num_sessions: int, *, concurrent: bool = True) -> None:
+    """Raise the process file-descriptor limit if it is too low for *num_sessions*.
+
+    Each concurrent ContainerAgent holds 3 pipes (stdin/stdout/stderr) for
+    its persistent ``docker exec`` subprocess.  With N sessions we need at
+    least N×5 fds for pipes + Python runtime + Docker API + trace files.
+    The default ``ulimit -n 1024`` is exhausted around 200 concurrent
+    containers.
+
+    Only acts when *concurrent* is True (serial mode reuses fds).
+    """
+    if not concurrent or num_sessions <= 1:
+        return
+
+    import resource as _resource
+
+    min_needed = num_sessions * 5
+    soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+    if soft >= min_needed:
+        return  # already sufficient
+
+    target = max(min_needed, 65536)
+    if hard >= 0 and target > hard:
+        target = hard  # respect hard limit
+
+    try:
+        _resource.setrlimit(_resource.RLIMIT_NOFILE, (target, hard))
+        logger.warning(
+            "Raised fd limit: %d → %d (%d sessions × 5 fds/session)",
+            soft, target, num_sessions,
+        )
+    except (ValueError, OSError) as exc:
+        logger.error(
+            "Cannot raise fd limit (%d → %d): %s.  "
+            "Run 'ulimit -n %d' before starting, or reduce --num-agents.",
+            soft, target, exc, target,
+        )
+        raise SimulateError(
+            f"File descriptor limit too low: {soft} < {min_needed} needed "
+            f"for {num_sessions} sessions.  "
+            f"Run 'ulimit -n {target}' before starting."
+        ) from exc
+
+
 @dataclass(slots=True)
 class LoadedTraceSession:
     """Resolved replay inputs for one source trace."""
@@ -1658,6 +1702,11 @@ async def simulate(
     concurrent = (
         mode == "cloud_model" and not serial and len(loaded_sessions) > 1
     )
+    # Each concurrent ContainerAgent holds 3 pipes (stdin/stdout/stderr);
+    # N sessions need at least N*5 fds including Python, Docker API, and
+    # trace files.  Default ulimit -n 1024 is insufficient beyond ~200
+    # concurrent containers.
+    _ensure_fd_headroom(len(loaded_sessions), concurrent=concurrent)
     has_host_session = any(_is_host_mode(session) for session in loaded_sessions)
     has_container_session = any(
         not _is_host_mode(session) for session in loaded_sessions

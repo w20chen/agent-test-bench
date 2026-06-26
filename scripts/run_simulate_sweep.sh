@@ -125,6 +125,22 @@ echo "Host memory:          ${HOST_MEM}"
 MAX_N=$(echo "${SWEEP_VALUES}" | tr ' ' '\n' | sort -n | tail -1)
 TOTAL_ALLOC=$(echo "${MAX_N} * ${CPU_LIMIT}" | bc -l 2>/dev/null || echo "${MAX_N}")
 echo "Max total CPU alloc:  ${TOTAL_ALLOC} (${MAX_N} agents × ${CPU_LIMIT} cpu)"
+
+# File descriptor limit check.  Each concurrent container agent holds 3
+# pipes (stdin/stdout/stderr); N agents need at least N*4 fds plus
+# headroom for Python, Docker API, and trace files.
+CURRENT_ULIMIT=$(ulimit -n 2>/dev/null || echo "unknown")
+MIN_ULIMIT=$((MAX_N * 5))
+echo "fd limit (ulimit -n): ${CURRENT_ULIMIT}  (min recommended: ${MIN_ULIMIT})"
+if [[ "${CURRENT_ULIMIT}" != "unknown" ]] && [[ "${CURRENT_ULIMIT}" -lt "${MIN_ULIMIT}" ]]; then
+  NEW_ULIMIT=$((MIN_ULIMIT > 65536 ? MIN_ULIMIT : 65536))
+  echo "  ⚠️  fd limit too low for ${MAX_N} agents — raising to ${NEW_ULIMIT}"
+  ulimit -n "${NEW_ULIMIT}" 2>/dev/null || {
+    echo "  ❌  Failed to raise ulimit (check /etc/security/limits.conf)"
+    exit 1
+  }
+  echo "  ✓ fd limit raised to $(ulimit -n)"
+fi
 echo
 
 # ── Main sweep loop ──────────────────────────────────────────────────────────
