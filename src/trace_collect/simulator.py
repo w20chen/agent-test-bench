@@ -145,6 +145,8 @@ class PreparedTraceSession:
     task_output_dir: Path | None = None
     monitoring_policy: MonitoringPolicy | None = None
     _resources_written: bool = False
+    # Timing: seconds spent preparing the container/image before replay.
+    container_setup_s: float = 0.0
 
 
 async def _call_local_model_streaming(
@@ -681,6 +683,8 @@ async def _prepare_container_session(
     """Prepare a Docker/Podman container and start a persistent replay agent."""
     from trace_collect.openclaw_tools import ContainerAgent
 
+    t_setup_start = time.monotonic()
+
     docker_image = _resolve_docker_image(loaded)
     if not docker_image:
         raise SimulateError(
@@ -718,7 +722,10 @@ async def _prepare_container_session(
         docker_image=normalized,
         agent=agent,
     )
-    return PreparedTraceSession(loaded=loaded, container=container)
+    container_setup_s = time.monotonic() - t_setup_start
+    return PreparedTraceSession(
+        loaded=loaded, container=container, container_setup_s=container_setup_s,
+    )
 
 
 async def _prepare_host_session(
@@ -1116,6 +1123,10 @@ async def _run_local_model_simulation(
                 "total_tool_ms": sim_total_tool_ms,
                 "tool_ms_by_name": sim_tool_ms_by_name,
                 "llm_call_time_count": sim_llm_call_count,
+                "timing": {
+                    "agent_exec_s": wall_end - wall_start,
+                    "container_setup_s": prepared_session.container_setup_s,
+                },
             },
         )
         trace_logger.log_summary(loaded.agent_id, simulate_summary)
@@ -1490,6 +1501,10 @@ async def _replay_cloud_model_session(
                     "total_tool_ms": total_tool_ms,
                     "tool_ms_by_name": tool_ms_by_name,
                     "llm_call_time_count": llm_call_time_count,
+                    "timing": {
+                        "agent_exec_s": _elapsed,
+                        "container_setup_s": prepared_session.container_setup_s,
+                    },
                 },
             ),
         )

@@ -217,8 +217,16 @@ def generate_html(attempt_dir: Path) -> str:
                 t0 = ts
                 break
 
-    # Drop resource samples whose epoch falls before the first action
-    # so the resource charts don't extend into pre-action setup time.
+    # Determine the end of the agent execution window: last action's ts_end.
+    t_end = 0.0
+    for a in actions:
+        ts = a.get("ts_end", 0)
+        if ts > t_end:
+            t_end = ts
+
+    # Drop resource samples whose epoch falls outside the agent execution
+    # window [t0, t_end] so the resource charts only show the period where
+    # the agent is actually working — not container setup or teardown.
     _filtered_samples: list[dict[str, Any]] = []
     for s in resource_samples:
         ts_val = s.get("epoch", s.get("timestamp", 0))
@@ -226,7 +234,7 @@ def generate_html(attempt_dir: Path) -> str:
             ts_val = _parse_iso(ts_val)
         elif not isinstance(ts_val, (int, float)):
             ts_val = 0.0
-        if float(ts_val) >= t0:
+        if t0 <= float(ts_val) <= t_end:
             _filtered_samples.append(s)
     resource_samples = _filtered_samples
 
@@ -435,8 +443,14 @@ def generate_html(attempt_dir: Path) -> str:
         res_data["bus_access"].append(_safe_float(s.get("bus_access_per_s", 0)))
 
     # ── Unified time span (covers both Gantt and resource data) ────
-    res_max_ts = max(res_data["timestamps"]) if res_data["timestamps"] else 0.0
-    unified_total = max(total_span, res_max_ts, 1.0)
+    # Agent execution time: from first action start to last action end.
+    # This is what the Gantt chart and resource charts display.
+    agent_time = max(total_span, 1.0)
+    # Wall-clock total from manifest (if available, for the stat box).
+    manifest_timing = manifest.get("timing", {})
+    wall_total_s = manifest_timing.get("wall_total_s", None)
+    setup_s = manifest_timing.get("setup_s", None)
+    teardown_s = manifest_timing.get("teardown_s", None)
 
     # ── Memory bandwidth availability ──────────────────────────────
     mem_bw_reason = ""
@@ -472,8 +486,17 @@ def generate_html(attempt_dir: Path) -> str:
     model = meta.get("model", manifest.get("model", {}).get("name", "?"))
     benchmark = meta.get("benchmark", "?")
     scaffold = meta.get("scaffold", "?")
-    total_time = unified_total
+    total_time = agent_time
     n_iterations = summary.get("n_iterations", len(set(a.get("iteration", 0) for a in actions if a.get("action_type") == "llm_call")))
+
+    # Build wall-clock extra line for the stat box when manifest timing
+    # is available (collect mode).  Simulate traces won't have this.
+    wall_clock_html = ""
+    if wall_total_s is not None:
+        wall_clock_html = (
+            '<div class="stat-box"><div class="val">{:.1f}s</div>'
+            '<div class="lbl">Wall Clock</div></div>'
+        ).format(wall_total_s)
 
     return _HTML_TEMPLATE.format(
         instance_id=_esc(instance_id),
@@ -481,6 +504,7 @@ def generate_html(attempt_dir: Path) -> str:
         benchmark=_esc(benchmark),
         scaffold=_esc(scaffold),
         total_time=f"{total_time:.1f}",
+        wall_clock_html=wall_clock_html,
         n_iterations=n_iterations,
         n_llm_calls=summary.get("llm_call_time_count", sum(1 for a in actions if a.get("action_type") == "llm_call")),
         n_tool_calls=len([a for a in actions if a.get("action_type") == "tool_exec"]),
@@ -495,14 +519,14 @@ def generate_html(attempt_dir: Path) -> str:
         resource_summary=json.dumps(resource_summary, ensure_ascii=False),
         resource_count=len(resource_samples),
         gantt_items=gantt_json,
-        gantt_total=unified_total,
+        gantt_total=agent_time,
         res_data=res_json,
         mem_bw_reason=_esc(mem_bw_reason),
         micro_arch_available="true" if micro_arch_available else "false",
         micro_arch_source=_esc(micro_arch_source),
         micro_arch_reason=_esc(micro_arch_reason),
         ts_start=_ts_to_str(t0) if t0 else "N/A",
-        ts_end=_ts_to_str(t0 + unified_total) if t0 else "N/A",
+        ts_end=_ts_to_str(t_end) if t_end else "N/A",
     )
 
 
@@ -551,7 +575,8 @@ body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 </div>
 
 <div class="stats">
-  <div class="stat-box"><div class="val">{total_time}s</div><div class="lbl">Total Time</div></div>
+  <div class="stat-box"><div class="val">{total_time}s</div><div class="lbl">Agent Time</div></div>
+  {wall_clock_html}
   <div class="stat-box"><div class="val">{n_iterations}</div><div class="lbl">Iterations</div></div>
   <div class="stat-box"><div class="val">{n_llm_calls}</div><div class="lbl">LLM Calls</div></div>
   <div class="stat-box"><div class="val">{n_tool_calls}</div><div class="lbl">Tool Execs</div></div>

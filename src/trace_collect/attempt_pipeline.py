@@ -115,6 +115,10 @@ class AttemptContext:
     end_time: datetime | None = None
     container_stdout: str = ""
     permission_fix_time_s: float = 0.0
+    # Timing checkpoints for wall-clock breakdown.
+    image_ready_time: datetime | None = None
+    agent_start_time: datetime | None = None
+    agent_end_time: datetime | None = None
     # ARM-native fields (ignored on x86_64 hosts).
     arm_repo: str | None = None
     arm_base_commit: str | None = None
@@ -133,10 +137,29 @@ class AttemptContext:
         """Stable string like ``attempt_1`` (matches the manifest field)."""
         return f"attempt_{self.attempt}"
 
+    def _delta_s(self, start: datetime | None, end: datetime | None) -> float:
+        """Seconds between two optional datetimes; returns 0.0 if either is None."""
+        if start is None or end is None:
+            return 0.0
+        return (end - start).total_seconds()
+
     def elapsed_seconds(self) -> float:
         """Total wall clock between ``start_time`` and ``end_time`` (or now)."""
         end = self.end_time or datetime.now(tz=timezone.utc)
         return (end - self.start_time).total_seconds()
+
+    def setup_seconds(self) -> float:
+        """Wall clock from ``start_time`` to agent start (excl. agent execution)."""
+        ref = self.agent_start_time or self.image_ready_time
+        return self._delta_s(self.start_time, ref)
+
+    def agent_seconds(self) -> float:
+        """Wall clock from ``agent_start_time`` to ``agent_end_time``."""
+        return self._delta_s(self.agent_start_time, self.agent_end_time)
+
+    def teardown_seconds(self) -> float:
+        """Wall clock from ``agent_end_time`` to ``end_time``."""
+        return self._delta_s(self.agent_end_time, self.end_time)
 
     def start_time_iso(self) -> str:
         return self.start_time.isoformat().replace("+00:00", "")
@@ -447,6 +470,7 @@ async def run_attempt(
                 )
             ctx.fixed_image = fixed_name
             ctx.permission_fix_time_s = fix_elapsed
+            ctx.image_ready_time = datetime.now(tz=timezone.utc)
             logger.info(
                 "image prep: source=%s fixed=%s elapsed=%.2fs",
                 ctx.source_image,
@@ -459,6 +483,7 @@ async def run_attempt(
     else:
         ctx.fixed_image = None
         ctx.permission_fix_time_s = 0.0
+        ctx.image_ready_time = datetime.now(tz=timezone.utc)
 
     stop_watcher = threading.Event()
     watcher_task: asyncio.Task[ContainerStatsSampler | None] | None = None
@@ -511,8 +536,11 @@ async def run_attempt(
     inner_error: BaseException | None = None
 
     try:
+        ctx.agent_start_time = datetime.now(tz=timezone.utc)
         result = await inner(ctx)
+        ctx.agent_end_time = datetime.now(tz=timezone.utc)
     except BaseException as exc:
+        ctx.agent_end_time = datetime.now(tz=timezone.utc)
         inner_error = exc
         logger.exception("scaffold inner raised: %s", exc)
     finally:
@@ -615,6 +643,13 @@ async def run_attempt(
         "prompt_template": ctx.prompt_template,
         "agent_runtime_mode": ctx.agent_runtime_mode,
         "execution_environment": ctx.execution_environment,
+        "timing": {
+            "wall_total_s": ctx.elapsed_seconds(),
+            "setup_s": ctx.setup_seconds(),
+            "agent_exec_s": ctx.agent_seconds(),
+            "teardown_s": ctx.teardown_seconds(),
+            "permission_fix_s": ctx.permission_fix_time_s,
+        },
     }
 
     results_payload: dict[str, Any] = {
@@ -637,6 +672,13 @@ async def run_attempt(
         "scaffold": ctx.scaffold,
         "prompt_template": ctx.prompt_template,
         "agent_runtime_mode": ctx.agent_runtime_mode,
+        "timing": {
+            "wall_total_s": ctx.elapsed_seconds(),
+            "setup_s": ctx.setup_seconds(),
+            "agent_exec_s": ctx.agent_seconds(),
+            "teardown_s": ctx.teardown_seconds(),
+            "permission_fix_s": ctx.permission_fix_time_s,
+        },
     }
     for key in (
         "task_source_kind",
