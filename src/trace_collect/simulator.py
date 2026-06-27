@@ -947,7 +947,6 @@ async def _run_local_model_simulation(
                         ts_start=ts_now,
                         ts_end=ts_now,
                         data={
-                            "messages_in": messages_in,
                             "raw_response": llm_data.get("raw_response", {}),
                             "prompt_tokens": llm_data.get("prompt_tokens", 0),
                             "completion_tokens": 0,
@@ -1000,7 +999,6 @@ async def _run_local_model_simulation(
                     ts_start=ts_start,
                     ts_end=ts_after_llm,
                     data={
-                        "messages_in": messages_in,
                         "raw_response": llm_data.get("raw_response", {}),
                         "prompt_tokens": llm_data.get("prompt_tokens", 0),
                         "completion_tokens": llm_data.get("completion_tokens", 0),
@@ -1369,7 +1367,6 @@ async def _replay_cloud_model_session(
                     ts_start=record_ts_start,
                     ts_end=record_ts_end,
                     data={
-                        "messages_in": data.get("messages_in"),
                         "raw_response": data.get("raw_response", {}),
                         "prompt_tokens": data.get("prompt_tokens", 0),
                         "completion_tokens": data.get("completion_tokens", 0),

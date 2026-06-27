@@ -894,7 +894,7 @@ def test_local_model_terminal_transport_retry_marks_failed_iteration(
 
     assert llm_record["data"]["transport_retry_terminal"] is True
     assert llm_record["data"]["sim_metrics"]["failed"] is True
-    assert llm_record["data"]["messages_in"] == [{"role": "user", "content": "fail please"}]
+    assert "messages_in" not in llm_record["data"], "messages_in must not be written to trace output"
     assert summary["success"] is False
     assert summary["failed_iterations"] == 1
 

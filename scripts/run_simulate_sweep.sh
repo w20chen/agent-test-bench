@@ -24,7 +24,9 @@
 #   Each contains:
 #     system_resources.jsonl    — system-wide resource timeline
 #     agent_timeline.jsonl      — per-agent start/end wall-clock times
-#     simulate_cloud_model_*.jsonl  — combined trace
+#     simulate.log              — full simulate stdout+stderr
+#     monitor.log               — resource monitor stderr
+#     system_viz.html           — system-wide resource visualization
 #     <agent_id>--aN/attempt_1/ — per-agent trace + resources + HTML viz
 # ──────────────────────────────────────────────────────────────────────────────
 

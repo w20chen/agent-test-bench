@@ -68,13 +68,13 @@ coroutine 640: sleep(1.0) → 到期 → 排队
                               event loop 逐个处理，队尾的协程可能多等了 50ms+
 ```
 
-这个排队延迟**正是压力测试想要测量的信号**——它反映了高并发下 event loop 的调度瓶颈。
+这个排队延迟**不是压力测试想要测量的信号**——它是 Python asyncio 的**测量噪声**。压力测试真正关心的是 Docker daemon 调度、CPU/内存/IO 资源竞争这些**系统级瓶颈**，而非 Python 记账开销。
 
-> **`--workers` 修复：** `--workers N` 将 agent 分配到 N 个独立进程中，每个进程有自己的
+> **`--workers` 修复：** `--workers N` 将 agent 分配到 N 个独立 OS 进程中，每个进程有自己的
 > asyncio event loop。当 `--workers` 接近 agent 数（如 `--workers 320 --num-agents 640`，
 > 每 loop 仅 2 agent）时，event loop 排队延迟趋近于零。此时观察到的延迟来自 Docker daemon
 > 的容器调度、CPU/内存/IO 资源竞争，而非 Python 的 asyncio 记账开销。
-> 详见 [Worker Architecture](trace-collect.md#worker-architecture--event-loop-contention)。
+> 详见 [Concurrency Models: Simulate vs Collect](trace-collect.md#concurrency-models-simulate-vs-collect)。
 
 ---
 
@@ -237,7 +237,7 @@ record_ts_end = time.time()                                # epoch
 > - `duration_ms` = 容器内部纯执行时间
 > - **差值 = 系统调度开销**。`--workers 1` 时含 event loop 延迟；
 >   `--workers` 足够大时仅含 Docker pipe 传输和系统调用开销。
->   详见 [Worker Architecture](trace-collect.md#worker-architecture--event-loop-contention)。
+>   详见 [Concurrency Models: Simulate vs Collect](trace-collect.md#concurrency-models-simulate-vs-collect)。
 
 #### Tool Execution —— 不回放实际执行（MCP / 未知工具）
 
