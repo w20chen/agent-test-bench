@@ -1,8 +1,11 @@
 import asyncio
+import json
 import os
 import re
+import shlex
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -106,9 +109,28 @@ class ExecTool(Tool):
             # inside the x86_64 container).
             env["PATH"] = self.path_append + os.pathsep + env.get("PATH", "")
 
+        # When --vtune is active (signalled via env from the host), wrap a
+        # pytest invocation with VTune so it is profiled for exactly its
+        # lifetime. No-op for any other command or when --vtune is off.
+        run_command = command
+        vtune_window: dict[str, Any] | None = None
+        if os.environ.get("VTUNE_PROFILE") == "1" and re.search(r"\bpytest\b", command):
+            vtune_bin = os.environ.get("VTUNE_BIN", "vtune")
+            vtune_out = os.environ.get("VTUNE_OUT", cwd)
+            run_dir = os.path.join(
+                vtune_out, f"pytest_{time.strftime('%Y%m%dT%H%M%S')}_{os.getpid()}"
+            )
+            os.makedirs(run_dir, exist_ok=True)
+            run_command = (
+                f"{shlex.quote(vtune_bin)} -collect uarch-exploration -data-limit=0 "
+                f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
+                f"-- bash -lc {shlex.quote(command)}"
+            )
+            vtune_window = {"dir": run_dir, "cmd": command, "ts_start": time.time()}
+
         try:
             process = await asyncio.create_subprocess_shell(
-                command,
+                run_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
@@ -143,6 +165,19 @@ class ExecTool(Tool):
                         except (ProcessLookupError, ChildProcessError) as e:
                             logger.debug("Process already reaped or not found: {}", e)
                 return f"Error: Command timed out after {effective_timeout} seconds"
+
+            if vtune_window is not None:
+                vtune_window["ts_end"] = time.time()
+                vtune_window["returncode"] = process.returncode
+                try:
+                    with open(
+                        os.path.join(vtune_window["dir"], "window.json"),
+                        "w",
+                        encoding="utf-8",
+                    ) as f:
+                        json.dump(vtune_window, f)
+                except OSError:
+                    pass
 
             output_parts = []
 

@@ -914,6 +914,9 @@ async def collect_traces(
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
     ksys_monitoring: str = "auto",
+    vtune: bool = False,
+    vtune_coarse: bool = False,
+    vtune_fine: bool = False,
     concurrency: int = 1,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
@@ -941,6 +944,13 @@ async def collect_traces(
     if runtime_mode not in {"host_controller", "task_container_agent"}:
         raise NotImplementedError(
             f"Unsupported benchmark.runtime_mode_for({scaffold!r}): {runtime_mode!r}"
+        )
+    if (vtune_coarse or vtune_fine) and not vtune:
+        raise ValueError("--vtune-coarse / --vtune-fine require --vtune")
+    if vtune and runtime_mode != "task_container_agent":
+        raise ValueError(
+            "--vtune wraps in-container pytest and only applies to "
+            f"task-container benchmarks, not runtime_mode={runtime_mode!r}"
         )
     if (
         execution_environment == "container" or runtime_mode == "task_container_agent"
@@ -1060,6 +1070,9 @@ async def collect_traces(
                         mcp_config=mcp_config,
                         container_executable=container_executable,
                         record_internals=record_internals,
+                        vtune=vtune,
+                        vtune_coarse=vtune_coarse,
+                        vtune_fine=vtune_fine,
                     )
 
                 assert runner is not None
@@ -1228,6 +1241,9 @@ async def _run_openclaw_in_task_container(
     max_context_tokens: int,
     mcp_config: str | None,
     record_internals: bool = False,
+    vtune: bool = False,
+    vtune_coarse: bool = False,
+    vtune_fine: bool = False,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1244,10 +1260,16 @@ async def _run_openclaw_in_task_container(
         image=fixed_image,
         container_executable=container_executable,
     )
+    start_extra_args = list(exec_config.start_extra_args)
+    vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
+    if vtune:
+        from trace_collect.vtune_report import vtune_container_run_args
+
+        start_extra_args.extend(vtune_container_run_args(vtune_out_dir))
     container_id = start_task_container(
         fixed_image,
         executable=container_executable,
-        extra_args=list(exec_config.start_extra_args),
+        extra_args=start_extra_args,
     )
     ctx.mark_container_ready(container_id)
 
@@ -1374,6 +1396,15 @@ async def _run_openclaw_in_task_container(
     finally:
         if _stats_sampler is not None:
             ctx.samples = _stats_sampler.stop()
+        if vtune:
+            from trace_collect.vtune_report import finalize_vtune
+
+            finalize_vtune(
+                vtune_out_dir,
+                ctx.samples or [],
+                coarse=vtune_coarse,
+                fine=vtune_fine,
+            )
         container_logs = stop_task_container(
             container_id,
             executable=container_executable,

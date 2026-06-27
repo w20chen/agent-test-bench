@@ -176,6 +176,32 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     _add_monitoring_arguments(parser)
     parser.add_argument(
+        "--vtune",
+        action="store_true",
+        help=(
+            "Wrap each in-container pytest invocation with Intel VTune "
+            "uarch-exploration; results under <attempt>/vtune/. Container "
+            "benchmarks only; requires VTune on the host (VTUNE_BIN / "
+            "VTUNE_ROOT) and Intel x86 native (no QEMU)."
+        ),
+    )
+    parser.add_argument(
+        "--vtune-coarse",
+        action="store_true",
+        help=(
+            "With --vtune, also emit coarse.json (CPU/mem/net/disk/"
+            "context-switch) sliced to each pytest window."
+        ),
+    )
+    parser.add_argument(
+        "--vtune-fine",
+        action="store_true",
+        help=(
+            "With --vtune, also emit fine.json (VTune TMA front/back-end "
+            "plus perf branch/L1I/IPC) for each pytest window."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=positive_int_arg,
         default=1,
@@ -785,6 +811,9 @@ def _run_collect(args: argparse.Namespace) -> None:
                 resource_monitoring=args.resource_monitoring,
                 pmu_monitoring=args.pmu_monitoring,
                 ksys_monitoring=effective_ksys_monitoring,
+                vtune=args.vtune,
+                vtune_coarse=args.vtune_coarse,
+                vtune_fine=args.vtune_fine,
                 concurrency=args.concurrency,
                 eviction_config=eviction_config,
                 sparse_attention_config=sparse_attention_config,
