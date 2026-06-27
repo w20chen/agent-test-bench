@@ -209,7 +209,7 @@ Replay collected traces to measure timing under different infrastructure.
 | **Tool execution** | MCP tools (`mcp_*`) replayed from trace; others re-executed in container | All tools re-executed in container |
 | **Multi-trace** | Yes (via `--trace-manifest`) | Single trace only (`--source-trace`) |
 | **LLM client** | None created (forbidden) | Requires `--api-base`, `--model`, `--api-key` |
-| **Use case** | "What if N agents run concurrently?" | "What if we self-host on local vLLM?" |
+| **Use case** | "What if N agents run concurrently?" Use `--workers` to split agents across asyncio event loops for accurate timing at scale. | "What if we self-host on local vLLM?" |
 
 ### Minimal Examples
 
@@ -255,8 +255,50 @@ python -m trace_collect.cli simulate \
 | `--cpu-limit` | no | — | CPU core cap: `--cpus=N` for containers, `cpu_affinity` for host |
 | `--metrics-url` | no | — | vLLM Prometheus endpoint (local_model only; forbidden for cloud_model) |
 | `--serial` | no | off | Replay traces sequentially (one at a time) |
+| `--workers` | no | `1` | Number of worker processes for concurrent `cloud_model` replay. Each worker runs its own asyncio event loop so N agents are split across W processes (N/W agents per loop). Eliminates the single-event-loop scheduling bottleneck that inflates `asyncio.sleep()` wake-up latency and await-callback delay under high concurrency. `cloud_model` only; `--workers > 1` is rejected for `local_model`. Default `1` = legacy single-process behaviour. Recommended: `min(num_agents, os.cpu_count())` |
 
 LLM flags (`--provider`, `--api-base`, `--api-key`, `--model`) required for `local_model` only.
+
+### Worker Architecture & Event-Loop Contention
+
+When many agents share a single asyncio event loop (the default `--workers 1`),
+two measurement distortions arise:
+
+| Distortion | Mechanism | Affected measurements |
+|------------|-----------|----------------------|
+| **Sleep drift** | `asyncio.sleep()` callbacks queue behind other coroutines; wake-up is delayed until the loop reaches the scheduled callback | LLM replay duration (`source_duration_s / replay_speed`), MCP tool replay duration |
+| **Await-callback delay** | Docker SDK `_exec_tool()` completions land as callbacks that must wait their turn before `record_ts_end = time.time()` executes | Non-MCP tool execution `duration_ms` |
+
+Both distortions grow with agent count. At 640 agents on a single loop, measured
+timing can diverge dramatically from ground truth. The `--workers` flag eliminates
+this noise by splitting agents across independent processes:
+
+```
+真实延迟 = 容器资源竞争 (压力测试目标) + event loop 调度延迟 (测量噪声)
+
+更多 workers → 调度噪声 → 0
+更多 workers → 容器资源竞争不变 (Docker daemon 仍然是瓶颈)
+```
+
+**Recommended worker counts for a 320-core host (640 agents):**
+
+| Workers | Agents/Worker | Event-loop congestion | Timing accuracy | Memory cost |
+|---------|--------------|----------------------|-----------------|-------------|
+| 1 (legacy) | 640 | Severe | ❌ Unusable | Minimal |
+| 64 | 10 | Mild | ✅ Acceptable | Low |
+| 160 | 4 | Very low | ✅ Good | Moderate |
+| **320** | **2** | Near-zero | **✅ Near-perfect** | Moderate (320 Python processes) |
+| 640 | 1 | Zero | ✅ Perfect | High (640 Python processes) |
+
+`--workers 320` (2 agents per event loop) is the sweet spot: scheduling delay is
+negligible while memory overhead stays manageable. `--workers 160` (4/loop) is a
+conservative alternative that still produces accurate results.
+
+**Relationship to pressure testing:** workers eliminate *measurement noise*, not
+*resource competition*. Containers still compete for CPU, memory, and I/O through
+the Docker daemon regardless of worker count. The pressure test remains valid —
+workers just ensure the timing numbers you record reflect that competition rather
+than Python bookkeeping overhead.
 
 ### Arrival Modes
 

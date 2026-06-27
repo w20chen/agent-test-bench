@@ -591,6 +591,21 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes for concurrent cloud_model replay. "
+            "Each worker runs its own asyncio event loop on a separate CPU "
+            "core, so N agents are split across --workers processes "
+            "(N/--workers agents per event loop). This eliminates the "
+            "single-event-loop scheduling bottleneck that inflates "
+            "asyncio.sleep() wake-up latency under high concurrency. "
+            "Default 1 (single process, legacy behavior). "
+            "Recommended: min(num_agents, os.cpu_count())."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -875,6 +890,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "trace_assignment": args.trace_assignment,
         "trace_assignment_seed": args.trace_assignment_seed,
         "cpu_limit": args.cpu_limit,
+        "workers": args.workers,
     }
 
     if args.num_agents < 0:
@@ -886,6 +902,18 @@ def _run_simulate(args: argparse.Namespace) -> None:
     if args.cpu_limit is not None and args.cpu_limit <= 0:
         print(
             "ERROR: --cpu-limit must be > 0 (got %.1f)." % args.cpu_limit,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.workers < 1:
+        print(
+            "ERROR: --workers must be >= 1 (got %d)." % args.workers,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.workers > 1 and args.mode != "cloud_model":
+        print(
+            "ERROR: --workers > 1 is only supported for --mode cloud_model.",
             file=sys.stderr,
         )
         sys.exit(2)

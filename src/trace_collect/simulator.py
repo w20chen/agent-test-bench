@@ -5,9 +5,11 @@ import dataclasses
 import json
 import logging
 import math
+import os
 import random
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1690,6 +1692,237 @@ def _flush_session_trace(
         )
 
 
+def _worker_run_cloud_model(
+    worker_id: int,
+    trace_inputs: list[tuple[str, str, str | None]],
+    *,
+    output_dir: str,
+    container_executable: str,
+    network_mode: str,
+    replay_speed: float,
+    command_timeout_s: float,
+    warmup_skip_iterations: int,
+    arrival_mode: str,
+    arrival_rate_per_s: float | None,
+    arrival_seed: int | None,
+    cpu_limit: float | None,
+    resource_monitoring: str = "auto",
+    pmu_monitoring: str = "auto",
+    ksys_monitoring: str = "auto",
+) -> dict[str, Any]:
+    """Run a subset of cloud_model sessions in a subprocess.
+
+    Each worker process owns its own asyncio event loop, so N agents
+    spread across *workers* processes see N/workers agents per event
+    loop — dramatically reducing sleep-wake contention.
+    """
+    # ── Setup logging for this worker ──────────────────────────────
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            f"%(asctime)s [Worker-{worker_id}] "
+            f"%(levelname)s %(name)s: %(message)s"
+        ),
+        force=True,
+    )
+    _worker_logger = logging.getLogger(f"worker.{worker_id}")
+
+    async def _run() -> dict[str, Any]:
+        # 1. Load sessions from paths
+        loaded_sessions: list[LoadedTraceSession] = []
+        for source_path, task_path, img_ovr in trace_inputs:
+            loaded = _load_trace_session(
+                Path(source_path), Path(task_path), img_ovr,
+            )
+            loaded_sessions.append(loaded)
+        _ensure_unique_agent_ids(loaded_sessions)
+        _validate_loaded_sessions(
+            loaded_sessions,
+            mode="cloud_model",
+            replay_speed=replay_speed,
+        )
+
+        # 2. Compute monitoring policy — respect the user's CLI flags
+        #    (passed through from the main process); compute host/container
+        #    flags from this worker's own session subset.
+        has_host = any(_is_host_mode(s) for s in loaded_sessions)
+        has_container = any(
+            not _is_host_mode(s) for s in loaded_sessions
+        )
+        monitoring_policy = resolve_simulate_monitoring(
+            resource=resource_monitoring,
+            pmu=pmu_monitoring,
+            ksys=ksys_monitoring,
+            concurrent=True,
+            has_host_session=has_host,
+            has_container_session=has_container,
+        )
+        output_path = Path(output_dir)
+
+        # 3. Ensure file-descriptor headroom for this worker's sessions.
+        _ensure_fd_headroom(len(loaded_sessions), concurrent=True)
+
+        # 4. Prepare all sessions
+        prepared_sessions: list[PreparedTraceSession] = []
+        try:
+            for loaded in loaded_sessions:
+                if _is_host_mode(loaded):
+                    prepared = await _prepare_host_session(loaded)
+                else:
+                    prepare_kwargs: dict[str, Any] = {
+                        "container_executable": container_executable,
+                        "network_mode": network_mode,
+                    }
+                    if cpu_limit is not None:
+                        prepare_kwargs["cpu_limit"] = cpu_limit
+                    prepared = await _prepare_container_session(
+                        loaded, **prepare_kwargs,
+                    )
+                prepared.monitoring_policy = monitoring_policy
+
+                # Setup: output dir + optional sampler
+                instance_dir = output_path / loaded.agent_id
+                attempt_n = _next_attempt_number(instance_dir)
+                task_dir = instance_dir / f"attempt_{attempt_n}"
+                task_dir.mkdir(parents=True, exist_ok=True)
+                prepared.task_output_dir = task_dir
+                if (
+                    prepared.container is not None
+                    and monitoring_policy.resource_enabled
+                ):
+                    sampler = ContainerStatsSampler(
+                        container_id=prepared.container.container_id,
+                        interval_s=0.5,
+                        executable=prepared.container.container_executable,
+                        enable_pmu=monitoring_policy.pmu_enabled,
+                        enable_memory_bandwidth=(
+                            monitoring_policy.memory_bandwidth_enabled
+                        ),
+                    )
+                    sampler.start()
+                    prepared.sampler = sampler
+
+                prepared_sessions.append(prepared)
+
+            _worker_logger.info(
+                "Prepared %d/%d sessions",
+                len(prepared_sessions), len(loaded_sessions),
+            )
+        except Exception as exc:
+            _worker_logger.error(
+                "Preparation failed: %s", exc, exc_info=True,
+            )
+            for ps in prepared_sessions:
+                await _teardown_one_worker(ps, monitoring_policy)
+            return {"worker_id": worker_id, "success": False, "error": str(exc)}
+
+        # 5. Run replay
+        replay_ok = True
+        replay_error: str | None = None
+        offsets = build_arrival_offsets(
+            len(prepared_sessions),
+            arrival_mode=arrival_mode,
+            arrival_rate_per_s=arrival_rate_per_s,
+            arrival_seed=arrival_seed,
+        )
+        try:
+            await _run_cloud_model_replay(
+                prepared_sessions,
+                trace_logger=None,  # per-agent files
+                replay_speed=replay_speed,
+                command_timeout_s=command_timeout_s,
+                warmup_skip_iterations=warmup_skip_iterations,
+                arrival_offsets=offsets,
+            )
+        except Exception as exc:
+            _worker_logger.error(
+                "Replay failed: %s", exc, exc_info=True,
+            )
+            replay_ok = False
+            replay_error = str(exc)
+
+        # 6. Teardown
+        for ps in prepared_sessions:
+            try:
+                await _teardown_one_worker(ps, monitoring_policy)
+            except Exception as exc:
+                _worker_logger.warning(
+                    "Teardown error for %s: %s",
+                    ps.loaded.agent_id, exc,
+                )
+
+        return {
+            "worker_id": worker_id,
+            "success": replay_ok,
+            "n_sessions": len(prepared_sessions),
+            "error": replay_error,
+        }
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        _worker_logger.error("Fatal worker error: %s", exc, exc_info=True)
+        return {"worker_id": worker_id, "success": False, "error": str(exc)}
+
+
+async def _teardown_one_worker(
+    prepared: PreparedTraceSession,
+    monitoring_policy: MonitoringPolicy,
+) -> None:
+    """Teardown one prepared session: stop sampler, write resources, stop container.
+
+    Used by both the main process (via the _teardown_one closure) and worker
+    subprocesses.  Must be a module-level function so it is picklable by
+    ProcessPoolExecutor.
+    """
+    session_resource_enabled = (
+        monitoring_policy.resource_enabled and prepared.container is not None
+    )
+    if prepared.sampler is not None:
+        samples = prepared.sampler.stop()
+        prepared.sampler = None
+        if prepared.task_output_dir is not None:
+            summary = summarize_samples(samples)
+            summary["monitoring"] = {
+                **monitoring_policy.to_dict(),
+                "status": "collected" if samples else "enabled_no_samples",
+            }
+            attempt_layout.write_resources_json(
+                prepared.task_output_dir, samples, summary,
+            )
+            logger.info(
+                "Wrote %d resource samples → %s",
+                len(samples),
+                prepared.task_output_dir / "resources.json",
+            )
+    elif prepared.task_output_dir is not None and not prepared._resources_written:
+        summary = summarize_samples([])
+        summary["monitoring_disabled"] = not session_resource_enabled
+        summary["monitoring"] = {
+            **monitoring_policy.to_dict(),
+            "status": (
+                "disabled" if not session_resource_enabled
+                else "enabled_no_samples"
+            ),
+        }
+        attempt_layout.write_resources_json(
+            prepared.task_output_dir, samples=[], summary=summary,
+        )
+    ctr = prepared.container
+    if ctr is None:
+        if prepared.host_agent is not None:
+            await prepared.host_agent.stop()
+        return
+    if ctr.agent is not None:
+        await ctr.agent.stop()
+    await asyncio.to_thread(
+        stop_task_container,
+        ctr.container_id,
+        executable=ctr.container_executable,
+    )
+    prepared.container = None
+
+
 async def simulate(
     *,
     source_trace: Path | None = None,
@@ -1722,6 +1955,7 @@ async def simulate(
     trace_assignment: str = "manifest",
     trace_assignment_seed: int | None = None,
     cpu_limit: float | None = None,
+    workers: int = 1,
 ) -> Path:
     if source_trace is not None and trace_manifest is not None:
         raise ValueError("source_trace and trace_manifest are mutually exclusive")
@@ -1877,55 +2111,8 @@ async def simulate(
         prepared.sampler = sampler
 
     async def _teardown_one(prepared: PreparedTraceSession) -> None:
-        session_resource_enabled = (
-            monitoring_policy.resource_enabled and prepared.container is not None
-        )
-        if prepared.sampler is not None:
-            samples = prepared.sampler.stop()
-            prepared.sampler = None  # mark torn down
-            if prepared.task_output_dir is not None:
-                summary = summarize_samples(samples)
-                summary["monitoring"] = {
-                    **monitoring_policy.to_dict(),
-                    "status": "collected" if samples else "enabled_no_samples",
-                }
-                attempt_layout.write_resources_json(
-                    prepared.task_output_dir, samples, summary,
-                )
-                logger.info(
-                    "Wrote %d resource samples → %s",
-                    len(samples),
-                    prepared.task_output_dir / "resources.json",
-                )
-        elif prepared.task_output_dir is not None and not prepared._resources_written:
-            summary = summarize_samples([])
-            summary["monitoring_disabled"] = not session_resource_enabled
-            summary["monitoring"] = {
-                **monitoring_policy.to_dict(),
-                "status": (
-                    "disabled"
-                    if not session_resource_enabled
-                    else "enabled_no_samples"
-                ),
-            }
-            attempt_layout.write_resources_json(
-                prepared.task_output_dir,
-                samples=[],
-                summary=summary,
-            )
-        ctr = prepared.container
-        if ctr is None:
-            if prepared.host_agent is not None:
-                await prepared.host_agent.stop()
-            return
-        if ctr.agent is not None:
-            await ctr.agent.stop()
-        await asyncio.to_thread(
-            stop_task_container,
-            ctr.container_id,
-            executable=ctr.container_executable,
-        )
-        prepared.container = None  # mark torn down
+        """Thin closure that delegates to the standalone worker teardown."""
+        await _teardown_one_worker(prepared, monitoring_policy)
 
     run_id = _build_run_id(mode=mode, model=model)
     # Concurrent cloud-model uses per-agent trace files (no shared
@@ -2014,84 +2201,182 @@ async def simulate(
                     # Immediately write per-task trace for this session
                     _flush_session_trace(trace_logger.path, prepared)
         else:
-            # ── Concurrent cloud-model: concurrent prepare → concurrent replay ──
-            # Container preparation is I/O-bound (docker run, agent start).
-            # A semaphore caps concurrency to avoid overwhelming the Docker
-            # daemon while still being orders of magnitude faster than serial
-            # preparation for high --num-agents values.
-            prep_sem = asyncio.Semaphore(min(20, max(1, len(loaded_sessions))))
+            # ── Concurrent cloud-model ──
+            # Local helper: concurrent prepare + replay for ONE process's batch
+            async def _concurrent_run(
+                sessions: list[LoadedTraceSession],
+            ) -> list[PreparedTraceSession]:
+                """Prepare, setup, and replay *sessions* in this process."""
+                prep_sem = asyncio.Semaphore(min(20, max(1, len(sessions))))
+                total = len(sessions)
+                _done: list[int] = [0]
+                _report_every = max(1, min(20, total // 10))
 
-            total_sessions = len(loaded_sessions)
-            # Lightweight stdout progress for long-running preparation phases
-            # (tens→hundreds of containers).  A py-list cell holds a mutable
-            # integer that the inner closure can mutate via __setitem__.
-            _done: list[int] = [0]
-            _report_every = max(1, min(20, total_sessions // 10))
-
-            async def _prepare_with_limit(
-                loaded: LoadedTraceSession,
-            ) -> PreparedTraceSession:
-                async with prep_sem:
-                    prepared = await _prepare_one(loaded)
-                    try:
-                        await _setup_one(prepared)
-                    except Exception:
-                        # _setup_one failed after the container was already
-                        # started by _prepare_one — tear down to avoid a
-                        # container leak.
-                        await _teardown_one(prepared)
-                        raise
-                    _done[0] += 1
-                    if _done[0] % _report_every == 0 or _done[0] == total_sessions:
-                        print(
-                            f"  [prepare] {_done[0]}/{total_sessions} "
-                            f"containers ready",
-                            flush=True,
-                        )
-                    return prepared
-
-            print(
-                f"  [prepare] starting {total_sessions} containers "
-                f"(concurrency={prep_sem._value})...",
-                flush=True,
-            )
-            results = await asyncio.gather(*[
-                _prepare_with_limit(loaded) for loaded in loaded_sessions
-            ], return_exceptions=True)
-            print(
-                f"  [prepare] all {_done[0]} containers ready",
-                flush=True,
-            )
-
-            for i, result in enumerate(results):
-                if isinstance(result, BaseException):
-                    # Tear down any sessions that were already prepared so
-                    # containers don't leak, then surface the first failure.
-                    for ps in prepared_sessions:
+                async def _prepare_with_limit(
+                    loaded: LoadedTraceSession,
+                ) -> PreparedTraceSession:
+                    async with prep_sem:
+                        p = await _prepare_one(loaded)
                         try:
-                            await _teardown_one(ps)
+                            await _setup_one(p)
                         except Exception:
-                            pass
-                    raise SimulateError(
-                        f"Preparation failed for session {i} "
-                        f"({loaded_sessions[i].agent_id}): {result}"
-                    ) from result
-                prepared_sessions.append(result)
+                            await _teardown_one(p)
+                            raise
+                        _done[0] += 1
+                        if _done[0] % _report_every == 0 or _done[0] == total:
+                            print(
+                                f"  [prepare] {_done[0]}/{total} containers ready",
+                                flush=True,
+                            )
+                        return p
 
-            offsets = build_arrival_offsets(
-                len(prepared_sessions),
-                arrival_mode=arrival_mode,
-                arrival_rate_per_s=arrival_rate_per_s,
-                arrival_seed=arrival_seed,
-            )
-            await _run_cloud_model_replay(
-                prepared_sessions,
-                trace_logger=trace_logger,
-                replay_speed=replay_speed,
-                command_timeout_s=command_timeout_s,
-                warmup_skip_iterations=warmup_skip_iterations,
-                arrival_offsets=offsets,
-            )
+                print(
+                    f"  [prepare] starting {total} containers "
+                    f"(concurrency={prep_sem._value})...",
+                    flush=True,
+                )
+                results = await asyncio.gather(
+                    *[_prepare_with_limit(s) for s in sessions],
+                    return_exceptions=True,
+                )
+                print(f"  [prepare] all {_done[0]} containers ready", flush=True)
+
+                out: list[PreparedTraceSession] = []
+                for i, r in enumerate(results):
+                    if isinstance(r, BaseException):
+                        for p in out:
+                            try:
+                                await _teardown_one(p)
+                            except Exception:
+                                pass
+                        raise SimulateError(
+                            f"Preparation failed for session {i} "
+                            f"({sessions[i].agent_id}): {r}"
+                        ) from r
+                    out.append(r)
+
+                offsets = build_arrival_offsets(
+                    len(out),
+                    arrival_mode=arrival_mode,
+                    arrival_rate_per_s=arrival_rate_per_s,
+                    arrival_seed=arrival_seed,
+                )
+                await _run_cloud_model_replay(
+                    out,
+                    trace_logger=trace_logger,
+                    replay_speed=replay_speed,
+                    command_timeout_s=command_timeout_s,
+                    warmup_skip_iterations=warmup_skip_iterations,
+                    arrival_offsets=offsets,
+                )
+                return out
+
+            if workers > 1:
+                # ── Multi-process concurrent ────────────────────────────────
+                # Split N agents across W worker processes so each event loop
+                # only handles N/W agents — eliminating single-loop congestion.
+                n_total = len(loaded_sessions)
+                n_workers = min(workers, n_total)
+                chunk_size, remainder = divmod(n_total, n_workers)
+                chunks: list[list[LoadedTraceSession]] = []
+                idx = 0
+                for w in range(n_workers):
+                    sz = chunk_size + (1 if w < remainder else 0)
+                    chunks.append(loaded_sessions[idx:idx + sz])
+                    idx += sz
+
+                main_chunk = chunks[0]
+                worker_chunks = chunks[1:]
+
+                print(
+                    f"  [workers] {n_total} sessions × {n_workers} workers "
+                    f"({len(main_chunk)} main / "
+                    f"{[len(c) for c in worker_chunks]} workers)",
+                    flush=True,
+                )
+
+                # Helper: extract picklable trace-input tuple from a session
+                def _to_input(s: LoadedTraceSession) -> tuple[str, str, str | None]:
+                    return (
+                        str(s.source_trace),
+                        str(s.task_source),
+                        s.docker_image_override,
+                    )
+
+                # Spawn worker processes (they independently prepare, replay,
+                # teardown and write per-agent trace files into output_path).
+                # NOTE: Do NOT use `with ProcessPoolExecutor(...)` here — its
+                # __exit__ calls shutdown(wait=True) which BLOCKS the event
+                # loop thread until ALL workers finish, preventing the main
+                # process from processing its chunk in parallel.
+                worker_futures: list[Any] = []
+                worker_executor: ProcessPoolExecutor | None = None
+                if worker_chunks:
+                    pool_workers = min(len(worker_chunks), os.cpu_count() or 1)
+                    worker_executor = ProcessPoolExecutor(max_workers=pool_workers)
+                    for wid, chunk in enumerate(worker_chunks, start=1):
+                        inputs = [_to_input(s) for s in chunk]
+                        fut = worker_executor.submit(
+                            _worker_run_cloud_model,
+                            wid,
+                            inputs,
+                            output_dir=str(output_path),
+                            container_executable=(
+                                container_executable or "docker"
+                            ),
+                            network_mode=network_mode,
+                            replay_speed=replay_speed,
+                            command_timeout_s=command_timeout_s,
+                            warmup_skip_iterations=warmup_skip_iterations,
+                            arrival_mode=arrival_mode,
+                            arrival_rate_per_s=arrival_rate_per_s,
+                            arrival_seed=arrival_seed,
+                            cpu_limit=cpu_limit,
+                            resource_monitoring=resource_monitoring,
+                            pmu_monitoring=pmu_monitoring,
+                            ksys_monitoring=ksys_monitoring,
+                        )
+                        worker_futures.append(fut)
+
+                # Main process handles its chunk IN PARALLEL with workers
+                print(
+                    f"  [workers] main process handling "
+                    f"{len(main_chunk)} sessions...",
+                    flush=True,
+                )
+                if main_chunk:
+                    prepared_sessions = await _concurrent_run(main_chunk)
+                else:
+                    prepared_sessions = []
+
+                # Wait for all workers and check results
+                worker_errors: list[str] = []
+                for fut in worker_futures:
+                    result = await asyncio.wrap_future(fut)
+                    if not result.get("success"):
+                        wid = result.get("worker_id")
+                        err = result.get("error") or "unknown error"
+                        worker_errors.append(f"Worker {wid}: {err}")
+                        logger.error(
+                            "Worker %d FAILED: %s",
+                            wid, err,
+                        )
+                if worker_errors:
+                    raise SimulateError(
+                        f"{len(worker_errors)}/{len(worker_futures)} "
+                        f"workers failed: {'; '.join(worker_errors)}"
+                    )
+
+                # Shutdown executor without blocking the event loop.
+                # The futures are already resolved so this is a formality.
+                if worker_executor is not None:
+                    await asyncio.to_thread(worker_executor.shutdown, wait=True)
+
+                print("  [workers] all workers completed", flush=True)
+
+            else:
+                # ── Single-process concurrent (original behaviour) ─────
+                prepared_sessions = await _concurrent_run(loaded_sessions)
     finally:
         if ksys_session is not None:
             ksys_session.stop()
@@ -2128,6 +2413,7 @@ async def simulate(
 
     # ── Auto-generate HTML viz (concurrent, offloaded to threads) ─
     viz_tasks: list[tuple[Path, Path]] = []
+    # Collect task dirs from main process sessions
     for prepared in prepared_sessions:
         task_dir = prepared.task_output_dir
         if task_dir is None or not task_dir.is_dir():
@@ -2135,6 +2421,28 @@ async def simulate(
         trace_jsonl = task_dir / "trace.jsonl"
         if trace_jsonl.exists():
             viz_tasks.append((task_dir, task_dir / "trace_viz.html"))
+    # In multi-process mode, also scan output_path for worker-created dirs
+    # that aren't already in prepared_sessions.
+    if workers > 1:
+        for agent_dir in sorted(output_path.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            # Already handled by main process?
+            already = any(
+                p.task_output_dir is not None
+                and p.task_output_dir.parent == agent_dir
+                for p in prepared_sessions
+            )
+            if already:
+                continue
+            for attempt_dir in sorted(agent_dir.iterdir()):
+                if not attempt_dir.is_dir():
+                    continue
+                trace_jsonl = attempt_dir / "trace.jsonl"
+                if trace_jsonl.exists():
+                    viz_tasks.append(
+                        (attempt_dir, attempt_dir / "trace_viz.html")
+                    )
 
     if viz_tasks:
         logger.info("Generating HTML viz for %d sessions...", len(viz_tasks))
