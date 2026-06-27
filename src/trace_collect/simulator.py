@@ -1195,7 +1195,9 @@ async def _run_cloud_model_replay(
         # return_exceptions=True prevents the cascade failure where one
         # task raising causes trace_logger.close() in the outer finally
         # block while other tasks are still writing ("I/O operation on
-        # closed file").
+        # closed file").  When per-agent logging is active (trace_logger
+        # is None), each session writes to its own independent file so
+        # there is no shared-handle risk.
         results = await asyncio.gather(
             *[
                 _delayed_replay(
@@ -1238,7 +1240,7 @@ async def _run_cloud_model_replay(
 async def _replay_cloud_model_session(
     prepared_session: PreparedTraceSession,
     *,
-    trace_logger: TraceLogger,
+    trace_logger: TraceLogger | None = None,
     replay_zero_monotonic: float,
     replay_speed: float,
     command_timeout_s: float,
@@ -1261,6 +1263,48 @@ async def _replay_cloud_model_session(
     wall_start = time.time()
     succeeded_actions = 0
     failed_actions = 0
+
+    # Virtual timeline: all ts_start/ts_end are computed relative to
+    # wall_start to avoid event-loop queue distortion when many sessions
+    # replay concurrently.  session_virtual_s tracks cumulative intended /
+    # actual action durations and is never derived from time.time().
+    session_virtual_s = 0.0
+
+    # ── Per-agent trace logger (avoids shared-file contention) ─────
+    # When *trace_logger* is None and a per-agent output directory is
+    # available, each session writes to its own trace.jsonl.  This
+    # eliminates the serialisation bottleneck of a single shared file
+    # with 640 concurrent flush() calls.
+    _own_logger: TraceLogger | None = None
+    _log: TraceLogger
+    if trace_logger is not None:
+        _log = trace_logger
+    elif prepared_session.task_output_dir is not None:
+        _own_logger = TraceLogger(
+            prepared_session.task_output_dir, "trace",
+        )
+        _log = _own_logger
+        # Write per-agent metadata (equivalent to _log_trace_metadata
+        # but scoped to this single session).
+        _log.log_metadata(
+            scaffold=loaded.scaffold,
+            execution_environment=_execution_environment(loaded),
+            mode="simulate",
+            simulate_mode="cloud_model",
+            replay_speed=replay_speed,
+            source_trace_count=1,
+            source_models=[source_model],
+            source_model=source_model,
+            model=source_model,
+            replay_target="cloud_replay",
+            instance_id=loaded.agent_id,
+            source_trace=str(loaded.source_trace),
+            network_mode="host",
+            cpu_limit=None,
+            monitoring={},
+        )
+    else:
+        _log = trace_logger  # type: ignore[assignment] — unreachable, satisfies type checker
 
     # Accumulate aggregate metrics from *replayed* actions so the
     # summary (and HTML viz header) reflects actual replay timing,
@@ -1312,10 +1356,12 @@ async def _replay_cloud_model_session(
         # original trace — we don't wait for the original ts_start.
         try:
             if action_type == "llm_call":
-                record_ts_start = time.time()
-                if source_duration_s > 0:
-                    await asyncio.sleep(source_duration_s / replay_speed)
-                record_ts_end = time.time()
+                intended_duration_s = source_duration_s / replay_speed
+                record_ts_start = wall_start + session_virtual_s
+                if intended_duration_s > 0:
+                    await asyncio.sleep(intended_duration_s)
+                record_ts_end = record_ts_start + intended_duration_s
+                session_virtual_s += intended_duration_s
                 prompt_tokens = int(data.get("prompt_tokens") or 0)
                 completion_tokens = int(data.get("completion_tokens") or 0)
                 record = _make_trace_action(
@@ -1326,11 +1372,10 @@ async def _replay_cloud_model_session(
                     ts_start=record_ts_start,
                     ts_end=record_ts_end,
                     data={
-                        "messages_in": data.get("messages_in"),
                         "raw_response": data.get("raw_response", {}),
                         "prompt_tokens": data.get("prompt_tokens", 0),
                         "completion_tokens": data.get("completion_tokens", 0),
-                        "llm_latency_ms": (record_ts_end - record_ts_start) * 1000,
+                        "llm_latency_ms": intended_duration_s * 1000,
                         "simulate_source": str(loaded.source_trace),
                         "source_llm_latency_ms": data.get("llm_latency_ms"),
                         "replay_mode": "cloud_model",
@@ -1340,12 +1385,12 @@ async def _replay_cloud_model_session(
                         },
                     },
                 )
-                trace_logger.log_trace_action(loaded.agent_id, record)
+                _log.log_trace_action(loaded.agent_id, record)
                 succeeded_actions += 1
                 llm_call_time_count += 1
                 total_tokens += prompt_tokens
                 total_tokens += completion_tokens
-                total_llm_ms += (record_ts_end - record_ts_start) * 1000
+                total_llm_ms += intended_duration_s * 1000
                 continue
 
             if action_type != "tool_exec":
@@ -1365,7 +1410,7 @@ async def _replay_cloud_model_session(
                 )
                 continue
 
-            record_ts_start = time.time()
+            record_ts_start = wall_start + session_virtual_s
             source_duration_ms = float(data.get("duration_ms") or 0.0)
 
             # ── Resolve which agent executes the tool ──────────────
@@ -1385,17 +1430,23 @@ async def _replay_cloud_model_session(
                     tool_args,
                     command_timeout_s,
                 )
+                actual_duration_s = max(0.0, duration_ms / 1000.0)
+                record_ts_end = record_ts_start + actual_duration_s
+                session_virtual_s += actual_duration_s
                 replay_source = (
                     "executed_on_host"
                     if host_agent is not None
                     else "executed_in_container"
                 )
             elif tool_name is not None and tool_name.startswith("mcp_"):
-                if source_duration_ms > 0:
-                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
+                intended_duration_s = source_duration_ms / 1000.0 / replay_speed
+                if intended_duration_s > 0:
+                    await asyncio.sleep(intended_duration_s)
                 tool_result = data.get("tool_result", "")
                 tool_success = bool(data.get("success", True))
-                duration_ms = (time.time() - record_ts_start) * 1000
+                duration_ms = intended_duration_s * 1000
+                record_ts_end = record_ts_start + intended_duration_s
+                session_virtual_s += intended_duration_s
                 replay_source = "replayed_from_trace"
             else:
                 logger.warning(
@@ -1405,12 +1456,14 @@ async def _replay_cloud_model_session(
                     tool_name,
                 )
                 replay_source = "replayed_from_trace"
+                intended_duration_s = source_duration_ms / 1000.0 / replay_speed
                 tool_result = data.get("tool_result", data.get("result", ""))
                 tool_success = bool(data.get("success", not data.get("error")))
-                if source_duration_ms > 0:
-                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
-                duration_ms = (time.time() - record_ts_start) * 1000
-            record_ts_end = time.time()
+                if intended_duration_s > 0:
+                    await asyncio.sleep(intended_duration_s)
+                duration_ms = intended_duration_s * 1000
+                record_ts_end = record_ts_start + intended_duration_s
+                session_virtual_s += intended_duration_s
             _classified_name = classify_exec_tool_name(tool_name, tool_args)
             tool_record = _make_trace_action(
                 loaded=loaded,
@@ -1441,7 +1494,7 @@ async def _replay_cloud_model_session(
                     },
                 },
             )
-            trace_logger.log_trace_action(loaded.agent_id, tool_record)
+            _log.log_trace_action(loaded.agent_id, tool_record)
             succeeded_actions += 1
             total_tool_ms += duration_ms
             tool_ms_by_name[_classified_name] = (
@@ -1494,7 +1547,7 @@ async def _replay_cloud_model_session(
                 )
             prepared_session._resources_written = True
 
-        trace_logger.log_summary(
+        _log.log_summary(
             loaded.agent_id,
             _make_trace_summary(
                 loaded=loaded,
@@ -1513,6 +1566,7 @@ async def _replay_cloud_model_session(
                     "llm_call_time_count": llm_call_time_count,
                     "timing": {
                         "agent_exec_s": _elapsed,
+                        "agent_virtual_s": session_virtual_s,
                         "container_setup_s": prepared_session.container_setup_s,
                     },
                 },
@@ -1525,6 +1579,9 @@ async def _replay_cloud_model_session(
             exc,
         )
         raise
+    finally:
+        if _own_logger is not None:
+            _own_logger.close()
 
 
 def _split_trace_by_agent(
@@ -1884,21 +1941,26 @@ async def simulate(
         prepared.container = None  # mark torn down
 
     run_id = _build_run_id(mode=mode, model=model)
-    trace_logger = TraceLogger(output_path, run_id)
-    _log_trace_metadata(
-        trace_logger=trace_logger,
-        mode=mode,
-        sessions=loaded_sessions,
-        replay_speed=replay_speed,
-        source_trace=source_trace,
-        source_dir=source_dir,
-        trace_manifest=trace_manifest,
-        api_base=api_base,
-        model=model,
-        network_mode=network_mode,
-        monitoring_policy=monitoring_policy,
-        cpu_limit=cpu_limit,
-    )
+    # Concurrent cloud-model uses per-agent trace files (no shared
+    # file contention); skip the combined trace_logger.
+    if concurrent:
+        trace_logger = None
+    else:
+        trace_logger = TraceLogger(output_path, run_id)
+        _log_trace_metadata(
+            trace_logger=trace_logger,
+            mode=mode,
+            sessions=loaded_sessions,
+            replay_speed=replay_speed,
+            source_trace=source_trace,
+            source_dir=source_dir,
+            trace_manifest=trace_manifest,
+            api_base=api_base,
+            model=model,
+            network_mode=network_mode,
+            monitoring_policy=monitoring_policy,
+            cpu_limit=cpu_limit,
+        )
     ksys_session = (
         KsysSession.start(output_dir=output_path, log_dir=output_path)
         if monitoring_policy.ksys_enabled
@@ -2070,7 +2132,11 @@ async def simulate(
             )
             logger.info("Teardown complete.")
 
-    trace_file = output_path / f"{run_id}.jsonl"
+    trace_file: Path
+    if trace_logger is not None:
+        trace_file = trace_logger.path
+    else:
+        trace_file = output_path  # per-agent files already written
     logger.info("Simulate complete [%s] -> %s", mode, trace_file)
 
     # ── Auto-generate HTML viz (concurrent, offloaded to threads) ─
