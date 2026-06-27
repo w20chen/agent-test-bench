@@ -50,6 +50,10 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 CONTAINER_EXE="${CONTAINER_EXE:-docker}"
 REPLAY_SPEED="${REPLAY_SPEED:-1}"
 SWEEP_VALUES="${SWEEP_VALUES:-40 80 160 320}"
+# CPU_LIMIT: per-container CPU quota via Docker --cpus=N.
+# Default: 1 (1 core per agent, CFS-throttled).
+# Set to empty (CPU_LIMIT="") for native Linux scheduling with no throttle.
+# Fractional values (e.g. 0.5) are supported.
 CPU_LIMIT="${CPU_LIMIT:-1}"
 BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-${REPO_ROOT}/traces/simulate/swe-rebench}"
 
@@ -123,8 +127,12 @@ echo "Host memory:          ${HOST_MEM}"
 
 # Warn if total allocation exceeds host cores at the high end
 MAX_N=$(echo "${SWEEP_VALUES}" | tr ' ' '\n' | sort -n | tail -1)
-TOTAL_ALLOC=$(echo "${MAX_N} * ${CPU_LIMIT}" | bc -l 2>/dev/null || echo "${MAX_N}")
-echo "Max total CPU alloc:  ${TOTAL_ALLOC} (${MAX_N} agents × ${CPU_LIMIT} cpu)"
+if [[ -n "${CPU_LIMIT}" ]]; then
+  TOTAL_ALLOC=$(echo "${MAX_N} * ${CPU_LIMIT}" | bc -l 2>/dev/null || echo "${MAX_N}")
+  echo "Max total CPU alloc:  ${TOTAL_ALLOC} (${MAX_N} agents × ${CPU_LIMIT} cpu)"
+else
+  echo "CPU limit:            none (native Linux scheduling, no CFS throttle)"
+fi
 
 # File descriptor limit check.  Each concurrent container agent holds 3
 # pipes (stdin/stdout/stderr); N agents need at least N*4 fds plus
@@ -155,9 +163,13 @@ echo "Host: ${HOST_CORES} cores, ${HOST_MEM} RAM" | tee -a "${SUMMARY_FILE}"
 echo | tee -a "${SUMMARY_FILE}"
 
 for N in ${SWEEP_VALUES}; do
-  _hr "Sweep: N=${N} agents × ${CPU_LIMIT} cpu"
-
-  OUTPUT_DIR="${BASE_OUTPUT_DIR}/sweep_${N}a_${CPU_LIMIT}cpu"
+  if [[ -n "${CPU_LIMIT}" ]]; then
+    _hr "Sweep: N=${N} agents × ${CPU_LIMIT} cpu"
+    OUTPUT_DIR="${BASE_OUTPUT_DIR}/sweep_${N}a_${CPU_LIMIT}cpu"
+  else
+    _hr "Sweep: N=${N} agents (no CPU limit)"
+    OUTPUT_DIR="${BASE_OUTPUT_DIR}/sweep_${N}a_nolimit"
+  fi
   mkdir -p "${OUTPUT_DIR}"
 
   RUN_LOG="${OUTPUT_DIR}/simulate.log"
@@ -199,7 +211,7 @@ for N in ${SWEEP_VALUES}; do
     --container "${CONTAINER_EXE}" \
     --num-agents "${N}" \
     --trace-assignment manifest \
-    --cpu-limit "${CPU_LIMIT}" \
+    ${CPU_LIMIT:+--cpu-limit "${CPU_LIMIT}"} \
     --resource-monitoring on \
     --pmu-monitoring off \
     --ksys-monitoring off \

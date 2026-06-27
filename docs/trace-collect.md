@@ -748,13 +748,43 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
 ## CPU Core Limiting
 
 `--cpu-limit N` caps the CPU cores available to the entire simulate run.
+**This flag is optional** — when omitted, no CPU limit is applied and
+containers use native Linux CFS scheduling without quota enforcement.
+
+### When to use --cpu-limit
+
+| Scenario | Recommendation |
+|----------|---------------|
+| cloud_model single-trace replay (I/O-bound) | **Omit** — CFS throttle adds overhead with no benefit |
+| cloud_model sweep / over-subscription stress test | **Set to 1** — fair per-agent allocation, reproducible contention curves |
+| local_model replay (real LLM calls, CPU-bound) | Set to avoid noisy-neighbor contention |
+| Over-subscription experiment (> host cores) | Set to model resource-constrained deployments |
+| Reproducible benchmarking | Set for consistent per-container allocation |
+
+### CFS semantics (container mode)
+
+When `--cpu-limit N` is set, Docker passes `--cpus=N` which writes to the
+cgroup CFS bandwidth controller:
+
+```
+cpu.cfs_period_us = 100000   (100 ms period)
+cpu.cfs_quota_us  = N × 100000
+```
+
+Each container may consume at most N cores per 100 ms period.  Unused quota
+is **not** transferred to other containers.  If all containers are CPU-bound
+simultaneously, this produces a sawtooth utilization pattern (all containers
+throttled after exhausting quota, then idle until the next period).
+
+**In practice**, cloud_model replay is I/O-bound (containers spend most time
+in `sleep` waiting for the next source-trace action or in `docker exec`
+waiting for shell commands).  Under these conditions CFS throttle has
+negligible effect — but it also provides no benefit over native scheduling.
 
 ### Container-mode traces
 
-Passes `--cpus=N` to `docker run` / `podman run`.  Docker uses the Linux
-CFS bandwidth controller (`cpu.cfs_quota_us` / `cpu.cfs_period_us`) to
-enforce the limit at the cgroup level.  The value may be fractional
-(e.g., `--cpu-limit 1.5` limits to 1.5 cores).
+Passes `--cpus=N` to `docker run` / `podman run`.  The value may be
+fractional (e.g., `--cpu-limit 0.5` limits to 0.5 cores).
 
 ```bash
 # Each container gets --cpus=4
@@ -762,6 +792,12 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
     --trace-manifest traces.json \
     --mode cloud_model --container docker \
     --cpu-limit 4
+
+# No CPU limit — native Linux scheduling, no CFS throttle
+PYTHONPATH=src python -m trace_collect.cli simulate \
+    --trace-manifest traces.json \
+    --mode cloud_model --container docker
+    # (no --cpu-limit flag)
 ```
 
 > **Guard:** `--cpu-limit <= 0` is rejected — the limit must be positive.
@@ -798,6 +834,9 @@ When `--cpu-limit` is set, the combined `trace.jsonl` metadata records:
 }
 ```
 
+When omitted, the `cpu_limit` key is absent from metadata, indicating
+native Linux scheduling was used.
+
 ---
 
 ## N:M Simulation Sweep
@@ -826,13 +865,14 @@ are directly comparable across N values.
 ┌───────────────────────────────────────────────────┐
 │  run_simulate_sweep.sh (orchestrator)             │
 │                                                   │
-│  for N in 40 80 160 320:                          │
+│  for N in ${SWEEP_VALUES}:                        │
 │    ┌──────────────────────────────────────┐       │
 │    │ 1. system_resource_monitor.py (1 Hz) │       │
 │    │    └→ whole-host CPU/mem/disk/net    │       │
 │    │                                      │       │
 │    │ 2. trace_collect.cli simulate        │       │
-│    │    --num-agents $N --cpu-limit 1     │       │
+│    │    --num-agents $N                   │       │
+│    │    [--cpu-limit $CPU_LIMIT]          │       │
 │    │    └→ per-container resources.json   │       │
 │    │                                      │       │
 │    │ 3. extract_agent_timeline.py         │       │
@@ -849,7 +889,9 @@ export SOURCE_TRACES_DIR=/path/to/traces/swe-rebench/model/timestamp
 
 # 2. (Optional) override defaults
 export SWEEP_VALUES="40 80 160 320"   # default
-export CPU_LIMIT=1                    # default: 1 core per agent
+export CPU_LIMIT=1                    # default when set: 1 core per agent
+#  export CPU_LIMIT=0.5              # fractional: 0.5 core per agent
+#  unset CPU_LIMIT                   # no CFS limit — native Linux scheduling
 export CONTAINER_EXE=docker           # default
 
 # 3. Run the sweep
@@ -860,15 +902,38 @@ The script validates prerequisites (trace count, Docker availability, host
 cores/memory) before starting, then runs each N sequentially.  On interrupt
 (Ctrl+C), it cleanly stops the active system monitor and exits.
 
+### CPU_LIMIT behavior
+
+| `CPU_LIMIT` | Docker flag | Scheduling | Output dir suffix |
+|-------------|-------------|------------|-------------------|
+| `unset` | *(none)* | Native CFS, no throttle | `sweep_${N}a_nolimit` |
+| `0.5` | `--cpus=0.5` | CFS quota 50ms/100ms | `sweep_${N}a_0.5cpu` |
+| `1` | `--cpus=1` | CFS quota 100ms/100ms | `sweep_${N}a_1cpu` |
+| `2` | `--cpus=2` | CFS quota 200ms/100ms | `sweep_${N}a_2cpu` |
+
+> **Recommendation for single-trace cloud_model replay:** omit `CPU_LIMIT` (unset).
+> Cloud replay is I/O-bound — containers spend most wall time in `sleep`
+> waiting for source-trace timing or in `docker exec` waiting for shell
+> commands.  CFS throttle provides no benefit but adds scheduling overhead.
+>
+> **Recommendation for sweep / over-subscription stress testing:** set `CPU_LIMIT=1`.
+> When N agents share M host cores (N ≫ M), `--cpus=1` enforces fair per-agent
+> allocation via Docker CFS quotas, producing clean, reproducible contention
+> curves.  Without a limit, the kernel scheduler may allocate CPU unevenly,
+> adding noise and reducing cross-experiment comparability.
+
 ### Output Per Experiment
 
-Each N produces a self-contained output directory:
+Each N produces a self-contained output directory.  The suffix reflects
+the `CPU_LIMIT` setting:
 
 ```text
-traces/simulate/swe-rebench/sweep_${N}a_1cpu/
-├── system_resources.jsonl       # whole-host resource timeline (new)
-├── system_viz.html              # interactive system resource charts (new)
-├── agent_timeline.jsonl         # per-agent lifecycle log (new)
+traces/simulate/swe-rebench/sweep_${N}a_${CPU_LIMIT}cpu/   # with CPU limit
+traces/simulate/swe-rebench/sweep_${N}a_nolimit/           # without CPU limit
+
+├── system_resources.jsonl       # whole-host resource timeline
+├── system_viz.html              # interactive system resource charts
+├── agent_timeline.jsonl         # per-agent lifecycle log
 ├── simulate_cloud_model_*.jsonl # combined trace
 ├── simulate.log                 # full simulate stdout/stderr
 ├── monitor.log                  # system monitor debug log
