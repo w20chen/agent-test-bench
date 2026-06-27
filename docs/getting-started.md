@@ -387,3 +387,34 @@ ls -lt traces/swe-rebench/deepseek-chat/<run-timestamp>/12rambau__sepal_ui-411/a
 curl -s https://api.deepseek.com/v1/models -H "Authorization: Bearer sk-your-key" | tail -1
 # Verify API connectivity
 ```
+
+### "docker compose: unknown command" or Docker exit code 125
+
+Terminal-Bench requires the Docker Compose **V2 plugin** (`docker compose` with
+a space), not the legacy standalone `docker-compose` (with a hyphen). If your
+system only has the legacy binary, `tb run` will fail with exit code 125 and
+the trace file will not be produced.
+
+**Symptoms:**
+
+- `docker compose version` prints "docker: unknown command: docker compose"
+- Terminal-Bench run errors show `docker compose ... build` returning exit
+  status 125
+- `agent-logs/` directory exists but is empty (no `openclaw-trace.jsonl`)
+
+**Fix — install the Compose plugin:**
+
+```bash
+# Ubuntu / Debian (preferred)
+sudo apt-get update && sudo apt-get install docker-compose-plugin
+
+# Or download standalone plugin binary (any Linux x86_64):
+DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+mkdir -p $DOCKER_CONFIG/cli-plugins
+curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+  -o $DOCKER_CONFIG/cli-plugins/docker-compose
+chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+
+# Verify
+docker compose version
+```

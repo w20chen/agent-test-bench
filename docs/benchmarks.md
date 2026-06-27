@@ -94,8 +94,26 @@ On ARM hosts, see the QEMU or native setup in
 ## Terminal-Bench
 
 Requires Python 3.12+, the project dependencies (including the `terminal-bench`
-package), and a working Docker daemon. Its pinned `terminal-bench-core` dataset
-is resolved through `configs/benchmarks/terminal_bench_registry.json`.
+package), a working Docker daemon, **and the Docker Compose V2 plugin**
+(`docker compose`, not the legacy `docker-compose`). Its pinned
+`terminal-bench-core` dataset is resolved through
+`configs/benchmarks/terminal_bench_registry.json`.
+
+**Prerequisite:** verify `docker compose version` works. If you see
+"docker: unknown command: docker compose", install the Compose plugin:
+
+```bash
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install docker-compose-plugin
+
+# Or download the standalone plugin binary (any Linux x86_64):
+DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+mkdir -p $DOCKER_CONFIG/cli-plugins
+curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+  -o $DOCKER_CONFIG/cli-plugins/docker-compose
+chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+docker compose version  # verify
+```
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
