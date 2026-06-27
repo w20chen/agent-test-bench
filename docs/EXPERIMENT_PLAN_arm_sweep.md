@@ -23,7 +23,7 @@ Simulate 40 SWE-rebench traces with N=40, 80, 160, 320 agent instances
 | `--resource-monitoring on` | ✅ Yes | `ContainerStatsSampler` per container |
 | `--pmu-monitoring off` | ✅ Yes | Explicit disable |
 | `--ksys-monitoring off` | ✅ Yes | Explicit disable |
-| `--mode cloud_model` concurrent | ✅ Yes | All agents replay concurrently via `asyncio.gather` |
+| `--mode cloud_model` concurrent | ✅ Yes | All agents replay concurrently; `--workers` distributes across independent asyncio event loops to eliminate single-loop scheduling bottleneck |
 | System-level resource monitor | ❌ **Not yet** | Only per-container stats exist |
 | Agent lifecycle log (start/end) | ❌ **Not yet** | Can extract from trace, but no structured log |
 

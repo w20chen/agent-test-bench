@@ -8,9 +8,11 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
 
 1. **Trace collect** — run agent scaffolds on benchmark tasks inside containers
    and record canonical JSONL traces (`python -m trace_collect.cli`).
-2. **Trace simulate** — replay collected traces under new arrival patterns or
-   against a local serving stack to measure scheduling-sensitive timing
-   (`python -m trace_collect.cli simulate`).
+2. **Trace simulate** — replay collected traces at scale (up to hundreds of
+   concurrent agents) to measure scheduling-sensitive timing under controlled
+   arrival patterns.  Uses `--workers` to distribute agents across independent
+   asyncio event loops for accurate timing at high concurrency.
+   (`python -m trace_collect.cli simulate`).  See [Trace Collect](docs/trace-collect.md#simulate-trace-replay).
 3. **Gantt viewer demo** — an interactive FastAPI + Solid.js viewer under
    `demo/gantt_viewer/` for inspecting traces as multi-lane Gantt charts with
    resource overlays. (*This is deprecated. Use `src/trace_collect/html_viz.py` instead. See [HTML Visualization](docs/resource-measurement.md#9-html-visualization) for the detail.*)

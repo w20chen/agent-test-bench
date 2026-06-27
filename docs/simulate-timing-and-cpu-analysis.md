@@ -70,6 +70,12 @@ coroutine 640: sleep(1.0) → 到期 → 排队
 
 这个排队延迟**正是压力测试想要测量的信号**——它反映了高并发下 event loop 的调度瓶颈。
 
+> **`--workers` 修复：** `--workers N` 将 agent 分配到 N 个独立进程中，每个进程有自己的
+> asyncio event loop。当 `--workers` 接近 agent 数（如 `--workers 320 --num-agents 640`，
+> 每 loop 仅 2 agent）时，event loop 排队延迟趋近于零。此时观察到的延迟来自 Docker daemon
+> 的容器调度、CPU/内存/IO 资源竞争，而非 Python 的 asyncio 记账开销。
+> 详见 [Worker Architecture](trace-collect.md#worker-architecture--event-loop-contention)。
+
 ---
 
 ## 2. Virtual Timeline 回滚分析
@@ -205,7 +211,9 @@ record_ts_end = time.time()                                # epoch
 | `source_llm_latency_ms` | 原始 trace 的 LLM 延迟（参考值） |
 
 > **压力测试信号**：高并发下 `llm_latency_ms > source_duration_s / replay_speed * 1000`，
-> 差值 = event loop 排队延迟。
+> 差值 = event loop 排队延迟。使用 `--workers` 可消除此延迟，让测量结果反映
+> 真实的系统资源竞争（Docker daemon 调度、CPU/内存/IO 压力），而非 Python
+> 的单线程记账开销。
 
 #### Tool Execution —— 实际执行（host/container agent）
 
@@ -227,7 +235,9 @@ record_ts_end = time.time()                                # epoch
 > **关键差异**：`ts_end - ts_start` ≠ `duration_ms`。
 > - `ts_end - ts_start` = 墙上总时间（含 pipe 传输 + event loop 调度）
 > - `duration_ms` = 容器内部纯执行时间
-> - **差值 = 系统调度开销**，这是压力测试的核心指标
+> - **差值 = 系统调度开销**。`--workers 1` 时含 event loop 延迟；
+>   `--workers` 足够大时仅含 Docker pipe 传输和系统调用开销。
+>   详见 [Worker Architecture](trace-collect.md#worker-architecture--event-loop-contention)。
 
 #### Tool Execution —— 不回放实际执行（MCP / 未知工具）
 
@@ -258,6 +268,7 @@ record_ts_end = time.time()
 指标: max(agent_exec_s) — 所有 agent 中最长的墙上耗时
 含义: 批次总耗时。理想情况下（无资源竞争），不论 N 多大，此值基本不变。
 现实: 随 N 增大而增大，说明 CPU/IO/event-loop 出现瓶颈。
+使用 `--workers` 可消除 event-loop 因素，使瓶颈分析聚焦于系统资源竞争。
 ```
 
 ### 4.2 Event Loop 排队延迟
@@ -265,15 +276,18 @@ record_ts_end = time.time()
 ```
 指标: llm_latency_ms - source_duration_s / replay_speed * 1000
 含义: asyncio.sleep 到期后，协程在 event loop 队列中等待的时间。
-现实: 随 N 增大而增大，说明 asyncio 单线程事件循环成为瓶颈。
+现实: --workers 1 时随 N 增大而增大，说明 asyncio 单线程事件循环成为瓶颈。
+使用 --workers 320（推荐，每 loop 2 agent）后此指标应趋近于零。
+若仍显著 > 0，检查 worker 数是否足够（N/workers <= ~4 则延迟可忽略）。
 ```
 
 ### 4.3 工具墙上开销
 
 ```
 指标: (ts_end - ts_start) * 1000 - duration_ms   （针对实际执行的工具）
-含义: pipe 传输 + event loop 调度开销。
-现实: 随 N 增大而增大。
+含义: pipe 传输 + event loop 调度开销。--workers 足够大时仅含 Docker pipe 传输和
+      系统调用开销（event loop 延迟 → 0）。
+现实: 随 N 增大而增大。使用 --workers 可分离 event loop 开销与 Docker 系统开销。
 ```
 
 ### 4.4 工具执行时间变化
