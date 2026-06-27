@@ -1170,7 +1170,7 @@ async def _delayed_replay(
 async def _run_cloud_model_replay(
     prepared_sessions: list[PreparedTraceSession],
     *,
-    trace_logger: TraceLogger,
+    trace_logger: TraceLogger | None,
     replay_speed: float,
     command_timeout_s: float,
     warmup_skip_iterations: int,
@@ -1264,12 +1264,6 @@ async def _replay_cloud_model_session(
     succeeded_actions = 0
     failed_actions = 0
 
-    # Virtual timeline: all ts_start/ts_end are computed relative to
-    # wall_start to avoid event-loop queue distortion when many sessions
-    # replay concurrently.  session_virtual_s tracks cumulative intended /
-    # actual action durations and is never derived from time.time().
-    session_virtual_s = 0.0
-
     # ── Per-agent trace logger (avoids shared-file contention) ─────
     # When *trace_logger* is None and a per-agent output directory is
     # available, each session writes to its own trace.jsonl.  This
@@ -1304,7 +1298,10 @@ async def _replay_cloud_model_session(
             monitoring={},
         )
     else:
-        _log = trace_logger  # type: ignore[assignment] — unreachable, satisfies type checker
+        raise RuntimeError(
+            "trace_logger is None and task_output_dir is None — "
+            "cannot create per-agent trace logger."
+        )
 
     # Accumulate aggregate metrics from *replayed* actions so the
     # summary (and HTML viz header) reflects actual replay timing,
@@ -1356,12 +1353,10 @@ async def _replay_cloud_model_session(
         # original trace — we don't wait for the original ts_start.
         try:
             if action_type == "llm_call":
-                intended_duration_s = source_duration_s / replay_speed
-                record_ts_start = wall_start + session_virtual_s
-                if intended_duration_s > 0:
-                    await asyncio.sleep(intended_duration_s)
-                record_ts_end = record_ts_start + intended_duration_s
-                session_virtual_s += intended_duration_s
+                record_ts_start = time.time()
+                if source_duration_s > 0:
+                    await asyncio.sleep(source_duration_s / replay_speed)
+                record_ts_end = time.time()
                 prompt_tokens = int(data.get("prompt_tokens") or 0)
                 completion_tokens = int(data.get("completion_tokens") or 0)
                 record = _make_trace_action(
@@ -1372,10 +1367,11 @@ async def _replay_cloud_model_session(
                     ts_start=record_ts_start,
                     ts_end=record_ts_end,
                     data={
+                        "messages_in": data.get("messages_in"),
                         "raw_response": data.get("raw_response", {}),
                         "prompt_tokens": data.get("prompt_tokens", 0),
                         "completion_tokens": data.get("completion_tokens", 0),
-                        "llm_latency_ms": intended_duration_s * 1000,
+                        "llm_latency_ms": (record_ts_end - record_ts_start) * 1000,
                         "simulate_source": str(loaded.source_trace),
                         "source_llm_latency_ms": data.get("llm_latency_ms"),
                         "replay_mode": "cloud_model",
@@ -1390,7 +1386,7 @@ async def _replay_cloud_model_session(
                 llm_call_time_count += 1
                 total_tokens += prompt_tokens
                 total_tokens += completion_tokens
-                total_llm_ms += intended_duration_s * 1000
+                total_llm_ms += (record_ts_end - record_ts_start) * 1000
                 continue
 
             if action_type != "tool_exec":
@@ -1410,7 +1406,7 @@ async def _replay_cloud_model_session(
                 )
                 continue
 
-            record_ts_start = wall_start + session_virtual_s
+            record_ts_start = time.time()
             source_duration_ms = float(data.get("duration_ms") or 0.0)
 
             # ── Resolve which agent executes the tool ──────────────
@@ -1430,23 +1426,17 @@ async def _replay_cloud_model_session(
                     tool_args,
                     command_timeout_s,
                 )
-                actual_duration_s = max(0.0, duration_ms / 1000.0)
-                record_ts_end = record_ts_start + actual_duration_s
-                session_virtual_s += actual_duration_s
                 replay_source = (
                     "executed_on_host"
                     if host_agent is not None
                     else "executed_in_container"
                 )
             elif tool_name is not None and tool_name.startswith("mcp_"):
-                intended_duration_s = source_duration_ms / 1000.0 / replay_speed
-                if intended_duration_s > 0:
-                    await asyncio.sleep(intended_duration_s)
+                if source_duration_ms > 0:
+                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
                 tool_result = data.get("tool_result", "")
                 tool_success = bool(data.get("success", True))
-                duration_ms = intended_duration_s * 1000
-                record_ts_end = record_ts_start + intended_duration_s
-                session_virtual_s += intended_duration_s
+                duration_ms = (time.time() - record_ts_start) * 1000
                 replay_source = "replayed_from_trace"
             else:
                 logger.warning(
@@ -1456,14 +1446,12 @@ async def _replay_cloud_model_session(
                     tool_name,
                 )
                 replay_source = "replayed_from_trace"
-                intended_duration_s = source_duration_ms / 1000.0 / replay_speed
                 tool_result = data.get("tool_result", data.get("result", ""))
                 tool_success = bool(data.get("success", not data.get("error")))
-                if intended_duration_s > 0:
-                    await asyncio.sleep(intended_duration_s)
-                duration_ms = intended_duration_s * 1000
-                record_ts_end = record_ts_start + intended_duration_s
-                session_virtual_s += intended_duration_s
+                if source_duration_ms > 0:
+                    await asyncio.sleep(source_duration_ms / 1000 / replay_speed)
+                duration_ms = (time.time() - record_ts_start) * 1000
+            record_ts_end = time.time()
             _classified_name = classify_exec_tool_name(tool_name, tool_args)
             tool_record = _make_trace_action(
                 loaded=loaded,
@@ -1566,7 +1554,6 @@ async def _replay_cloud_model_session(
                     "llm_call_time_count": llm_call_time_count,
                     "timing": {
                         "agent_exec_s": _elapsed,
-                        "agent_virtual_s": session_virtual_s,
                         "container_setup_s": prepared_session.container_setup_s,
                     },
                 },
