@@ -337,12 +337,22 @@ def _resolve_task_source(
     return task_source
 
 
+# Cache: task_source Path → {instance_id: task_dict}.  Avoids re-reading
+# and re-parsing large tasks JSON files for every session (640 sessions
+# × 3000+ task entries without this cache = minutes of wasted CPU).
+_TASK_CACHE: dict[Path, dict[str, dict[str, Any]]] = {}
+
+
 def _find_task(task_source: Path, agent_id: str) -> dict[str, Any]:
-    tasks = json.loads(task_source.read_text(encoding="utf-8"))
-    for task in tasks:
-        if task["instance_id"] == agent_id:
-            return task
-    raise SimulateError(f"Task {agent_id!r} not found in {task_source}")
+    if task_source not in _TASK_CACHE:
+        tasks = json.loads(task_source.read_text(encoding="utf-8"))
+        _TASK_CACHE[task_source] = {
+            task["instance_id"]: task for task in tasks
+        }
+    task = _TASK_CACHE[task_source].get(agent_id)
+    if task is None:
+        raise SimulateError(f"Task {agent_id!r} not found in {task_source}")
+    return task
 
 
 def _find_or_synthesize_task(
@@ -1703,10 +1713,18 @@ async def simulate(
         trace_assignment_seed=trace_assignment_seed,
     )
 
+    print(
+        f"  [load] loading {len(trace_inputs)} trace sessions...",
+        flush=True,
+    )
     loaded_sessions = [
         _load_trace_session(source_path, task_path, docker_image_override=img)
         for source_path, task_path, img in trace_inputs
     ]
+    print(
+        f"  [load] {len(loaded_sessions)} sessions loaded, validating...",
+        flush=True,
+    )
     # Ensure unique agent_ids after possible N:M expansion.
     _ensure_unique_agent_ids(loaded_sessions)
     _validate_loaded_sessions(
