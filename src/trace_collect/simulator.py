@@ -1954,6 +1954,13 @@ async def simulate(
             # preparation for high --num-agents values.
             prep_sem = asyncio.Semaphore(min(20, max(1, len(loaded_sessions))))
 
+            total_sessions = len(loaded_sessions)
+            # Lightweight stdout progress for long-running preparation phases
+            # (tens→hundreds of containers).  A py-list cell holds a mutable
+            # integer that the inner closure can mutate via __setitem__.
+            _done: list[int] = [0]
+            _report_every = max(1, min(20, total_sessions // 10))
+
             async def _prepare_with_limit(
                 loaded: LoadedTraceSession,
             ) -> PreparedTraceSession:
@@ -1967,11 +1974,27 @@ async def simulate(
                         # container leak.
                         await _teardown_one(prepared)
                         raise
+                    _done[0] += 1
+                    if _done[0] % _report_every == 0 or _done[0] == total_sessions:
+                        print(
+                            f"  [prepare] {_done[0]}/{total_sessions} "
+                            f"containers ready",
+                            flush=True,
+                        )
                     return prepared
 
+            print(
+                f"  [prepare] starting {total_sessions} containers "
+                f"(concurrency={prep_sem._value})...",
+                flush=True,
+            )
             results = await asyncio.gather(*[
                 _prepare_with_limit(loaded) for loaded in loaded_sessions
             ], return_exceptions=True)
+            print(
+                f"  [prepare] all {_done[0]} containers ready",
+                flush=True,
+            )
 
             for i, result in enumerate(results):
                 if isinstance(result, BaseException):
