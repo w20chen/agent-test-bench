@@ -91,7 +91,21 @@ def vtune_container_run_args(
 
 
 def _vtune_tma(result_dir: Path) -> dict[str, Any]:
-    """Parse ``vtune -report summary -format csv`` into a flat metric dict."""
+    """Parse ``vtune -report summary -format csv`` into a flat metric dict.
+
+    VTune ``-report summary`` CSV has three columns::
+
+        Hierarchy Level, Metric Name, Metric Value
+        0, Collection and Platform Info,
+        1, CPU,
+        ...
+        <empty>, Elapsed Time, 5.123
+        <empty>, CPI Rate, 0.756
+        ...
+
+    We use the second column as key and the third as value, skipping the
+    header line and any rows without a non-empty metric name.
+    """
     vtune_bin, _ = _resolve_vtune()
     try:
         proc = subprocess.run(
@@ -105,12 +119,28 @@ def _vtune_tma(result_dir: Path) -> dict[str, Any]:
         return {"error": (proc.stderr.strip()[:500] or "vtune report nonzero exit")}
     metrics: dict[str, Any] = {}
     for line in proc.stdout.splitlines():
-        if "," not in line:
+        line = line.strip()
+        if not line:
             continue
-        key, _, val = line.partition(",")
-        key = key.strip()
-        if key:
-            metrics[key] = val.strip()
+        # Split into at most 3 parts: level, name, value
+        parts = line.split(",", 2)
+        if len(parts) < 2:
+            continue
+        name = parts[1].strip()
+        if not name or name == "Metric Name":
+            continue  # skip header and empty-name rows
+        value = parts[2].strip() if len(parts) > 2 else ""
+        # Convert percentages and numbers where possible
+        if value.endswith("%"):
+            try:
+                metrics[name] = float(value[:-1])
+            except ValueError:
+                metrics[name] = value
+        else:
+            try:
+                metrics[name] = float(value.replace(",", ""))
+            except ValueError:
+                metrics[name] = value
     return metrics
 
 
@@ -203,8 +233,11 @@ def _convert_per_tool_samples(
             sample["context_switches"] = int(ctxt)
 
         out.append(sample)
-        if "cpu_percent" in sample:
-            prev_jiffies = int(curr_jiffies) if isinstance(curr_jiffies, (int, float)) else None
+        # Always advance the baseline, even when the first sample(s)
+        # have no delta yet — otherwise prev_jiffies stays None forever
+        # and cpu_percent is never computed.
+        if isinstance(curr_jiffies, (int, float)):
+            prev_jiffies = int(curr_jiffies)
             prev_time = curr_time
 
     return out
