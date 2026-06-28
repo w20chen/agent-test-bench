@@ -800,6 +800,7 @@ async def _prepare_container_session(
         _inspect_image_platform,
         TaskContainerExecConfig,
         bootstrap_task_container_python,
+        resolve_running_container_exec_config,
     )
 
     t_setup_start = time.monotonic()
@@ -843,6 +844,17 @@ async def _prepare_container_session(
         bootstrap=True,
         bootstrap_site_dir=site_dir,
         image_platform=image_platform,
+    )
+    # Probe the running container for Python >=3.11 so that the bootstrap
+    # uses the SAME interpreter as ContainerAgent._probe_python() will
+    # later select for tool execution.  Without this, the bootstrap would
+    # install C extensions (tiktoken, pydantic-core) for /usr/bin/python3
+    # (3.10) while ContainerAgent runs /usr/local/bin/python (3.12).
+    exec_config = await asyncio.to_thread(
+        resolve_running_container_exec_config,
+        container_id=container_id,
+        exec_config=exec_config,
+        container_executable=container_executable,
     )
     try:
         await asyncio.to_thread(
