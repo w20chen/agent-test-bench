@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import platform
@@ -12,9 +13,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from agents.openclaw.runtime_deps import OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS
 
@@ -611,6 +613,26 @@ def run_task_container_agent(
     )
 
 
+@contextmanager
+def _bootstrap_lock() -> Iterator[None]:
+    """Acquire an exclusive cross-process lock on the shared bootstrap cache.
+
+    Prevents concurrent :func:`bootstrap_task_container_python` calls (e.g.
+    from simulate ``--workers``) from racing on ``get-pip.py`` and corrupting
+    the shared ``.pyuserbase`` directory.
+    """
+    lock_dir = _SHARED_BOOTSTRAP_CACHE
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / ".bootstrap.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def bootstrap_task_container_python(
     *,
     container_id: str,
@@ -626,6 +648,9 @@ def bootstrap_task_container_python(
     requirements = tuple(
         dict.fromkeys(OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS + extra_requirements)
     )
+
+    # Fast-path: check marker before acquiring the lock so workers that
+    # arrive after the first one has finished skip the lock entirely.
     if _bootstrap_marker_matches(
         marker,
         requirements=requirements,
@@ -637,33 +662,50 @@ def bootstrap_task_container_python(
             flush=True,
         )
         return
-    if marker.exists():
+
+    # Serialise access to the shared bootstrap cache so concurrent
+    # workers don't race on get-pip.py / pip install.
+    with _bootstrap_lock():
+        # Double-check: another process may have finished while we waited.
+        if _bootstrap_marker_matches(
+            marker,
+            requirements=requirements,
+            runtime=exec_config.runtime,
+        ):
+            print(
+                f"[bootstrap] shared cache hit (after lock): {marker}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
+        if marker.exists():
+            print(
+                f"[bootstrap] shared cache stale, rebuilding: {marker}",
+                file=sys.stderr,
+                flush=True,
+            )
+            marker.unlink(missing_ok=True)
+            shutil.rmtree(exec_config.bootstrap_site_dir, ignore_errors=True)
+
+        userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
+        userbase.mkdir(parents=True, exist_ok=True)
+        get_pip = userbase / "get-pip.py"
+        if not get_pip.exists():
+            _download_get_pip(get_pip)
+
+        pip_index_url = (
+            os.environ.get("TASK_CONTAINER_PIP_INDEX_URL")
+            or os.environ.get("PIP_INDEX_URL")
+            or _DEFAULT_PIP_INDEX_URL
+        )
         print(
-            f"[bootstrap] shared cache stale, rebuilding: {marker}",
+            f"[bootstrap] installing pip + {len(requirements)} runtime deps "
+            f"from {pip_index_url} into container {container_id[:12]}...",
             file=sys.stderr,
             flush=True,
         )
-        marker.unlink(missing_ok=True)
-        shutil.rmtree(exec_config.bootstrap_site_dir, ignore_errors=True)
-
-    userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
-    userbase.mkdir(parents=True, exist_ok=True)
-    get_pip = userbase / "get-pip.py"
-    if not get_pip.exists():
-        _download_get_pip(get_pip)
-
-    pip_index_url = (
-        os.environ.get("TASK_CONTAINER_PIP_INDEX_URL")
-        or os.environ.get("PIP_INDEX_URL")
-        or _DEFAULT_PIP_INDEX_URL
-    )
-    print(
-        f"[bootstrap] installing pip + {len(requirements)} runtime deps "
-        f"from {pip_index_url} into container {container_id[:12]}...",
-        file=sys.stderr,
-        flush=True,
-    )
-    script = f"""
+        script = f"""
 import json
 import os
 import pathlib
@@ -731,26 +773,26 @@ if _get_pip.exists():
     _get_pip.unlink()
 _log("bootstrap complete")
 """
-    result = subprocess.run(
-        [
-            container_executable,
-            "exec",
-            "-i",
-            "-w",
-            cwd,
-            container_id,
-            exec_config.runtime,
-            "-",
-        ],
-        input=script,
-        stdout=sys.stderr,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-        timeout=1800,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "task-container python bootstrap failed: "
-            f"{result.stderr.strip()}"
+        result = subprocess.run(
+            [
+                container_executable,
+                "exec",
+                "-i",
+                "-w",
+                cwd,
+                container_id,
+                exec_config.runtime,
+                "-",
+            ],
+            input=script,
+            stdout=sys.stderr,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=1800,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "task-container python bootstrap failed: "
+                f"{result.stderr.strip()}"
+            )
