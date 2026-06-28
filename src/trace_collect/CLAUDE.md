@@ -256,6 +256,7 @@ python -m trace_collect.cli simulate \
 | `--metrics-url` | no | — | vLLM Prometheus endpoint (local_model only; forbidden for cloud_model) |
 | `--serial` | no | off | Replay traces sequentially (one at a time) |
 | `--workers` | no | `1` | Number of worker processes for concurrent `cloud_model` replay. Each worker runs its own asyncio event loop so N agents are split across W processes (N/W agents per loop). Eliminates the single-event-loop scheduling bottleneck that inflates `asyncio.sleep()` wake-up latency and await-callback delay under high concurrency. `cloud_model` only; `--workers > 1` is rejected for `local_model`. Default `1` = legacy single-process behaviour. Recommended: `min(num_agents, os.cpu_count())` |
+| `--prep-concurrency` | no | `0` | System-wide concurrent container preparation limit shared by all workers. `0` preserves 20. All processes wait at a global all-ready barrier before replay; Poisson offsets are generated once for the complete population. |
 
 LLM flags (`--provider`, `--api-base`, `--api-key`, `--model`) required for `local_model` only.
 

@@ -61,6 +61,10 @@ CPU_LIMIT="${CPU_LIMIT:-1}"
 # Distributes agents across multiple Python processes so each event loop
 # only handles N/WORKERS agents.  Default: number of host CPU cores.
 WORKERS="${WORKERS:-$(${PYTHON_BIN} -c "import os; print(os.cpu_count() or 1)")}"
+# PREP_CONCURRENCY: system-wide maximum concurrent container preparations.
+# The limit is shared across all worker processes. 0 = auto (20, preserving
+# the historical limit). Replay starts only after every container is ready.
+PREP_CONCURRENCY="${PREP_CONCURRENCY:-0}"
 BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-${REPO_ROOT}/traces/simulate/swe-rebench}"
 
 MONITOR_SCRIPT="${REPO_ROOT}/scripts/system_resource_monitor.py"
@@ -219,6 +223,7 @@ for N in ${SWEEP_VALUES}; do
     --trace-assignment manifest \
     ${CPU_LIMIT:+--cpu-limit "${CPU_LIMIT}"} \
     --workers "${WORKERS}" \
+    --prep-concurrency "${PREP_CONCURRENCY}" \
     --resource-monitoring on \
     --pmu-monitoring off \
     --ksys-monitoring off \

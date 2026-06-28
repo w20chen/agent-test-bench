@@ -30,8 +30,9 @@ Simulate 40 SWE-rebench traces with N=40, 80, 160, 320 agent instances
 ### Key risks
 
 1. **Docker daemon pressure**: 320 concurrent containers may overwhelm Docker.
-   Mitigation: preparation is rate-limited by `asyncio.Semaphore(20)`, but
-   during replay all containers are active.
+   Mitigation: `--prep-concurrency` uses one system-wide semaphore (auto
+   preserves 20), and a global all-ready barrier delays replay until every
+   container is prepared.
 
 2. **Memory**: Each SWE container typically consumes 200-500 MB (idle).
    320 containers × 300 MB ≈ 96 GB. The ARM machine must have ≥128 GB RAM.

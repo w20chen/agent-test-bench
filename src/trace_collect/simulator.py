@@ -5,6 +5,7 @@ import dataclasses
 import json
 import logging
 import math
+import multiprocessing
 import os
 import random
 import re
@@ -13,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import BrokenBarrierError
 from typing import Any
 
 from agents.base import TraceAction
@@ -33,6 +35,8 @@ from trace_collect.monitoring import MonitoringPolicy, resolve_simulate_monitori
 from trace_collect.openclaw_tools import HostAgent
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_PREP_CONCURRENCY = 20
 
 
 class SimulateError(Exception):
@@ -149,6 +153,98 @@ class PreparedTraceSession:
     _resources_written: bool = False
     # Timing: seconds spent preparing the container/image before replay.
     container_setup_s: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTraceInput:
+    '''Picklable worker input that preserves the globally assigned identity.'''
+
+    source_trace: str
+    task_source: str
+    docker_image_override: str | None
+    agent_id: str
+
+
+def _resolve_prep_concurrency(requested: int, num_sessions: int) -> int:
+    '''Resolve the system-wide concurrent container preparation limit.'''
+    if requested < 0:
+        raise ValueError('prep_concurrency must be >= 0')
+    if num_sessions < 1:
+        raise ValueError('num_sessions must be >= 1')
+    limit = requested or _DEFAULT_PREP_CONCURRENCY
+    return min(limit, num_sessions)
+
+
+def _worker_trace_input(session: LoadedTraceSession) -> WorkerTraceInput:
+    '''Serialize a loaded session without discarding its assigned agent ID.'''
+    return WorkerTraceInput(
+        source_trace=str(session.source_trace),
+        task_source=str(session.task_source),
+        docker_image_override=session.docker_image_override,
+        agent_id=session.agent_id,
+    )
+
+
+def _partition_sessions_and_offsets(
+    sessions: list[LoadedTraceSession],
+    offsets: list[float],
+    workers: int,
+) -> list[tuple[list[LoadedTraceSession], list[float]]]:
+    """Partition sessions and their global arrival offsets without reordering."""
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    if len(sessions) != len(offsets):
+        raise ValueError("sessions and offsets must have the same length")
+    if not sessions:
+        raise ValueError("sessions must not be empty")
+
+    partition_count = min(workers, len(sessions))
+    chunk_size, remainder = divmod(len(sessions), partition_count)
+    partitions: list[tuple[list[LoadedTraceSession], list[float]]] = []
+    start = 0
+    for worker_index in range(partition_count):
+        size = chunk_size + (1 if worker_index < remainder else 0)
+        stop = start + size
+        partitions.append((sessions[start:stop], offsets[start:stop]))
+        start = stop
+    return partitions
+
+
+def _abort_global_replay_start(barrier: Any, start_event: Any) -> None:
+    '''Best-effort release of peers waiting for a failed global start.'''
+    try:
+        barrier.abort()
+    except Exception:
+        logger.debug('Failed to abort replay-start barrier', exc_info=True)
+    try:
+        start_event.set()
+    except Exception:
+        logger.debug('Failed to set replay-start event', exc_info=True)
+
+
+async def _wait_for_global_replay_start(
+    barrier: Any,
+    start_event: Any,
+    start_wall_time: Any,
+    *,
+    coordinator: bool,
+) -> float:
+    '''Wait until every process is prepared and return one shared time zero.'''
+    try:
+        await asyncio.to_thread(barrier.wait)
+    except BrokenBarrierError as exc:
+        raise SimulateError('Global replay start was aborted') from exc
+
+    if coordinator:
+        start_wall_time.value = time.time()
+        start_event.set()
+    else:
+        await asyncio.to_thread(start_event.wait)
+
+    shared_wall_zero = float(start_wall_time.value)
+    if shared_wall_zero <= 0:
+        raise SimulateError('Global replay start has no valid shared time zero')
+    return time.monotonic() + (shared_wall_zero - time.time())
 
 
 async def _call_local_model_streaming(
@@ -584,19 +680,22 @@ def _ensure_unique_agent_ids(sessions: list[LoadedTraceSession]) -> None:
     ``agent_id`` in-place so that every session has a distinct identity
     for output directories and trace records.
     """
-    seen: dict[str, int] = {}
+    used: set[str] = set()
     for i, session in enumerate(sessions):
         aid = session.agent_id
-        count = seen.get(aid, 0)
-        if count > 0:
-            new_id = f"{aid}--a{i}"
+        if aid in used:
+            suffix = i
+            new_id = f"{aid}--a{suffix}"
+            while new_id in used:
+                suffix += 1
+                new_id = f"{aid}--a{suffix}"
             logger.warning(
                 "Renamed duplicate agent_id %r -> %r "
                 "(session %d of %d sharing this id).",
                 aid, new_id, i, len(sessions),
             )
             session.agent_id = new_id
-        seen[aid] = count + 1
+        used.add(session.agent_id)
 
 
 def _resolve_docker_image(loaded: LoadedTraceSession) -> str | None:
@@ -739,12 +838,20 @@ async def _prepare_container_session(
         bootstrap=True,
         bootstrap_site_dir=site_dir,
     )
-    await asyncio.to_thread(
-        bootstrap_task_container_python,
-        container_id=container_id,
-        exec_config=exec_config,
-        container_executable=container_executable,
-    )
+    try:
+        await asyncio.to_thread(
+            bootstrap_task_container_python,
+            container_id=container_id,
+            exec_config=exec_config,
+            container_executable=container_executable,
+        )
+    except Exception:
+        await asyncio.to_thread(
+            stop_task_container,
+            container_id,
+            executable=container_executable,
+        )
+        raise
 
     agent = ContainerAgent(
         container_id, container_executable, pythonpath=pythonpath,
@@ -1192,7 +1299,10 @@ async def _delayed_replay(
             "Poisson delay %.1fs for %s",
             delay_s, prepared_session.loaded.agent_id,
         )
-        await asyncio.sleep(delay_s)
+    await _sleep_until_offset(
+        replay_zero_monotonic=float(kwargs['replay_zero_monotonic']),
+        target_offset_s=delay_s,
+    )
     await _replay_cloud_model_session(prepared_session, **kwargs)
 
 
@@ -1205,8 +1315,10 @@ async def _run_cloud_model_replay(
     warmup_skip_iterations: int,
     serial: bool = False,
     arrival_offsets: list[float] | None = None,
+    replay_zero_monotonic: float | None = None,
 ) -> None:
-    replay_zero_monotonic = time.monotonic()
+    if replay_zero_monotonic is None:
+        replay_zero_monotonic = time.monotonic()
     offsets = arrival_offsets or [0.0] * len(prepared_sessions)
 
     if serial:
@@ -1720,18 +1832,20 @@ def _flush_session_trace(
 
 def _worker_run_cloud_model(
     worker_id: int,
-    trace_inputs: list[tuple[str, str, str | None]],
+    trace_inputs: list[WorkerTraceInput],
     *,
+    arrival_offsets: list[float],
     output_dir: str,
     container_executable: str,
     network_mode: str,
     replay_speed: float,
     command_timeout_s: float,
     warmup_skip_iterations: int,
-    arrival_mode: str,
-    arrival_rate_per_s: float | None,
-    arrival_seed: int | None,
     cpu_limit: float | None,
+    prep_semaphore: Any,
+    replay_start_barrier: Any,
+    replay_start_event: Any,
+    replay_start_wall_time: Any,
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
     ksys_monitoring: str = "auto",
@@ -1756,12 +1870,14 @@ def _worker_run_cloud_model(
     async def _run() -> dict[str, Any]:
         # 1. Load sessions from paths
         loaded_sessions: list[LoadedTraceSession] = []
-        for source_path, task_path, img_ovr in trace_inputs:
+        for worker_input in trace_inputs:
             loaded = _load_trace_session(
-                Path(source_path), Path(task_path), img_ovr,
+                Path(worker_input.source_trace),
+                Path(worker_input.task_source),
+                worker_input.docker_image_override,
             )
+            loaded.agent_id = worker_input.agent_id
             loaded_sessions.append(loaded)
-        _ensure_unique_agent_ids(loaded_sessions)
         _validate_loaded_sessions(
             loaded_sessions,
             mode="cloud_model",
@@ -1788,10 +1904,27 @@ def _worker_run_cloud_model(
         # 3. Ensure file-descriptor headroom for this worker's sessions.
         _ensure_fd_headroom(len(loaded_sessions), concurrent=True)
 
-        # 4. Prepare all sessions
+        # 4. Prepare all sessions concurrently
         prepared_sessions: list[PreparedTraceSession] = []
-        try:
-            for loaded in loaded_sessions:
+
+        async def _cleanup_prepared() -> None:
+            for prepared in prepared_sessions:
+                try:
+                    await _teardown_one_worker(prepared, monitoring_policy)
+                except Exception:
+                    _worker_logger.warning(
+                        "Teardown error for %s",
+                        prepared.loaded.agent_id,
+                        exc_info=True,
+                    )
+
+        async def _prepare_one_worker(
+            loaded: LoadedTraceSession,
+        ) -> PreparedTraceSession:
+            uses_container = not _is_host_mode(loaded)
+            if uses_container and prep_semaphore is not None:
+                await asyncio.to_thread(prep_semaphore.acquire)
+            try:
                 if _is_host_mode(loaded):
                     prepared = await _prepare_host_session(loaded)
                 else:
@@ -1804,9 +1937,11 @@ def _worker_run_cloud_model(
                     prepared = await _prepare_container_session(
                         loaded, **prepare_kwargs,
                     )
-                prepared.monitoring_policy = monitoring_policy
-
-                # Setup: output dir + optional sampler
+            finally:
+                if uses_container and prep_semaphore is not None:
+                    prep_semaphore.release()
+            prepared.monitoring_policy = monitoring_policy
+            try:
                 instance_dir = output_path / loaded.agent_id
                 attempt_n = _next_attempt_number(instance_dir)
                 task_dir = instance_dir / f"attempt_{attempt_n}"
@@ -1827,39 +1962,96 @@ def _worker_run_cloud_model(
                     )
                     sampler.start()
                     prepared.sampler = sampler
+            except Exception:
+                await _teardown_one_worker(prepared, monitoring_policy)
+                raise
+            return prepared
 
-                prepared_sessions.append(prepared)
+        try:
+            results = await asyncio.gather(
+                *[_prepare_one_worker(s) for s in loaded_sessions],
+                return_exceptions=True,
+            )
+            # With return_exceptions=True, ALL tasks complete. Collect ALL
+            # successful results first, then check for failures — otherwise
+            # a failure at index i would leave sessions at i+1..N prepared
+            # but never torn down (orphaned containers).
+            first_exc: BaseException | None = None
+            for loaded, r in zip(loaded_sessions, results):
+                if isinstance(r, BaseException):
+                    if first_exc is None:
+                        first_exc = r
+                    logger.error(
+                        "Preparation failed for %s: %s",
+                        loaded.agent_id, r,
+                    )
+                else:
+                    prepared_sessions.append(r)
+
+            if first_exc is not None:
+                _abort_global_replay_start(
+                    replay_start_barrier,
+                    replay_start_event,
+                )
+                _worker_logger.error(
+                    "Preparation failed: %d/%d sessions had errors",
+                    sum(1 for r in results if isinstance(r, BaseException)),
+                    len(results),
+                )
+                await _cleanup_prepared()
+                return {
+                    "worker_id": worker_id,
+                    "success": False,
+                    "error": str(first_exc),
+                }
 
             _worker_logger.info(
                 "Prepared %d/%d sessions",
                 len(prepared_sessions), len(loaded_sessions),
             )
         except Exception as exc:
+            _abort_global_replay_start(
+                replay_start_barrier,
+                replay_start_event,
+            )
             _worker_logger.error(
                 "Preparation failed: %s", exc, exc_info=True,
             )
-            for ps in prepared_sessions:
-                await _teardown_one_worker(ps, monitoring_policy)
+            await _cleanup_prepared()
             return {"worker_id": worker_id, "success": False, "error": str(exc)}
 
         # 5. Run replay
         replay_ok = True
         replay_error: str | None = None
-        offsets = build_arrival_offsets(
-            len(prepared_sessions),
-            arrival_mode=arrival_mode,
-            arrival_rate_per_s=arrival_rate_per_s,
-            arrival_seed=arrival_seed,
-        )
-        try:
-            await _run_cloud_model_replay(
-                prepared_sessions,
-                trace_logger=None,  # per-agent files
-                replay_speed=replay_speed,
-                command_timeout_s=command_timeout_s,
-                warmup_skip_iterations=warmup_skip_iterations,
-                arrival_offsets=offsets,
+        if len(arrival_offsets) != len(prepared_sessions):
+            _abort_global_replay_start(
+                replay_start_barrier,
+                replay_start_event,
             )
+            replay_ok = False
+            replay_error = 'Worker arrival-offset count does not match sessions'
+        try:
+            replay_zero = await _wait_for_global_replay_start(
+                replay_start_barrier,
+                replay_start_event,
+                replay_start_wall_time,
+                coordinator=False,
+            )
+        except Exception as exc:
+            replay_ok = False
+            replay_error = str(exc)
+            replay_zero = time.monotonic()
+        try:
+            if replay_ok:
+                await _run_cloud_model_replay(
+                    prepared_sessions,
+                    trace_logger=None,  # per-agent files
+                    replay_speed=replay_speed,
+                    command_timeout_s=command_timeout_s,
+                    warmup_skip_iterations=warmup_skip_iterations,
+                    arrival_offsets=arrival_offsets,
+                    replay_zero_monotonic=replay_zero,
+                )
         except Exception as exc:
             _worker_logger.error(
                 "Replay failed: %s", exc, exc_info=True,
@@ -1867,15 +2059,7 @@ def _worker_run_cloud_model(
             replay_ok = False
             replay_error = str(exc)
 
-        # 6. Teardown
-        for ps in prepared_sessions:
-            try:
-                await _teardown_one_worker(ps, monitoring_policy)
-            except Exception as exc:
-                _worker_logger.warning(
-                    "Teardown error for %s: %s",
-                    ps.loaded.agent_id, exc,
-                )
+        await _cleanup_prepared()
 
         return {
             "worker_id": worker_id,
@@ -1887,6 +2071,10 @@ def _worker_run_cloud_model(
     try:
         return asyncio.run(_run())
     except Exception as exc:
+        _abort_global_replay_start(
+            replay_start_barrier,
+            replay_start_event,
+        )
         _worker_logger.error("Fatal worker error: %s", exc, exc_info=True)
         return {"worker_id": worker_id, "success": False, "error": str(exc)}
 
@@ -1901,52 +2089,97 @@ async def _teardown_one_worker(
     subprocesses.  Must be a module-level function so it is picklable by
     ProcessPoolExecutor.
     """
+    first_error: Exception | None = None
     session_resource_enabled = (
         monitoring_policy.resource_enabled and prepared.container is not None
     )
-    if prepared.sampler is not None:
-        samples = prepared.sampler.stop()
-        prepared.sampler = None
-        if prepared.task_output_dir is not None:
-            summary = summarize_samples(samples)
+    try:
+        if prepared.sampler is not None:
+            sampler = prepared.sampler
+            prepared.sampler = None
+            samples = sampler.stop()
+            if prepared.task_output_dir is not None:
+                summary = summarize_samples(samples)
+                summary["monitoring"] = {
+                    **monitoring_policy.to_dict(),
+                    "status": (
+                        "collected" if samples else "enabled_no_samples"
+                    ),
+                }
+                attempt_layout.write_resources_json(
+                    prepared.task_output_dir, samples, summary,
+                )
+                logger.info(
+                    "Wrote %d resource samples → %s",
+                    len(samples),
+                    prepared.task_output_dir / "resources.json",
+                )
+        elif (
+            prepared.task_output_dir is not None
+            and not prepared._resources_written
+        ):
+            summary = summarize_samples([])
+            summary["monitoring_disabled"] = not session_resource_enabled
             summary["monitoring"] = {
                 **monitoring_policy.to_dict(),
-                "status": "collected" if samples else "enabled_no_samples",
+                "status": (
+                    "disabled" if not session_resource_enabled
+                    else "enabled_no_samples"
+                ),
             }
             attempt_layout.write_resources_json(
-                prepared.task_output_dir, samples, summary,
+                prepared.task_output_dir,
+                samples=[],
+                summary=summary,
             )
-            logger.info(
-                "Wrote %d resource samples → %s",
-                len(samples),
-                prepared.task_output_dir / "resources.json",
-            )
-    elif prepared.task_output_dir is not None and not prepared._resources_written:
-        summary = summarize_samples([])
-        summary["monitoring_disabled"] = not session_resource_enabled
-        summary["monitoring"] = {
-            **monitoring_policy.to_dict(),
-            "status": (
-                "disabled" if not session_resource_enabled
-                else "enabled_no_samples"
-            ),
-        }
-        attempt_layout.write_resources_json(
-            prepared.task_output_dir, samples=[], summary=summary,
+    except Exception as exc:
+        first_error = exc
+        logger.error(
+            "Resource teardown failed for %s: %s",
+            prepared.loaded.agent_id,
+            exc,
         )
+
     ctr = prepared.container
     if ctr is None:
         if prepared.host_agent is not None:
-            await prepared.host_agent.stop()
+            try:
+                await prepared.host_agent.stop()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
         return
-    if ctr.agent is not None:
-        await ctr.agent.stop()
-    await asyncio.to_thread(
-        stop_task_container,
-        ctr.container_id,
-        executable=ctr.container_executable,
-    )
-    prepared.container = None
+
+    try:
+        if ctr.agent is not None:
+            await ctr.agent.stop()
+    except Exception as exc:
+        if first_error is None:
+            first_error = exc
+        logger.error(
+            "Agent stop failed for %s: %s",
+            prepared.loaded.agent_id,
+            exc,
+        )
+    try:
+        await asyncio.to_thread(
+            stop_task_container,
+            ctr.container_id,
+            executable=ctr.container_executable,
+        )
+        prepared.container = None
+    except Exception as exc:
+        if first_error is None:
+            first_error = exc
+        logger.error(
+            "Container stop failed for %s: %s",
+            prepared.loaded.agent_id,
+            exc,
+        )
+    if first_error is not None:
+        raise first_error
 
 
 async def simulate(
@@ -1982,7 +2215,12 @@ async def simulate(
     trace_assignment_seed: int | None = None,
     cpu_limit: float | None = None,
     workers: int = 1,
+    prep_concurrency: int = 0,
 ) -> Path:
+    if workers < 1:
+        raise ValueError('workers must be >= 1')
+    if prep_concurrency < 0:
+        raise ValueError('prep_concurrency must be >= 0')
     if source_trace is not None and trace_manifest is not None:
         raise ValueError("source_trace and trace_manifest are mutually exclusive")
     if source_trace is not None and source_dir is not None:
@@ -2093,6 +2331,7 @@ async def simulate(
     prepared_sessions: list[PreparedTraceSession] = []
     trace_logger: TraceLogger | None = None
     output_path.mkdir(parents=True, exist_ok=True)
+    shared_prep_semaphore: Any = None
 
     # ── Helpers for session lifecycle ──────────────────────────────
     async def _prepare_one(loaded: LoadedTraceSession) -> PreparedTraceSession:
@@ -2109,10 +2348,16 @@ async def simulate(
             }
             if cpu_limit is not None:
                 prepare_kwargs["cpu_limit"] = cpu_limit
-            prepared = await _prepare_container_session(
-                loaded,
-                **prepare_kwargs,
-            )
+            if shared_prep_semaphore is not None:
+                await asyncio.to_thread(shared_prep_semaphore.acquire)
+            try:
+                prepared = await _prepare_container_session(
+                    loaded,
+                    **prepare_kwargs,
+                )
+            finally:
+                if shared_prep_semaphore is not None:
+                    shared_prep_semaphore.release()
         prepared.monitoring_policy = monitoring_policy
         return prepared
 
@@ -2166,6 +2411,10 @@ async def simulate(
         if monitoring_policy.ksys_enabled
         else None
     )
+    sync_manager: Any = None
+    worker_executor: ProcessPoolExecutor | None = None
+    replay_start_barrier: Any = None
+    replay_start_event: Any = None
 
     try:
         if mode == "local_model":
@@ -2231,9 +2480,23 @@ async def simulate(
             # Local helper: concurrent prepare + replay for ONE process's batch
             async def _concurrent_run(
                 sessions: list[LoadedTraceSession],
+                offsets: list[float],
+                *,
+                replay_start_barrier: Any = None,
+                replay_start_event: Any = None,
+                replay_start_wall_time: Any = None,
+                coordinator: bool = False,
             ) -> list[PreparedTraceSession]:
                 """Prepare, setup, and replay *sessions* in this process."""
-                prep_sem = asyncio.Semaphore(min(20, max(1, len(sessions))))
+                local_prep_limit = (
+                    len(sessions)
+                    if shared_prep_semaphore is not None
+                    else _resolve_prep_concurrency(
+                        prep_concurrency,
+                        len(sessions),
+                    )
+                )
+                prep_sem = asyncio.Semaphore(local_prep_limit)
                 total = len(sessions)
                 _done: list[int] = [0]
                 _report_every = max(1, min(20, total // 10))
@@ -2258,61 +2521,122 @@ async def simulate(
 
                 print(
                     f"  [prepare] starting {total} containers "
-                    f"(concurrency={prep_sem._value})...",
+                    f"(system-wide concurrency="
+                    f"{_resolve_prep_concurrency(prep_concurrency, len(loaded_sessions))}"
+                    ")...",
                     flush=True,
                 )
                 results = await asyncio.gather(
                     *[_prepare_with_limit(s) for s in sessions],
                     return_exceptions=True,
                 )
-                print(f"  [prepare] all {_done[0]} containers ready", flush=True)
+                n_errors = sum(
+                    1 for r in results if isinstance(r, BaseException)
+                )
+                if n_errors:
+                    print(
+                        f"  [prepare] {_done[0]}/{total} containers ready "
+                        f"({n_errors} failed)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"  [prepare] all {_done[0]} containers ready",
+                        flush=True,
+                    )
 
                 out: list[PreparedTraceSession] = []
+                # With return_exceptions=True, ALL tasks complete. Collect
+                # ALL successful results before checking failures — otherwise
+                # a failure at index i leaks sessions at i+1..N.
+                first_exc: BaseException | None = None
                 for i, r in enumerate(results):
                     if isinstance(r, BaseException):
-                        for p in out:
-                            try:
-                                await _teardown_one(p)
-                            except Exception:
-                                pass
-                        raise SimulateError(
-                            f"Preparation failed for session {i} "
-                            f"({sessions[i].agent_id}): {r}"
-                        ) from r
-                    out.append(r)
+                        if first_exc is None:
+                            first_exc = r
+                        logger.error(
+                            "Preparation failed for session %d (%s): %s",
+                            i, sessions[i].agent_id, r,
+                        )
+                    else:
+                        out.append(r)
 
-                offsets = build_arrival_offsets(
-                    len(out),
-                    arrival_mode=arrival_mode,
-                    arrival_rate_per_s=arrival_rate_per_s,
-                    arrival_seed=arrival_seed,
-                )
-                await _run_cloud_model_replay(
-                    out,
-                    trace_logger=trace_logger,
-                    replay_speed=replay_speed,
-                    command_timeout_s=command_timeout_s,
-                    warmup_skip_iterations=warmup_skip_iterations,
-                    arrival_offsets=offsets,
-                )
+                if first_exc is not None:
+                    if replay_start_barrier is not None:
+                        _abort_global_replay_start(
+                            replay_start_barrier,
+                            replay_start_event,
+                        )
+                    n_failed = len(results) - len(out)
+                    for p in out:
+                        try:
+                            await _teardown_one(p)
+                        except Exception:
+                            pass
+                    raise SimulateError(
+                        f"Preparation failed: {n_failed}/{len(results)} "
+                        f"sessions had errors"
+                    ) from first_exc
+
+                if len(offsets) != len(out):
+                    if replay_start_barrier is not None:
+                        _abort_global_replay_start(
+                            replay_start_barrier,
+                            replay_start_event,
+                        )
+                    raise SimulateError(
+                        "Arrival-offset count does not match prepared sessions"
+                    )
+                try:
+                    replay_zero = time.monotonic()
+                    if replay_start_barrier is not None:
+                        replay_zero = await _wait_for_global_replay_start(
+                            replay_start_barrier,
+                            replay_start_event,
+                            replay_start_wall_time,
+                            coordinator=coordinator,
+                        )
+                    await _run_cloud_model_replay(
+                        out,
+                        trace_logger=trace_logger,
+                        replay_speed=replay_speed,
+                        command_timeout_s=command_timeout_s,
+                        warmup_skip_iterations=warmup_skip_iterations,
+                        arrival_offsets=offsets,
+                        replay_zero_monotonic=replay_zero,
+                    )
+                except BaseException:
+                    await asyncio.gather(
+                        *[_teardown_one(p) for p in out],
+                        return_exceptions=True,
+                    )
+                    raise
                 return out
 
+            global_offsets = build_arrival_offsets(
+                len(loaded_sessions),
+                arrival_mode=arrival_mode,
+                arrival_rate_per_s=arrival_rate_per_s,
+                arrival_seed=arrival_seed,
+            )
             if workers > 1:
                 # ── Multi-process concurrent ────────────────────────────────
                 # Split N agents across W worker processes so each event loop
                 # only handles N/W agents — eliminating single-loop congestion.
                 n_total = len(loaded_sessions)
                 n_workers = min(workers, n_total)
-                chunk_size, remainder = divmod(n_total, n_workers)
-                chunks: list[list[LoadedTraceSession]] = []
-                idx = 0
-                for w in range(n_workers):
-                    sz = chunk_size + (1 if w < remainder else 0)
-                    chunks.append(loaded_sessions[idx:idx + sz])
-                    idx += sz
-
-                main_chunk = chunks[0]
-                worker_chunks = chunks[1:]
+                partitions = _partition_sessions_and_offsets(
+                    loaded_sessions,
+                    global_offsets,
+                    n_workers,
+                )
+                main_chunk, main_offsets = partitions[0]
+                worker_chunks = [
+                    sessions for sessions, _offsets in partitions[1:]
+                ]
+                worker_offset_chunks = [
+                    offsets for _sessions, offsets in partitions[1:]
+                ]
 
                 print(
                     f"  [workers] {n_total} sessions × {n_workers} workers "
@@ -2321,14 +2645,6 @@ async def simulate(
                     flush=True,
                 )
 
-                # Helper: extract picklable trace-input tuple from a session
-                def _to_input(s: LoadedTraceSession) -> tuple[str, str, str | None]:
-                    return (
-                        str(s.source_trace),
-                        str(s.task_source),
-                        s.docker_image_override,
-                    )
-
                 # Spawn worker processes (they independently prepare, replay,
                 # teardown and write per-agent trace files into output_path).
                 # NOTE: Do NOT use `with ProcessPoolExecutor(...)` here — its
@@ -2336,16 +2652,27 @@ async def simulate(
                 # loop thread until ALL workers finish, preventing the main
                 # process from processing its chunk in parallel.
                 worker_futures: list[Any] = []
-                worker_executor: ProcessPoolExecutor | None = None
+                sync_manager = multiprocessing.Manager()
+                shared_prep_semaphore = sync_manager.BoundedSemaphore(
+                    _resolve_prep_concurrency(prep_concurrency, n_total)
+                )
+                replay_start_barrier = sync_manager.Barrier(n_workers)
+                replay_start_event = sync_manager.Event()
+                replay_start_wall_time = sync_manager.Value("d", 0.0)
                 if worker_chunks:
-                    pool_workers = min(len(worker_chunks), os.cpu_count() or 1)
-                    worker_executor = ProcessPoolExecutor(max_workers=pool_workers)
-                    for wid, chunk in enumerate(worker_chunks, start=1):
-                        inputs = [_to_input(s) for s in chunk]
+                    worker_executor = ProcessPoolExecutor(
+                        max_workers=len(worker_chunks)
+                    )
+                    for wid, (chunk, chunk_offsets) in enumerate(
+                        zip(worker_chunks, worker_offset_chunks),
+                        start=1,
+                    ):
+                        inputs = [_worker_trace_input(s) for s in chunk]
                         fut = worker_executor.submit(
                             _worker_run_cloud_model,
                             wid,
                             inputs,
+                            arrival_offsets=chunk_offsets,
                             output_dir=str(output_path),
                             container_executable=(
                                 container_executable or "docker"
@@ -2354,56 +2681,124 @@ async def simulate(
                             replay_speed=replay_speed,
                             command_timeout_s=command_timeout_s,
                             warmup_skip_iterations=warmup_skip_iterations,
-                            arrival_mode=arrival_mode,
-                            arrival_rate_per_s=arrival_rate_per_s,
-                            arrival_seed=arrival_seed,
                             cpu_limit=cpu_limit,
+                            prep_semaphore=shared_prep_semaphore,
+                            replay_start_barrier=replay_start_barrier,
+                            replay_start_event=replay_start_event,
+                            replay_start_wall_time=replay_start_wall_time,
                             resource_monitoring=resource_monitoring,
                             pmu_monitoring=pmu_monitoring,
                             ksys_monitoring=ksys_monitoring,
                         )
+
+                        def _abort_if_worker_exits_early(
+                            _future: Any,
+                            *,
+                            barrier: Any = replay_start_barrier,
+                            start_event: Any = replay_start_event,
+                        ) -> None:
+                            if not start_event.is_set():
+                                _abort_global_replay_start(
+                                    barrier,
+                                    start_event,
+                                )
+
+                        fut.add_done_callback(_abort_if_worker_exits_early)
                         worker_futures.append(fut)
 
                 # Main process handles its chunk IN PARALLEL with workers
+                main_error: BaseException | None = None
                 print(
                     f"  [workers] main process handling "
                     f"{len(main_chunk)} sessions...",
                     flush=True,
                 )
-                if main_chunk:
-                    prepared_sessions = await _concurrent_run(main_chunk)
-                else:
-                    prepared_sessions = []
+                try:
+                    prepared_sessions = await _concurrent_run(
+                        main_chunk,
+                        main_offsets,
+                        replay_start_barrier=replay_start_barrier,
+                        replay_start_event=replay_start_event,
+                        replay_start_wall_time=replay_start_wall_time,
+                        coordinator=True,
+                    )
+                except BaseException as exc:
+                    main_error = exc
+                    _abort_global_replay_start(
+                        replay_start_barrier,
+                        replay_start_event,
+                    )
 
                 # Wait for all workers and check results
                 worker_errors: list[str] = []
-                for fut in worker_futures:
-                    result = await asyncio.wrap_future(fut)
-                    if not result.get("success"):
-                        wid = result.get("worker_id")
-                        err = result.get("error") or "unknown error"
-                        worker_errors.append(f"Worker {wid}: {err}")
-                        logger.error(
-                            "Worker %d FAILED: %s",
-                            wid, err,
+                try:
+                    worker_results = await asyncio.gather(
+                        *[
+                            asyncio.wrap_future(fut)
+                            for fut in worker_futures
+                        ],
+                        return_exceptions=True,
+                    )
+                    for worker_index, result in enumerate(
+                        worker_results,
+                        start=1,
+                    ):
+                        if isinstance(result, BaseException):
+                            worker_errors.append(
+                                f"Worker {worker_index}: {result}"
+                            )
+                        elif not result.get("success"):
+                            wid = result.get("worker_id")
+                            err = result.get("error") or "unknown error"
+                            worker_errors.append(f"Worker {wid}: {err}")
+                finally:
+                    _abort_global_replay_start(
+                        replay_start_barrier,
+                        replay_start_event,
+                    )
+                    if worker_executor is not None:
+                        await asyncio.to_thread(
+                            worker_executor.shutdown,
+                            wait=True,
+                            cancel_futures=False,
                         )
+                    await asyncio.to_thread(sync_manager.shutdown)
+                    shared_prep_semaphore = None
+                    worker_executor = None
+                    sync_manager = None
+                    replay_start_barrier = None
+                    replay_start_event = None
+
+                if main_error is not None:
+                    raise main_error
                 if worker_errors:
                     raise SimulateError(
                         f"{len(worker_errors)}/{len(worker_futures)} "
                         f"workers failed: {'; '.join(worker_errors)}"
                     )
 
-                # Shutdown executor without blocking the event loop.
-                # The futures are already resolved so this is a formality.
-                if worker_executor is not None:
-                    await asyncio.to_thread(worker_executor.shutdown, wait=True)
-
                 print("  [workers] all workers completed", flush=True)
 
             else:
                 # ── Single-process concurrent (original behaviour) ─────
-                prepared_sessions = await _concurrent_run(loaded_sessions)
+                prepared_sessions = await _concurrent_run(
+                    loaded_sessions,
+                    global_offsets,
+                )
     finally:
+        if replay_start_barrier is not None:
+            _abort_global_replay_start(
+                replay_start_barrier,
+                replay_start_event,
+            )
+        if worker_executor is not None:
+            await asyncio.to_thread(
+                worker_executor.shutdown,
+                wait=True,
+                cancel_futures=False,
+            )
+        if sync_manager is not None:
+            await asyncio.to_thread(sync_manager.shutdown)
         if ksys_session is not None:
             ksys_session.stop()
         if trace_logger is not None:

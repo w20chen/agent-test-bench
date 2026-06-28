@@ -41,7 +41,9 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [Backward Compatibility](#backward-compatibility)
 - [N:M Trace-to-Agent Mapping](#nm-trace-to-agent-mapping)
 - [CPU Core Limiting](#cpu-core-limiting)
+  - [Multi-Thread Container Fairness](#multi-thread-container-fairness)
 - [N:M Simulation Sweep](#nm-simulation-sweep)
+- [Stress Test Analysis](#stress-test-analysis)
 - [Recording Internals](#recording-internals)
 - [Ksys System Metrics](#ksys-system-metrics)
 
@@ -529,6 +531,7 @@ Each entry supports:
 | `--trace-assignment-seed` | no | — | RNG seed for `random` trace assignment |
 | `--cpu-limit` | no | — | CPU core limit for the entire simulate run |
 | `--workers` | no | `1` | Number of worker processes for concurrent `cloud_model` replay. Each worker runs its own asyncio event loop, splitting N agents across W processes (N/W per loop). Eliminates the single-event-loop scheduling bottleneck that inflates `asyncio.sleep()` wake-up latency and Docker callback delay under high concurrency. `cloud_model` only. Default `1` = legacy single-process behaviour. Recommended: `min(num_agents, os.cpu_count())` |
+| `--prep-concurrency` | no | `0` (auto) | System-wide maximum concurrent container preparations (Docker run + Python bootstrap), shared across the main process and all worker processes. `0` preserves the historical limit of 20. This controls warm-up load; replay is released separately by a global all-ready barrier. |
 
 LLM flags (`--provider`, `--api-base`, `--api-key`, `--model`) are required
 for `local_model` mode only.
@@ -651,6 +654,18 @@ Python-level measurement noise while preserving the real resource competition
 Rule of thumb: `--workers = min(num_agents, os.cpu_count())`.  This is the
 default in `run_simulate_sweep.sh`.
 
+**For simulate warm-up load (`--prep-concurrency`):**
+
+| Scenario | Recommended `--prep-concurrency` | Effect |
+|----------|-------------------------------|--------|
+| Default | 0 (auto) | At most 20 preparations system-wide |
+| Faster warm-up on a validated host | 64 | At most 64 preparations system-wide |
+| Conservative Docker daemon load | 10 | At most 10 preparations system-wide |
+
+The limit does not multiply by `--workers`. For example,
+`--workers 320 --prep-concurrency 20` still permits only 20 simultaneous
+container preparations across the whole run.
+
 **For collect (`--concurrency`):**
 
 | Scenario | Recommended `--concurrency` | Reason |
@@ -717,6 +732,53 @@ via `concurrent.futures.ProcessPoolExecutor`.  Each worker independently
 loads, prepares, replays, and tears down its sessions, writing per-agent
 `trace.jsonl` files into the shared output directory.  HTML visualization
 auto-discovers worker-written directories.
+
+### Warm-Up Phase: Container Preparation
+
+Before agents can replay traces, each container must be prepared — this
+involves `docker run`, Python interpreter probing, dependency bootstrapping,
+and starting a persistent replay agent process inside the container.
+
+In early versions, container preparation was rate-limited to **20 concurrent
+operations** (hardcoded `asyncio.Semaphore(20)`) and worker processes
+prepared containers **sequentially** (one at a time).  With 640 agents this
+created visible "waves": the first 20 containers would start, then the next
+20, and so on — with agents waiting idle until every container was ready.
+
+`--prep-concurrency` (added 2026-06-28) controls preparation load:
+
+- **System-wide limit:** one shared semaphore covers the main process and all
+  worker processes; `0` preserves the historical limit of 20.
+- **Concurrent worker preparation:** sessions inside each worker prepare
+  concurrently while respecting that shared limit.
+- **Global replay barrier:** every process waits until every session is
+  prepared before replay is released.
+
+For `--workers 320 --prep-concurrency 64`, no more than 64 of the 640
+containers prepare at once. After all 640 are ready, the global barrier
+releases every worker into the replay phase.
+
+**Flow with `--prep-concurrency` enabled:**
+
+```text
+                    Preparation Phase                     Replay Phase
+                    (rate-limited by                      (fully concurrent)
+                    --prep-concurrency)
+                    ┌────────────────────┐               ┌──────────────────┐
+  t=0               │ Worker 1: agent A  │               │                  │
+                    │ Worker 1: agent B  │               │ All N agents     │
+                    │ Worker 2: agent C  │  ── all ──→   │ replay traces    │
+                    │ Worker 2: agent D  │   prepared    │ simultaneously   │
+                    │ ...                │               │                  │
+                    │ Worker 320: agent  │               │                  │
+                    └────────────────────┘               └──────────────────┘
+```
+
+> **Note:** Preparation and replay are separate phases. In `closed_loop` mode,
+> all agents are released from one global barrier after the last preparation
+> finishes; normal OS scheduling still introduces small start-time skew. In
+> `poisson` mode, the same barrier establishes one global time zero and agents
+> then follow offsets generated once for the complete N-agent population.
 
 ---
 
@@ -970,6 +1032,44 @@ in `sleep` waiting for the next source-trace action or in `docker exec`
 waiting for shell commands).  Under these conditions CFS throttle has
 negligible effect — but it also provides no benefit over native scheduling.
 
+### Multi-thread container fairness
+
+The `--cpus` flag matters most when a container runs **multi-threaded tools**.
+CFS counts CPU time across **all threads** in the cgroup:
+
+```
+不设 --cpus（无上限）:
+  Container A: 1 thread  → 1 scheduling entity → ~0.5 核 (640 containers / 320 cores)
+  Container B: 4 threads → 4 scheduling entities → ~2.0 核  ← 抢走其他容器的 CPU!
+
+设 --cpus=1（硬上限）:
+  Container A: 1 thread  → 上限 1 核 → 实际 ~0.5 核 (不变)
+  Container B: 4 threads → 4 线程共享 1 核 → 每个线程 ~0.25 核 (公平)
+```
+
+For SWE-rebench scenarios, most tools are single-threaded:
+
+| Tool type | Threads | Affected by `--cpus=1`? |
+|-----------|---------|------------------------|
+| `git diff`, `git checkout` | Single | No |
+| `bash`, `sed`, `grep` | Single | No |
+| `python script.py` | Single (typically) | No |
+| `pip install` (compiling extensions) | Multi (`-j`)  | **Yes** |
+| `pytest` | Single (default) | Usually no |
+| `make -j` | Multi-process | **Yes** |
+
+With 640 containers where 10 run `pip install` with parallel compilation:
+
+| | No `--cpus` | `--cpus=1` |
+|---|---|---|
+| 10 multi-thread containers | Each may grab 2-4 cores | Each strictly ≤1 core |
+| 630 single-thread containers | Shares squeezed by multi-thread | Unaffected |
+| Reproducibility | Low (depends on timing of parallel builds) | High |
+
+**Conclusion:** `--cpus=1` costs nothing for single-thread tools but prevents
+a small number of multi-thread tools from skewing the pressure test.  It is a
+defensive default with zero downside for I/O-bound replay workloads.
+
 ### Container-mode traces
 
 Passes `--cpus=N` to `docker run` / `podman run`.  The value may be
@@ -1082,6 +1182,7 @@ export CPU_LIMIT=1                    # default when set: 1 core per agent
 #  export CPU_LIMIT=0.5              # fractional: 0.5 core per agent
 #  unset CPU_LIMIT                   # no CFS limit — native Linux scheduling
 export WORKERS=320                    # default: os.cpu_count(). Controls per-process event-loop load
+export PREP_CONCURRENCY=0             # default: 0 (auto=20 system-wide)
 export CONTAINER_EXE=docker           # default
 
 # 3. Run the sweep
@@ -1182,6 +1283,20 @@ A global sweep summary is written to
 | `scripts/extract_agent_timeline.py` | Post-processes a simulation output directory. Scans `*/attempt_*/trace.jsonl`, extracts first/last action wall-clock timestamp per agent, and writes an agent lifecycle JSONL with summary statistics. | `--input-dir <dir> --output <path> [--verbose]` |
 | `scripts/run_simulate_sweep.sh` | Orchestrator that loops over N values, starts the system monitor, runs `simulate` with `--cpu-limit`, `--resource-monitoring on`, `--pmu-monitoring off`, `--ksys-monitoring off`, stops the monitor, extracts the agent timeline, and auto-generates `system_viz.html`. All parameters are configurable via environment variables. | `SOURCE_TRACES_DIR=<dir> bash scripts/run_simulate_sweep.sh` |
 
+#### Environment Variables Reference
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SOURCE_TRACES_DIR` | *(required)* | Path to pre-collected trace directories |
+| `SWEEP_VALUES` | `40 80 160 320` | Space-separated list of N (agent count) values |
+| `CPU_LIMIT` | `1` | Per-container CPU quota via Docker `--cpus=N`. Unset for native scheduling |
+| `WORKERS` | `os.cpu_count()` | Number of worker processes — splits agents across independent event loops |
+| `PREP_CONCURRENCY` | `0` (auto) | System-wide concurrent container preparation limit shared across all workers. `0` preserves the historical limit of 20 |
+| `REPLAY_SPEED` | `1` | Wall-clock acceleration multiplier |
+| `PYTHON_BIN` | `python3` | Python interpreter |
+| `CONTAINER_EXE` | `docker` | Container runtime |
+| `BASE_OUTPUT_DIR` | `traces/simulate/swe-rebench` | Root output directory |
+
 All three scripts are committed to the repository and ready to use on the
 target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed
 design document covering rationale, risk assessment, and implementation
@@ -1223,7 +1338,7 @@ The HTML page renders 5 time-series charts with a summary stats header.
 
 **Chart 3 — Container Count:**
 
-- **Containers** (purple): Tracks the container lifecycle — ramp-up (rate-limited by `asyncio.Semaphore(20)`), steady state, and teardown.
+- **Containers** (purple): Tracks the container lifecycle — ramp-up (rate-limited system-wide by `--prep-concurrency`, default auto: 20), steady state, and teardown.
 
 **Chart 4 — Network I/O Rate (MB/s):**
 
@@ -1302,6 +1417,102 @@ remaining sessions report "I/O operation on closed file" for every action.
    `write_resources_json`, `log_summary`) is wrapped in `try/except` that
    logs and re-raises — so a single session's cleanup failure is clearly
    attributed and does not corrupt other sessions' data.
+
+---
+
+## Stress Test Analysis
+
+When running a sweep across N ∈ {40, 80, 160, 320, 640}, the following
+metrics reveal where system bottlenecks emerge as concurrency grows.
+
+### Analysis Checklist
+
+For each N, inspect:
+
+- [ ] **`max(agent_exec_s)`** — batch wall time. Under ideal scaling this
+      stays flat as N grows. Rising values indicate CPU/IO/event-loop
+      congestion. With sufficient `--workers`, the remaining rise reflects
+      Docker daemon and system resource contention.
+- [ ] **LLM sleep drift** (`llm_latency_ms` vs expected sleep time) —
+      `asyncio.sleep()` wake-up delay. With `--workers` ≥ N/4 this should
+      approach zero. If still significant, increase `--workers`.
+- [ ] **Tool overhead** (`(ts_end - ts_start) * 1000 - duration_ms` for
+      actually-executed tools) — Docker pipe transport + event-loop
+      scheduling cost. With high `--workers`, the remaining value reflects
+      pure system-call and pipe overhead.
+- [ ] **Tool slowdown** (`duration_ms` vs `source_duration_ms`) — actual
+      tool execution time inflation due to CPU contention. When N ≫ host
+      cores, single-threaded tools may slow down as they compete for
+      scheduling slices.
+- [ ] **System resource curves** (`system_resources.jsonl`) — CPU
+      utilization, memory pressure, context-switch rate, and disk/network
+      I/O. Which resource saturates first at which N?
+
+### Practical Run Commands
+
+The following commands are tailored for a **320 vCPU ARM host** with
+N ∈ {160, 320, 640}.  All parameters follow the recommendations from
+the [Choosing the Right Setting](#choosing-the-right-setting) section.
+
+#### Recommended Sweep (N ∈ {160, 320, 640})
+
+```bash
+export SOURCE_TRACES_DIR=/path/to/40-traces
+export SWEEP_VALUES="160 320 640"
+export CPU_LIMIT=1
+export WORKERS=320
+export PREP_CONCURRENCY=64
+export REPLAY_SPEED=50
+bash scripts/run_simulate_sweep.sh
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `SWEEP_VALUES` | `160 320 640` | The target sweep range. 40 traces × N:M mapping → full over-subscription curve. |
+| `CPU_LIMIT` | `1` | Defensive cap — single-thread tools unaffected, multi-thread tools bounded. See [Multi-Thread Container Fairness](#multi-thread-container-fairness). |
+| `WORKERS` | `320` | `min(640, 320)` = 320. Each worker handles 2 agents at N=640 — near-zero event-loop congestion. |
+| `PREP_CONCURRENCY` | `64` | Warm-up phases finish faster than the default 20. Tune down to `20` if Docker daemon struggles. |
+| `REPLAY_SPEED` | `50` | 50× acceleration stresses Docker exec throughput without saturating it. Lower to `1` for wall-clock realism. |
+
+#### Comparison: No CPU Limit
+
+To measure how native CFS scheduling behaves without hard caps:
+
+```bash
+export SOURCE_TRACES_DIR=/path/to/40-traces
+export SWEEP_VALUES="160 320 640"
+export WORKERS=320
+export PREP_CONCURRENCY=64
+export REPLAY_SPEED=50
+CPU_LIMIT="" bash scripts/run_simulate_sweep.sh
+# Output dir suffix: sweep_${N}a_nolimit
+```
+
+#### Quick Smoke Test
+
+Validate the setup before committing to the full sweep:
+
+```bash
+export SOURCE_TRACES_DIR=/path/to/40-traces
+export SWEEP_VALUES="40 80"
+export CPU_LIMIT=1
+export WORKERS=320
+export PREP_CONCURRENCY=20
+bash scripts/run_simulate_sweep.sh
+# Each N completes in ~2-5 min on a 320-core host with REPLAY_SPEED=1
+```
+
+### Key Signals
+
+| Signal | What to look for | Diagnosis |
+|--------|-----------------|-----------|
+| Batch wall time | Linear with N | Expected: 40a 2min, 640a 32min |
+| Batch wall time | Super-linear with N | Event-loop contention or Docker daemon saturation — increase `--workers` |
+| LLM sleep drift | N/workers > ~4 | Event-loop loading too high — increase `--workers` |
+| Tool duration | Increases with N | CPU or I/O contention — check `system_resources.jsonl` |
+| CPU % | Plateaus below 100% | Another bottleneck (memory bandwidth, disk I/O) is limiting throughput |
+| Context switches | Spike at high N | Kernel scheduler overhead — may need `--cpu-limit` |
+| `load >> cpu_count` | Load average much higher than core count | Severe CPU queueing — processes waiting for CPU time |
 
 ---
 

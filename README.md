@@ -11,7 +11,10 @@ multi-step LLM workloads. The repo ships three top-level capabilities:
 2. **Trace simulate** — replay collected traces at scale (up to hundreds of
    concurrent agents) to measure scheduling-sensitive timing under controlled
    arrival patterns.  Uses `--workers` to distribute agents across independent
-   asyncio event loops for accurate timing at high concurrency.
+   asyncio event loops for accurate timing at high concurrency, a
+   cross-process barrier (`multiprocessing.Barrier`) to synchronise the
+   transition from preparation to replay, and `--prep-concurrency` to
+   rate-limit system-wide container preparation during warm-up.
    (`python -m trace_collect.cli simulate`).  See [Trace Collect](docs/trace-collect.md#simulate-trace-replay).
 3. **Gantt viewer demo** — an interactive FastAPI + Solid.js viewer under
    `demo/gantt_viewer/` for inspecting traces as multi-lane Gantt charts with
@@ -135,6 +138,19 @@ Three progressively deeper ways to interact with this repo:
 
    → [Trace Collect](docs/trace-collect.md)
 
+4. **Replay collected traces at scale** — simulate hundreds of concurrent
+   agents with controlled arrival patterns:
+
+   ```bash
+   PYTHONPATH=src python -m trace_collect.cli simulate \
+       --trace-manifest manifest.json --mode cloud_model \
+       --container docker --replay-speed 50 \
+       --workers 320 --prep-concurrency 64 \
+       --arrival-mode poisson --arrival-rate-per-s 0.5
+   ```
+
+   → [Simulate Trace Replay](docs/trace-collect.md#simulate-trace-replay)
+
 ---
 
 ## Running Benchmarks
@@ -160,6 +176,10 @@ SWE-rebench, Terminal-Bench, Deep Research Bench, BrowseComp, and BFCL.
 
 For task selection (`--sample`, `--instance-ids`), concurrency, resuming, and
 monitoring controls, see [Trace Collect](docs/trace-collect.md).
+
+For **simulate mode** (trace replay at scale), see the [Simulate
+section](docs/trace-collect.md#simulate-trace-replay) for flags like
+`--workers`, `--prep-concurrency`, and `--arrival-mode`.
 
 ---
 

@@ -262,3 +262,55 @@ remaining sessions report `"I/O operation on closed file"` for every action.
 - Do not run experiments.
 - Preserve current defaults under `auto`.
 - Do not enable unsupported concurrent per-attempt PMU measurements.
+
+---
+
+## Global Replay Start Barrier (2026-06-28)
+
+### Confirmed requirement
+
+For concurrent `cloud_model` simulation, every session must finish preparation
+before any session begins replay. This synchronization covers the main process
+and every subprocess worker.
+
+### Review findings
+
+- The previous implementation synchronized only within each worker, so faster
+  workers could replay while slower workers were still preparing.
+- `ProcessPoolExecutor` silently capped active child processes at host CPU
+  count while creating more chunks, which could queue complete
+  prepare/replay/teardown waves.
+- Worker payloads discarded globally assigned agent IDs, allowing N:M runs to
+  collide in output directories.
+- Poisson offsets were regenerated independently per worker, multiplying the
+  effective global arrival rate.
+- Preparation concurrency was per-worker rather than system-wide.
+- Bootstrap failures after container creation could leak the container.
+
+### Implemented design
+
+- [x] Preserve globally assigned agent IDs in typed worker inputs.
+- [x] Generate arrival offsets once globally and partition them with sessions.
+- [x] Use one manager-backed system-wide preparation semaphore; `auto`
+      preserves the historical limit of 20.
+- [x] Use a cross-process all-ready barrier plus shared wall-clock time zero.
+- [x] Start one live child process for every worker chunk so barrier
+      participants cannot remain queued.
+- [x] Abort the barrier when preparation or a worker process fails.
+- [x] Drain worker futures and shut down executor/manager resources.
+- [x] Stop a container when Python bootstrap fails after container creation.
+- [x] Reject negative `prep_concurrency` and invalid worker counts.
+- [x] Add no-Docker unit coverage for limits, partitioning, IDs, barrier
+      release/abort, CLI/API validation, and bootstrap cleanup.
+- [ ] Run focused pytest in an environment with project dev dependencies.
+- [ ] Complete fresh independent reviewer gate and resolve all findings.
+
+### Experiment semantics
+
+- `closed_loop`: all prepared processes are released from one global barrier;
+  small OS scheduling skew remains, but no worker may complete a replay wave
+  before another worker enters replay.
+- `poisson`: the same barrier establishes one time zero, then every agent uses
+  its slice of one globally generated arrival schedule.
+- `--prep-concurrency` limits preparation only. It does not change the number
+  of replaying agents once the global barrier opens.

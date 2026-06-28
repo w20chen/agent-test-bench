@@ -203,25 +203,7 @@ Once you have collected a trace, you can replay it under different arrival
 patterns or against a local serving stack. This is useful for measuring
 scheduling-sensitive timing without re-running the expensive agent loop.
 
-Export tasks and replay a trace:
-
-```bash
-PYTHONPATH=src python -c "
-import json
-from pathlib import Path
-from agents.benchmarks.swe_bench_verified import SweBenchVerified
-from agents.benchmarks.base import BenchmarkConfig
-
-config = BenchmarkConfig.from_yaml(Path('configs/benchmarks/swe-bench-verified.yaml'))
-plugin = SweBenchVerified(config)
-tasks = plugin.load_tasks()  # load all 500 tasks without select_subset
-Path('data/swebench_verified/tasks_full.json').write_text(
-    json.dumps(tasks, indent=2, ensure_ascii=False, default=str) + '\n',
-    encoding='utf-8',
-)
-print(f'Wrote {len(tasks)} tasks')
-"
-```
+**Single trace replay:**
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli simulate \
@@ -241,6 +223,31 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
     --container docker \
     --serial
 ```
+
+**Large-scale concurrent simulation:**
+
+For stress-testing with hundreds of concurrent agents, use a trace manifest
+and distribute agents across multiple worker processes:
+
+```bash
+PYTHONPATH=src python -m trace_collect.cli simulate \
+    --trace-manifest manifest.json \
+    --mode cloud_model \
+    --container docker \
+    --replay-speed 50 \
+    --workers 320 \
+    --prep-concurrency 64 \
+    --arrival-mode poisson --arrival-rate-per-s 0.5 --arrival-seed 42
+```
+
+- `--workers` splits agents across independent OS processes, each with its
+  own asyncio event loop, eliminating scheduling congestion.
+- `--prep-concurrency` limits system-wide container preparations (default
+  `0` = auto, preserving the historical limit of 20).  After the last
+  container is ready, a global barrier releases all workers simultaneously
+  into the replay phase.
+- See [Trace Collect: Simulate](docs/trace-collect.md#simulate-trace-replay)
+  for the full CLI reference, arrival modes, and N:M mapping.
 
 ### Visualize Results
 

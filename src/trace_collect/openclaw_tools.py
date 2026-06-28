@@ -746,7 +746,7 @@ class HostAgent:
             elif tool_name == "read_file":
                 result = await tool.execute(
                     path=args.get("path", ""),
-                    offset=int(args.get("offset", 0)),
+                    offset=int(args.get("offset", 1)),
                     limit=int(args.get("limit", 2000)),
                 )
             elif tool_name == "write_file":
