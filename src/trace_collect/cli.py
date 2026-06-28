@@ -55,6 +55,30 @@ def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Compatibility alias for --ksys-monitoring on.",
     )
+    parser.add_argument(
+        "--tool-profiling",
+        choices=["off", "vtune", "ksys"],
+        default="off",
+        help=(
+            "Wrap each in-container tool invocation with a platform-specific "
+            "profiler.  'vtune' uses Intel VTune hotspots (x86 only); "
+            "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
+            "'off' disables per-tool profiling (default).  "
+            "Container benchmarks only."
+        ),
+    )
+    parser.add_argument(
+        "--tool-profiling-tools",
+        type=str,
+        default="exec-pytest",
+        help=(
+            "Comma-separated full tool names to profile with --tool-profiling "
+            "(default: exec-pytest).  Accepts any tool name: "
+            "``exec-pytest,exec-pip,list_dir,read_file``.  "
+            "Exec tools use the classifier (python -m pytest \u2192 exec-pytest); "
+            "non-exec tools match by their canonical tool name."
+        ),
+    )
 
 
 def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -175,31 +199,6 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     _add_monitoring_arguments(parser)
-    parser.add_argument(
-        "--tool-profiling",
-        choices=["off", "vtune", "ksys"],
-        default="off",
-        help=(
-            "Wrap each in-container tool invocation with a platform-specific "
-            "profiler.  'vtune' uses Intel VTune hotspots (x86 only); "
-            "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
-            "'off' disables per-tool profiling (default).  "
-            "Results land under <attempt>/vtune/ (or <attempt>/ksys_tool/).  "
-            "Container benchmarks only."
-        ),
-    )
-    parser.add_argument(
-        "--tool-profiling-tools",
-        type=str,
-        default="exec-pytest",
-        help=(
-            "Comma-separated full tool names to profile with --tool-profiling "
-            "(default: exec-pytest).  Accepts any tool name: "
-            "``exec-pytest,exec-pip,list_dir,read_file``.  "
-            "Exec tools use the classifier (python -m pytest → exec-pytest); "
-            "non-exec tools match by their canonical tool name."
-        ),
-    )
 
     parser.add_argument(
         "--concurrency",
