@@ -1459,48 +1459,51 @@ the [Choosing the Right Setting](#choosing-the-right-setting) section.
 ```bash
 export SOURCE_TRACES_DIR=/path/to/40-traces
 export SWEEP_VALUES="160 320 640"
-export CPU_LIMIT=1
 export WORKERS=320
-export PREP_CONCURRENCY=64
 export REPLAY_SPEED=50
 bash scripts/run_simulate_sweep.sh
 ```
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `SWEEP_VALUES` | `160 320 640` | The target sweep range. 40 traces × N:M mapping → full over-subscription curve. |
-| `CPU_LIMIT` | `1` | Defensive cap — single-thread tools unaffected, multi-thread tools bounded. See [Multi-Thread Container Fairness](#multi-thread-container-fairness). |
-| `WORKERS` | `320` | `min(640, 320)` = 320. Each worker handles 2 agents at N=640 — near-zero event-loop congestion. |
-| `PREP_CONCURRENCY` | `64` | Warm-up phases finish faster than the default 20. Tune down to `20` if Docker daemon struggles. |
-| `REPLAY_SPEED` | `50` | 50× acceleration stresses Docker exec throughput without saturating it. Lower to `1` for wall-clock realism. |
+This minimal command already captures all the signal.  The three parameters
+below have **marginal impact** on replay timing at this scale — they are
+defensive defaults whose effect plateaus once the host is correctly
+configured:
+
+| Parameter | Default | Impact on replay results | Keep it? |
+|-----------|---------|--------------------------|----------|
+| `CPU_LIMIT` | `1` (script default) | Near-zero — I/O-bound replay rarely triggers CFS throttle. Only matters when a task runs `make -j` or `pip install`. | ✅ Safety net, zero cost |
+| `WORKERS` | `os.cpu_count()` (320) | Already at the sweet spot — 2 agents/worker at N=640, event-loop congestion near-zero. Raising to 640 wastes memory. | ✅ Optimal by default |
+| `PREP_CONCURRENCY` | `0` (auto=20) | **Zero** — only speeds up warm-up, does not touch replay timing. `64` makes prep finish ~3× faster. | 🟡 Purely convenience |
 
 #### Comparison: No CPU Limit
-
-To measure how native CFS scheduling behaves without hard caps:
 
 ```bash
 export SOURCE_TRACES_DIR=/path/to/40-traces
 export SWEEP_VALUES="160 320 640"
 export WORKERS=320
-export PREP_CONCURRENCY=64
 export REPLAY_SPEED=50
 CPU_LIMIT="" bash scripts/run_simulate_sweep.sh
 # Output dir suffix: sweep_${N}a_nolimit
 ```
 
-#### Quick Smoke Test
+#### Faster Warm-Up
 
-Validate the setup before committing to the full sweep:
+If preparation time matters (e.g., 640 containers × 20 concurrent = slow ramp):
+
+```bash
+export PREP_CONCURRENCY=64
+bash scripts/run_simulate_sweep.sh
+# Cuts prep phase to ~1/3 of default. Does not affect replay.
+```
+
+#### Quick Smoke Test
 
 ```bash
 export SOURCE_TRACES_DIR=/path/to/40-traces
 export SWEEP_VALUES="40 80"
-export CPU_LIMIT=1
 export WORKERS=320
-export PREP_CONCURRENCY=20
 bash scripts/run_simulate_sweep.sh
 # Each N completes in ~2-5 min on a 320-core host with REPLAY_SPEED=1
-```
 
 ### Key Signals
 
