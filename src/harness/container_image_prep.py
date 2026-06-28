@@ -573,7 +573,6 @@ def ensure_arm_fixed_image(
             check=True,
             timeout=30,
         )
-
         # 5. Commit the prepared container as a reusable image.
         _run(
             [container_executable, "commit", container_id, fixed_name],

@@ -40,10 +40,13 @@ _ARCH_ALIASES = {
 _CONTAINER_PYTHON_CANDIDATES = (
     # Absolute paths for common Python installations in container images.
     # Ordered by likelihood: python:3.11-slim places python3 in /usr/local/bin,
-    # Debian/Ubuntu in /usr/bin.  PATH-based fallbacks (python3, python) are
+    # Debian/Ubuntu in /usr/bin.  SWE-bench official images use conda at
+    # /opt/miniconda3 (py311).  PATH-based fallbacks (python3, python) are
     # tried last so an explicit path is preferred when available.
-    "/usr/local/bin/python3",   # python:3.11-slim (official SWE-bench images)
+    "/usr/local/bin/python3",   # python:3.11-slim
     "/usr/local/bin/python",    # symlink created by ensure_fixed_image()
+    "/opt/miniconda3/bin/python3",  # SWE-bench official images (conda py311)
+    "/opt/conda/bin/python3",       # alternative conda prefix
     "/usr/bin/python3",         # Debian/Ubuntu default
     "/usr/bin/python",
     "python3",                  # PATH-based fallback

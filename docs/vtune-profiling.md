@@ -20,26 +20,42 @@ Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<pid>/`.
 
 ## Quick Start
 
+Basic: wrap every in-container pytest with VTune
 ```bash
-# Basic: wrap every in-container pytest with VTune
-python -m trace_collect.cli collect \
+PYTHONPATH=src python3 -m trace_collect.cli collect \
   --scaffold openclaw \
-  --benchmark swe_bench_verified \
+  --benchmark swe-bench-verified \
   --container docker \
+  --sample 1 \
+  --mcp-config none \
+  --provider deepseek \
+  --model deepseek-v4-flash \
   --vtune
+```
 
-# With coarse system metrics per test window
-python -m trace_collect.cli collect \
+With coarse system metrics per test window
+```bash
+PYTHONPATH=src python3 -m trace_collect.cli collect \
   --scaffold openclaw \
-  --benchmark swe_bench_verified \
+  --benchmark swe-bench-verified \
   --container docker \
+  --sample 1 \
+  --mcp-config none \
+  --provider deepseek \
+  --model deepseek-v4-flash \
   --vtune --vtune-coarse
+```
 
-# With full TMA breakdown
-python -m trace_collect.cli collect \
+With full TMA breakdown
+```bash
+PYTHONPATH=src python3 -m trace_collect.cli collect \
   --scaffold openclaw \
-  --benchmark swe_bench_verified \
+  --benchmark swe-bench-verified \
   --container docker \
+  --sample 1 \
+  --mcp-config none \
+  --provider deepseek \
+  --model deepseek-v4-flash \
   --vtune --vtune-coarse --vtune-fine
 ```
 
