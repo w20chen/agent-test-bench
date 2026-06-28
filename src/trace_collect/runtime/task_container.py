@@ -65,12 +65,32 @@ def _format_probe_failure_details(result: subprocess.CompletedProcess[str]) -> s
     return "; ".join(parts)
 
 
+def _resolve_userbase_site_packages(userbase: Path) -> Path | None:
+    """Return the site-packages dir inside *userbase*, or None if not found.
+
+    ``pip install --user`` places packages under
+    ``lib/pythonX.Y/site-packages/``.  We scan for any matching directory
+    because the Python minor version may vary across container images.
+    """
+    for lib_dir in ("lib", "lib64"):
+        lib_path = userbase / lib_dir
+        if not lib_path.is_dir():
+            continue
+        for py_dir in sorted(lib_path.iterdir(), reverse=True):
+            if py_dir.is_dir() and py_dir.name.startswith("python"):
+                sp = py_dir / "site-packages"
+                if sp.is_dir():
+                    return sp
+    return None
+
+
 def _bootstrap_marker_matches(
     marker: Path,
     *,
     requirements: tuple[str, ...],
     arch: str | None = None,
     site_dir: Path | None = None,
+    userbase_dir: Path | None = None,
 ) -> bool:
     """True when *marker* was written for the exact same *requirements* and *arch*.
 
@@ -86,11 +106,12 @@ def _bootstrap_marker_matches(
     across minor Python updates and symlink variations (e.g. ``/usr/local/bin/python``
     vs ``/usr/local/bin/python3`` on the same image).
 
-    When *site_dir* is provided, also verifies that the actual installed
-    packages match the manifest recorded in the marker.  This prevents stale
-    cache contamination where extra packages from a previous run leak into
-    a new container via the shared ``pydeps`` directory (mounted from the
-    host home directory by ``start_task_container``).
+    When *site_dir* and/or *userbase_dir* are provided, also verifies that
+    the actual installed packages match the manifest recorded in the marker.
+    This prevents stale cache contamination where extra packages from a
+    previous run leak into a new container via the shared pydeps/ or
+    .pyuserbase/ directories (mounted from the host home directory by
+    ``start_task_container``).
     """
     if not marker.exists():
         return False
@@ -101,27 +122,28 @@ def _bootstrap_marker_matches(
     expected: dict[str, Any] = {"requirements": list(requirements)}
     if arch:
         expected["arch"] = arch
-    # Also accept markers that have a "packages" manifest (new format).
-    # The payload is considered matching as long as requirements + arch
-    # coincide — the package-list check is done separately below.
     req_arch_match = all(
         payload.get(k) == v for k, v in expected.items()
     )
     if not req_arch_match:
         return False
 
-    # Verify the installed package set hasn't been contaminated.
-    # The marker may include a "packages" manifest (new format) or not
-    # (legacy format).  When site_dir is provided, we cross-check the
-    # actual .dist-info directories against the manifest.
-    #
-    # Legacy markers (without a "packages" key) are considered stale
-    # because we cannot verify the cache hasn't been contaminated.
-    if site_dir is not None and site_dir.exists():
-        recorded = payload.get("packages")
+    # Verify the installed package sets haven't been contaminated.
+    # Both pydeps/ (.dist-info from --target) and .pyuserbase/ (pip
+    # --user site-packages from get-pip.py) are checked because
+    # PYTHONUSERBASE is set in the container and any packages installed
+    # there by a previous agent's pip commands will persist and leak
+    # into subsequent containers via the host home-directory mount.
+    for label, pkg_key, check_dir in (
+        ("pydeps", "packages", site_dir),
+        ("userbase", "userbase_packages", userbase_dir),
+    ):
+        if check_dir is None or not check_dir.exists():
+            continue
+        recorded = payload.get(pkg_key)
         if recorded is None:
             print(
-                f"[bootstrap] legacy marker (no package manifest), "
+                f"[bootstrap] legacy marker (no {pkg_key} manifest), "
                 f"forcing rebuild: {marker}",
                 file=sys.stderr,
                 flush=True,
@@ -129,12 +151,12 @@ def _bootstrap_marker_matches(
             return False
         recorded_set = set(recorded)
         if recorded_set:
-            actual = _list_bootstrap_packages(site_dir)
+            actual = _list_bootstrap_packages(check_dir)
             if actual != recorded_set:
                 extra = actual - recorded_set
                 missing = recorded_set - actual
                 print(
-                    f"[bootstrap] cache contamination detected in {site_dir}: "
+                    f"[bootstrap] {label} cache contamination detected in {check_dir}: "
                     + (f"extra={sorted(extra)} " if extra else "")
                     + (f"missing={sorted(missing)}" if missing else ""),
                     file=sys.stderr,
@@ -766,6 +788,12 @@ def bootstrap_task_container_python(
         dict.fromkeys(OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS + extra_requirements)
     )
 
+    userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
+    # Resolve the userbase site-packages directory for contamination checks.
+    # Python places --user packages under lib/pythonX.Y/site-packages/;
+    # we probe for any lib/python*/site-packages/ subdirectory.
+    userbase_site = _resolve_userbase_site_packages(userbase)
+
     # Fast-path: check marker before acquiring the lock so workers that
     # arrive after the first one has finished skip the lock entirely.
     if _bootstrap_marker_matches(
@@ -773,6 +801,7 @@ def bootstrap_task_container_python(
         requirements=requirements,
         arch=arch,
         site_dir=exec_config.bootstrap_site_dir,
+        userbase_dir=userbase_site,
     ):
         print(
             f"[bootstrap] shared cache hit ({arch}): {marker}",
@@ -790,6 +819,7 @@ def bootstrap_task_container_python(
             requirements=requirements,
             arch=arch,
             site_dir=exec_config.bootstrap_site_dir,
+            userbase_dir=userbase_site,
         ):
             print(
                 f"[bootstrap] shared cache hit ({arch}, after lock): {marker}",
@@ -806,6 +836,15 @@ def bootstrap_task_container_python(
             )
             marker.unlink(missing_ok=True)
             shutil.rmtree(exec_config.bootstrap_site_dir, ignore_errors=True)
+            # Also clean the userbase site-packages to purge any
+            # agent-contaminated packages that leak via PYTHONUSERBASE.
+            if userbase_site is not None and userbase_site.exists():
+                print(
+                    f"[bootstrap] cleaning contaminated userbase: {userbase_site}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                shutil.rmtree(userbase_site, ignore_errors=True)
 
         userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
         userbase.mkdir(parents=True, exist_ok=True)
@@ -889,19 +928,41 @@ subprocess.check_call(
 _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
 _log("step 3/3: writing marker (with package manifest) ...")
-# Collect the set of installed packages for cache-contamination detection.
-# Keep in sync with _list_bootstrap_packages (host-side).
+# Collect the set of installed packages in pydeps/ for cache-contamination
+# detection.  Keep in sync with _list_bootstrap_packages (host-side).
 _installed: list[str] = []
 for _entry in site_dir.iterdir():
     if _entry.is_dir() and _entry.name.endswith(".dist-info"):
         _stem = _entry.name[: -len(".dist-info")]
         _pkg = _stem.rsplit("-", 1)[0] if "-" in _stem else _stem
         _installed.append(_pkg)
+
+# Also collect packages in the userbase site-packages (from get-pip.py
+# --user) so we can detect contamination of the PYTHONUSERBASE path.
+_userbase_installed: list[str] = []
+for _lib in ("lib", "lib64"):
+    _lib_dir = userbase / _lib
+    if not _lib_dir.is_dir():
+        continue
+    for _py_dir in sorted(_lib_dir.iterdir(), reverse=True):
+        if _py_dir.is_dir() and _py_dir.name.startswith("python"):
+            _sp = _py_dir / "site-packages"
+            if _sp.is_dir():
+                for _entry in _sp.iterdir():
+                    if _entry.is_dir() and _entry.name.endswith(".dist-info"):
+                        _stem = _entry.name[: -len(".dist-info")]
+                        _pkg = _stem.rsplit("-", 1)[0] if "-" in _stem else _stem
+                        _userbase_installed.append(_pkg)
+            break
+    if _userbase_installed:
+        break
+
 marker.write_text(
     json.dumps({{
         "requirements": requirements,
         "arch": arch,
         "packages": sorted(_installed),
+        "userbase_packages": sorted(_userbase_installed),
     }}),
     encoding="utf-8",
 )
