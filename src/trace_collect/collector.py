@@ -1266,12 +1266,23 @@ async def _run_openclaw_in_task_container(
     start_extra_args = list(exec_config.start_extra_args)
     vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
     vtune = tool_profiling == "vtune"
+    ksys_tool = tool_profiling == "ksys"
     if vtune:
         from trace_collect.vtune_report import vtune_container_run_args
 
         start_extra_args.extend(
             vtune_container_run_args(vtune_out_dir, tools=tool_profiling_tools or ["exec-pytest"])
         )
+    elif ksys_tool:
+        # ksys per-tool: coarse-only for now (no ksys binary wrapping).
+        # Activate the in-container /proc sampler via env vars.
+        vtune_out_dir.mkdir(parents=True, exist_ok=True)
+        tools = ",".join(tool_profiling_tools or ["exec-pytest"])
+        start_extra_args.extend([
+            "-e", "VTUNE_PROFILE=1",
+            "-e", f"VTUNE_OUT={vtune_out_dir.resolve()}",
+            "-e", f"VTUNE_TOOLS={tools}",
+        ])
     container_id = start_task_container(
         fixed_image,
         executable=container_executable,
@@ -1295,6 +1306,7 @@ async def _run_openclaw_in_task_container(
             # hardware counters, causing kernel multiplexing and degraded
             # accuracy on both sides.  Disable the host PMU to give VTune
             # exclusive counter access during profiled pytest windows.
+            # ksys / coarse-only mode does not use PMU, so host PMU stays on.
             enable_pmu=ctx.enable_pmu_monitoring and not vtune,
             enable_memory_bandwidth=ctx.enable_memory_bandwidth_monitoring,
         )
@@ -1407,7 +1419,7 @@ async def _run_openclaw_in_task_container(
     finally:
         if _stats_sampler is not None:
             ctx.samples = _stats_sampler.stop()
-        if vtune:
+        if vtune or ksys_tool:
             from trace_collect.vtune_report import finalize_vtune
 
             finalize_vtune(

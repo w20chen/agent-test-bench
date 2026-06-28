@@ -297,10 +297,17 @@ def finalize_vtune(
             json.dumps({k: summary.get(k) for k in _COARSE_KEYS}, indent=2) + "\n",
             encoding="utf-8",
         )
+        # fine.json: VTune/ksys summary.  When the result/ directory is
+        # absent (ksys coarse-only mode, or VTune collection failed), emit
+        # an empty vtune block so downstream consumers see a consistent shape.
+        result_dir = run_dir / "result"
+        vtune_data: dict[str, Any] = {}
+        if result_dir.is_dir():
+            vtune_data = _vtune_summary(result_dir)
         (run_dir / "fine.json").write_text(
             json.dumps(
                 {
-                    "vtune": _vtune_summary(run_dir / "result"),
+                    "vtune": vtune_data,
                     "perf": {k: summary.get(k) for k in _FINE_PERF_KEYS},
                 },
                 indent=2,

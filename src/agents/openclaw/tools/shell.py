@@ -300,13 +300,14 @@ class ExecTool(Tool):
         vtune_window: dict[str, Any] | None = None
         vtune_tools_raw = os.environ.get("VTUNE_TOOLS", "exec-pytest")
         vtune_tools = {t.strip() for t in vtune_tools_raw.split(",") if t.strip()}
-        if os.environ.get("VTUNE_PROFILE") == "1" and classify_exec_tool_name(
+        # /proc sampler runs whenever tool-profiling is active (vtune or ksys).
+        # VTune wrapping only happens when VTUNE_BIN is also set (vtune mode).
+        _tool_profile = os.environ.get("VTUNE_PROFILE") == "1"
+        if _tool_profile and classify_exec_tool_name(
             "exec", {"command": command}
         ) in vtune_tools:
-            vtune_bin = os.environ.get("VTUNE_BIN", "vtune")
+            vtune_bin = os.environ.get("VTUNE_BIN", "")
             vtune_out = os.environ.get("VTUNE_OUT", cwd)
-            # Microsecond-resolution timestamp to avoid directory collisions
-            # when concurrent pytest invocations start in the same second.
             now_ns = time.time_ns()
             run_dir = os.path.join(
                 vtune_out,
@@ -314,18 +315,20 @@ class ExecTool(Tool):
                 f"_{(now_ns // 1_000) % 1_000_000:06d}_{os.getpid()}",
             )
             os.makedirs(run_dir, exist_ok=True)
-            run_command = (
-                f"{shlex.quote(vtune_bin)} -collect hotspots -data-limit=0 "
-                f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
-                f"-- bash -lc {shlex.quote(command)}"
-            )
+            if vtune_bin:
+                # VTune mode: wrap command with VTune profiler.
+                run_command = (
+                    f"{shlex.quote(vtune_bin)} -collect hotspots -data-limit=0 "
+                    f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
+                    f"-- bash -lc {shlex.quote(command)}"
+                )
+            # else: ksys / coarse-only mode — run command directly, only
+            # the /proc sampler collects data.
             vtune_window = {"dir": run_dir, "cmd": command, "ts_start": time.time()}
 
-        # Per-invocation proc-tree sampler (only for VTune-wrapped commands).
-        # Runs in-container alongside the subprocess to collect per-pytest
-        # CPU / memory / disk-I/O / context-switch samples that are scoped
-        # to the exact process tree, avoiding container-level cgroup
-        # contamination from concurrent tool invocations.
+        # Per-invocation proc-tree sampler.  Runs in-container alongside the
+        # subprocess whenever tool-profiling is active (vtune or ksys), scoped
+        # to the exact process tree via /proc/<pid>.
         _sampler_thread: threading.Thread | None = None
         _sampler_stop: threading.Event | None = None
 
