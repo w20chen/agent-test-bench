@@ -1295,6 +1295,7 @@ A global sweep summary is written to
 | `REPLAY_SPEED` | `1` | Wall-clock acceleration multiplier |
 | `PYTHON_BIN` | `python3` | Python interpreter |
 | `CONTAINER_EXE` | `docker` | Container runtime |
+| `TASK_CONTAINER_NO_PROXY` | *(unset)* | Set to `1` to prevent host proxy env vars (`HTTP_PROXY`, `ALL_PROXY`, etc.) from leaking into task containers. Useful when the host proxy (e.g. a SOCKS5 proxy that breaks HTTPS) should not affect in-container pip operations. |
 | `BASE_OUTPUT_DIR` | `traces/simulate/swe-rebench` | Root output directory |
 
 All three scripts are committed to the repository and ready to use on the
