@@ -773,7 +773,14 @@ env["PYTHONUSERBASE"] = str(userbase)
 get_pip = userbase / "get-pip.py"
 _log("step 1/3: bootstrapping pip via get-pip.py ...")
 subprocess.check_call(
-    [sys.executable, str(get_pip), "--user", "--break-system-packages"],
+    [
+        sys.executable,
+        str(get_pip),
+        "--user",
+        "--break-system-packages",
+        "--index-url",
+        {pip_index_url!r},
+    ],
     env=env,
 )
 pip_bin = userbase / "bin" / "pip"
