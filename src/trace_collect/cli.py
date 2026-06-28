@@ -181,7 +181,7 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="off",
         help=(
             "Wrap each in-container tool invocation with a platform-specific "
-            "profiler.  'vtune' uses Intel VTune uarch-exploration (x86 only); "
+            "profiler.  'vtune' uses Intel VTune hotspots (x86 only); "
             "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
             "'off' disables per-tool profiling (default).  "
             "Results land under <attempt>/vtune/ (or <attempt>/ksys_tool/).  "

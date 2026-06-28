@@ -23,7 +23,7 @@ per-invocation metrics:
 |---|---|---|
 | `summary.json` | Command, wall-clock duration, return code, sample count, coarse source label | `window.json` metadata |
 | `coarse.json` | CPU%, memory, disk I/O, network, context switches | In-container `/proc` proc-tree sampler (`per_tool_samples.jsonl`) — accurate even with concurrent invocations |
-| `fine.json` | VTune Top-down Microarchitecture Analysis (TMA) — Front/Back-End Bound, Memory Bound, CPI, etc. | VTune `-report summary` CSV parsing |
+| `fine.json` | VTune hotspots summary — CPI, instructions, clockticks, branch mispredict, cache metrics | VTune `-report summary` CSV parsing |
 
 Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<microsecond>_<pid>/`.
 
@@ -241,7 +241,7 @@ If you see `permission denied` errors in VTune output, this is the fix.
 │    │  After agent finishes:                                      │
 │    │    vtune_report.finalize_vtune()                            │
 │    │    → read per_tool_samples.jsonl (in-container /proc)       │
-│    │    → fall back to ContainerStatsSampler samples if absent    │
+│    │    → fall back to ContainerStatsSampler samples if absent   │
 │    │    → emit summary.json + coarse.json + fine.json            │
 │    │                                                             │
 ├─────── Container boundary ───────────────────────────────────────┤
@@ -249,7 +249,7 @@ If you see `permission denied` errors in VTune output, this is the fix.
 │    ▼                                                             │
 │  shell.py (ExecTool)                                             │
 │    │  if VTUNE_PROFILE=1 and tool matches VTUNE_TOOLS:           │
-│    │    wrap: vtune -collect uarch-exploration -- bash ...       │
+│    │    wrap: vtune -collect hotspots -- bash ...              │
 │    │    start per-tool /proc sampler thread (0.5 s interval)     │
 │    │    record ts_start / ts_end / returncode → window.json      │
 │    │                                                             │
@@ -257,8 +257,8 @@ If you see `permission denied` errors in VTune output, this is the fix.
 │  Per-invocation output directory:                                │
 │    pytest_<ts>_<us>_<pid>/                                       │
 │      ├── window.json               timing + exit code            │
-│      ├── result/                    VTune raw PMU data            │
-│      └── per_tool_samples.jsonl     /proc proc-tree samples       │
+│      ├── result/                    VTune raw PMU data           │
+│      └── per_tool_samples.jsonl     /proc proc-tree samples      │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -293,6 +293,10 @@ The `coarse_source` field in `summary.json` records which source was used
   `--tool-profiling vtune` is active.  Zero overhead otherwise.
 - **Opt-in by default**: `--tool-profiling` defaults to `off`.
   Existing workflows are completely unaffected.
+- **hotspots mode**: VTune ``hotspots`` collection uses ~6 basic PMU events
+  (cycles, instructions, branches, cache) that fit within the per-core PMU
+  counter budget on any core count, avoiding the multi-core event distribution
+  issue that plagues ``uarch-exploration`` mode.
 - **Per-tool-window slicing**: Rather than profiling the entire agent run,
   each matching tool invocation is profiled independently.
 - **In-container `/proc` sampler**: CPU, memory, disk I/O, and context
@@ -325,7 +329,8 @@ python scripts/analyze_vtune_aggregate.py --input traces/my_sweep/
 
 - Intel x86 native only (no ARM, no QEMU) for `--tool-profiling vtune`.
 - Container-mode benchmarks only.
-- Adds modest overhead: VTune uarch-exploration collects PMU counters during
-  the pytest run.  Expect 5–15% runtime increase per profiled test.
+- Adds modest overhead: VTune hotspots collects PMU counters during
+  the pytest run.  Expect 2–5% runtime increase per profiled test
+  (significantly lower than uarch-exploration's 5-15%).
 - The in-container `/proc` sampler adds negligible overhead (~60 syscalls
   per 0.5 s interval for a typical pytest process tree).

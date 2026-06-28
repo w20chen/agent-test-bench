@@ -315,7 +315,7 @@ class ExecTool(Tool):
             )
             os.makedirs(run_dir, exist_ok=True)
             run_command = (
-                f"{shlex.quote(vtune_bin)} -collect uarch-exploration -data-limit=0 "
+                f"{shlex.quote(vtune_bin)} -collect hotspots -data-limit=0 "
                 f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
                 f"-- bash -lc {shlex.quote(command)}"
             )

@@ -367,7 +367,7 @@ Host                                    Container
 ────                                    ─────────
 collector.py                            shell.py (ExecTool)
   │                                       │
-  ├─ vtune_container_run_args()           ├─ vtune -collect uarch-exploration
+  ├─ vtune_container_run_args()           ├─ vtune -collect hotspots
   │   → mount VTune, set env vars         │   -- bash -lc "pytest ..."
   │                                       │
   ├─ ContainerStatsSampler (always)       ├─ _sample_proc_tree() thread
@@ -393,7 +393,7 @@ Sourced from the in-container `/proc` proc-tree sampler:
 
 ### Per-tool metrics (fine.json)
 
-Sourced from VTune `uarch-exploration` + `-report summary -format csv`:
+Sourced from VTune ``hotspots`` + ``-report summary -format csv``:
 
 | Metric | VTune TMA Field |
 |---|---|

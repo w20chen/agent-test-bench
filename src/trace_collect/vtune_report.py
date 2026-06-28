@@ -90,21 +90,15 @@ def vtune_container_run_args(
     ]
 
 
-def _vtune_tma(result_dir: Path) -> dict[str, Any]:
+def _vtune_summary(result_dir: Path) -> dict[str, Any]:
     """Parse ``vtune -report summary -format csv`` into a flat metric dict.
 
+    Works for both ``hotspots`` and ``uarch-exploration`` collection modes.
     VTune ``-report summary`` CSV has three columns::
 
         Hierarchy Level, Metric Name, Metric Value
-        0, Collection and Platform Info,
-        1, CPU,
-        ...
-        <empty>, Elapsed Time, 5.123
-        <empty>, CPI Rate, 0.756
-        ...
 
-    We use the second column as key and the third as value, skipping the
-    header line and any rows without a non-empty metric name.
+    We use the second column as key and the third as value.
     """
     vtune_bin, _ = _resolve_vtune()
     try:
@@ -306,7 +300,7 @@ def finalize_vtune(
         (run_dir / "fine.json").write_text(
             json.dumps(
                 {
-                    "vtune_tma": _vtune_tma(run_dir / "result"),
+                    "vtune": _vtune_summary(run_dir / "result"),
                     "perf": {k: summary.get(k) for k in _FINE_PERF_KEYS},
                 },
                 indent=2,

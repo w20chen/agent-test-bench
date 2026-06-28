@@ -210,7 +210,7 @@ def _collect_all_windows(base_dir: Path) -> list[dict[str, Any]]:
             perf = fine.get("perf", {})
             row.update(_flatten_nested(perf, "perf", keys=_PERF_KEYS))
             # VTune TMA
-            tma = fine.get("vtune_tma", {})
+            tma = fine.get("vtune", {})
             if isinstance(tma, dict) and "error" not in tma:
                 row.update(_parse_vtune_tma(tma))
 
