@@ -216,7 +216,7 @@ PYTHONPATH=src python -m trace_collect.cli simulate \
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli simulate \
-    --source-dir ~/agent-test-bench/traces/swebench_verified/deepseek-v4-flash/20260605T182234 \
+    --source-dir traces/swebench_verified/deepseek-v4-flash/20260605T182234 \
     --mode cloud_model \
     --replay-speed 1 \
     --task-source data/swebench_verified/tasks_full.json \

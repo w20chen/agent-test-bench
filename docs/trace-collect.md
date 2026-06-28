@@ -584,13 +584,13 @@ interpreting experimental results.
 
 ```
 Main Process                    Worker-1 Process             Worker-2 Process
-  │                                │                            │
+  │                                │                             │
   │─ chunk[0]: agent 1..K          │─ chunk[1]: agent K+1..2K    │─ chunk[2]: agent 2K+1..N
   │  own event loop                │  own event loop             │  own event loop
-  │  own containers                 │  own containers              │  own containers
-  │  own trace files                │  own trace files             │  own trace files
-  │                                │                            │
-  └─ (runs IN PARALLEL) ───────────┴─ (runs IN PARALLEL) ───────┴─ ...
+  │  own containers                │  own containers             │  own containers
+  │  own trace files               │  own trace files            │  own trace files
+  │                                │                             │
+  └─ (runs IN PARALLEL) ───────────┴─ (runs IN PARALLEL) ────────┴─ ...
 ```
 
 **Collect `--concurrency 3`:**
@@ -713,10 +713,11 @@ flag eliminates this measurement noise by splitting agents across independent
 processes, each with its own event loop:
 
 ```
-真实延迟 = 容器资源竞争 (压力测试目标) + event loop 调度延迟 (测量噪声)
+Real latency = container resource contention (stress-test target) + event-loop scheduling latency (measurement noise)
 
-更多 workers → 调度噪声 → 0
-更多 workers → 容器资源竞争不变 (Docker daemon 仍然是瓶颈)
+More workers → scheduling noise → 0
+
+More workers → container resource contention unchanged (Docker daemon remains the bottleneck)
 ```
 
 **Recommended worker counts for a 320-core host (640 agents):**
@@ -809,17 +810,17 @@ run is split into three phases:
 ```
   start_time
   │
-  ├─ [SETUP] ──────────────────────────────────────────┤ image_ready_time
+  ├─ [SETUP] ───────────────────────────────────────────┤ image_ready_time
   │   disk preflight, ensure_fixed_image(),             │
   │   start_task_container(), container bootstrap       │
   │
-  ├─ [AGENT EXECUTION] ────────────────────────────────┤ agent_end_time
+  ├─ [AGENT EXECUTION] ─────────────────────────────────┤ agent_end_time
   │   inner(ctx): agent loop (LLM calls + tool execs)   │
   │   │ first action ts_start                           │
   │   │ ...                                             │
   │   │ last action ts_end                              │
   │
-  ├─ [TEARDOWN] ───────────────────────────────────────┤ end_time
+  ├─ [TEARDOWN] ────────────────────────────────────────┤ end_time
   │   stop samplers, stop recording, stop container,    │
   │   write manifest, write resources.json              │
 ```
@@ -1629,21 +1630,21 @@ may see different results and diverge from the original trace.
 ```
                           HOST FILESYSTEM
  ┌──────────────────────────────────────────────────────────────────┐
- │  $HOME/.cache/task-container-bootstrap/                         │
+ │  $HOME/.cache/task-container-bootstrap/                          │
  │  ├── pydeps/                   ← pip install --target (bootstrap)│
- │  │   └── .bootstrap-ready.json ← marker: requirements + manifest│
- │  └── .pyuserbase/              ← get-pip.py --user              │
- │      ├── bin/pip                                                │
- │      └── lib/python3.12/site-packages/                          │
+ │  │   └── .bootstrap-ready.json ← marker: requirements + manifest │
+ │  └── .pyuserbase/              ← get-pip.py --user               │
+ │      ├── bin/pip                                                 │
+ │      └── lib/python3.12/site-packages/                           │
  │                                                                  │
- │  Mounted into every container via -v $HOME:$HOME                │
+ │  Mounted into every container via -v $HOME:$HOME                 │
  └──────────────────────────────────────────────────────────────────┘
 
               CONTAINER (ephemeral)         CONTAINER (ephemeral)
               ┌──────────────────┐         ┌──────────────────┐
               │ /testbed         │         │ /testbed         │
               │ site-packages/   │         │ site-packages/   │
-              │ (容器内，不持久) │         │ (容器内，不持久) │
+              │ (non-persistent) │         │ (non-persistent) │
               └──────────────────┘         └──────────────────┘
 ```
 
