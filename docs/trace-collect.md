@@ -1038,13 +1038,13 @@ The `--cpus` flag matters most when a container runs **multi-threaded tools**.
 CFS counts CPU time across **all threads** in the cgroup:
 
 ```
-不设 --cpus（无上限）:
-  Container A: 1 thread  → 1 scheduling entity → ~0.5 核 (640 containers / 320 cores)
-  Container B: 4 threads → 4 scheduling entities → ~2.0 核  ← 抢走其他容器的 CPU!
+Without --cpus (no upper limit):
+  Container A: 1 thread  → 1 scheduling entity → ~0.5 core (640 containers / 320 cores)
+  Container B: 4 threads → 4 scheduling entities → ~2.0 cores  ← Steals CPU from other containers!
 
-设 --cpus=1（硬上限）:
-  Container A: 1 thread  → 上限 1 核 → 实际 ~0.5 核 (不变)
-  Container B: 4 threads → 4 线程共享 1 核 → 每个线程 ~0.25 核 (公平)
+With --cpus=1 (hard cap):
+  Container A: 1 thread  → cap 1 core → actual ~0.5 core (unchanged)
+  Container B: 4 threads → 4 threads share 1 core → ~0.25 core per thread (fair)
 ```
 
 For SWE-rebench scenarios, most tools are single-threaded:
@@ -1460,7 +1460,6 @@ the [Choosing the Right Setting](#choosing-the-right-setting) section.
 export SOURCE_TRACES_DIR=/path/to/40-traces
 export SWEEP_VALUES="160 320 640"
 export WORKERS=320
-export REPLAY_SPEED=50
 bash scripts/run_simulate_sweep.sh
 ```
 
@@ -1481,7 +1480,6 @@ configured:
 export SOURCE_TRACES_DIR=/path/to/40-traces
 export SWEEP_VALUES="160 320 640"
 export WORKERS=320
-export REPLAY_SPEED=50
 CPU_LIMIT="" bash scripts/run_simulate_sweep.sh
 # Output dir suffix: sweep_${N}a_nolimit
 ```
