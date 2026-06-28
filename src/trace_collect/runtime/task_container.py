@@ -70,6 +70,7 @@ def _bootstrap_marker_matches(
     *,
     requirements: tuple[str, ...],
     arch: str | None = None,
+    site_dir: Path | None = None,
 ) -> bool:
     """True when *marker* was written for the exact same *requirements* and *arch*.
 
@@ -84,6 +85,12 @@ def _bootstrap_marker_matches(
     Python version is intentionally NOT included so that the same cache works
     across minor Python updates and symlink variations (e.g. ``/usr/local/bin/python``
     vs ``/usr/local/bin/python3`` on the same image).
+
+    When *site_dir* is provided, also verifies that the actual installed
+    packages match the manifest recorded in the marker.  This prevents stale
+    cache contamination where extra packages from a previous run leak into
+    a new container via the shared ``pydeps`` directory (mounted from the
+    host home directory by ``start_task_container``).
     """
     if not marker.exists():
         return False
@@ -94,7 +101,78 @@ def _bootstrap_marker_matches(
     expected: dict[str, Any] = {"requirements": list(requirements)}
     if arch:
         expected["arch"] = arch
-    return payload == expected
+    # Also accept markers that have a "packages" manifest (new format).
+    # The payload is considered matching as long as requirements + arch
+    # coincide — the package-list check is done separately below.
+    req_arch_match = all(
+        payload.get(k) == v for k, v in expected.items()
+    )
+    if not req_arch_match:
+        return False
+
+    # Verify the installed package set hasn't been contaminated.
+    # The marker may include a "packages" manifest (new format) or not
+    # (legacy format).  When site_dir is provided, we cross-check the
+    # actual .dist-info directories against the manifest.
+    #
+    # Legacy markers (without a "packages" key) are considered stale
+    # because we cannot verify the cache hasn't been contaminated.
+    if site_dir is not None and site_dir.exists():
+        recorded = payload.get("packages")
+        if recorded is None:
+            print(
+                f"[bootstrap] legacy marker (no package manifest), "
+                f"forcing rebuild: {marker}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        recorded_set = set(recorded)
+        if recorded_set:
+            actual = _list_bootstrap_packages(site_dir)
+            if actual != recorded_set:
+                extra = actual - recorded_set
+                missing = recorded_set - actual
+                print(
+                    f"[bootstrap] cache contamination detected in {site_dir}: "
+                    + (f"extra={sorted(extra)} " if extra else "")
+                    + (f"missing={sorted(missing)}" if missing else ""),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+
+    return True
+
+
+def _list_bootstrap_packages(site_dir: Path) -> set[str]:
+    """Return the set of installed package names in *site_dir*.
+
+    Inspects ``.dist-info`` directories (PEP 376) to determine which
+    packages are currently installed.  This is a lightweight check that
+    does not require importing any packages or running pip.
+
+    Keep in sync with the inline bootstrap script that writes the
+    ``"packages"`` manifest to the marker JSON.
+    """
+    packages: set[str] = set()
+    try:
+        for entry in site_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name.endswith(".dist-info"):
+                # PEP 376: <package_name>-<version>.dist-info
+                # Strip the .dist-info suffix first, then rsplit at the
+                # last dash to separate the version from the package name.
+                # The .dist-info directory name already uses the PEP 503
+                # normalised form (lowercase, underscores for non-alnum).
+                stem = name[: -len(".dist-info")]
+                pkg_name = stem.rsplit("-", 1)[0] if "-" in stem else stem
+                packages.add(pkg_name)
+    except OSError:
+        return set()
+    return packages
 
 
 def _is_retryable_get_pip_error(exc: Exception) -> bool:
@@ -694,6 +772,7 @@ def bootstrap_task_container_python(
         marker,
         requirements=requirements,
         arch=arch,
+        site_dir=exec_config.bootstrap_site_dir,
     ):
         print(
             f"[bootstrap] shared cache hit ({arch}): {marker}",
@@ -710,6 +789,7 @@ def bootstrap_task_container_python(
             marker,
             requirements=requirements,
             arch=arch,
+            site_dir=exec_config.bootstrap_site_dir,
         ):
             print(
                 f"[bootstrap] shared cache hit ({arch}, after lock): {marker}",
@@ -808,9 +888,21 @@ subprocess.check_call(
 )
 _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
-_log("step 3/3: writing marker ...")
+_log("step 3/3: writing marker (with package manifest) ...")
+# Collect the set of installed packages for cache-contamination detection.
+# Keep in sync with _list_bootstrap_packages (host-side).
+_installed: list[str] = []
+for _entry in site_dir.iterdir():
+    if _entry.is_dir() and _entry.name.endswith(".dist-info"):
+        _stem = _entry.name[: -len(".dist-info")]
+        _pkg = _stem.rsplit("-", 1)[0] if "-" in _stem else _stem
+        _installed.append(_pkg)
 marker.write_text(
-    json.dumps({{"requirements": requirements, "arch": arch}}),
+    json.dumps({{
+        "requirements": requirements,
+        "arch": arch,
+        "packages": sorted(_installed),
+    }}),
     encoding="utf-8",
 )
 # Keep userbase intact so the agent can use pip at runtime.
