@@ -1502,6 +1502,7 @@ export SWEEP_VALUES="40 80"
 export WORKERS=320
 bash scripts/run_simulate_sweep.sh
 # Each N completes in ~2-5 min on a 320-core host with REPLAY_SPEED=1
+```
 
 ### Key Signals
 
