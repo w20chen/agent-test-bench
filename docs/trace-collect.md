@@ -1651,16 +1651,39 @@ will persist and be importable by all subsequent containers.
 
 ### How Contamination Happens
 
-1. **Run A** (any benchmark instance): the agent runs `pip install -e .`
-   or `pip install some-package`.  Because `PYTHONUSERBASE` is set in the
-   container environment, pip may install packages into `.pyuserbase/`
-   or discover already-installed packages there and skip system
-   installation.
+SWE-bench containers run as **non-root** (via `--user uid:gid`, see
+`container_run_user_args` in `container_runtime.py`).  The conda
+environment at `/opt/conda/` is installed by root during image build,
+so its `site-packages/` is **not writable** by the container user.
 
-2. **Run B** (simulate of a different instance): a new container starts.
-   `PYTHONUSERBASE` is still set → Python's import system finds the
-   stale packages from Run A → the simulate agent sees a **different
-   environment** than the original collect agent did.
+As a result, every agent `pip install` follows this fallback chain:
+
+1. pip tries `/opt/conda/lib/python3.12/site-packages/` → **Permission denied**
+2. `PIP_BREAK_SYSTEM_PACKAGES=1` bypasses the EXTERNALLY-MANAGED marker
+   but cannot override filesystem permissions.
+3. pip falls back to `--user` installation → writes to `PYTHONUSERBASE`
+   (`~/.cache/task-container-bootstrap/.pyuserbase/`).
+
+This is **expected and correct** for the benchmark — non-root containers
+are a security best practice and match the official SWE-bench evaluation
+environment.  Giving root would deviate from the reference setup and
+introduce reproducibility risks (agent could modify system files).
+
+The contamination chain across runs:
+
+```
+collect run A → agent pip install -e . → .pyuserbase/ (non-root, must user-install)
+                                              ↓
+                    .pyuserbase/ now contains traitlets, xarray_leaflet, ...
+                                              ↓
+simulate run B → PYTHONUSERBASE set → Python finds stale packages
+                                              ↓
+              → simulate agent sees DIFFERENT environment than collect agent
+```
+
+> **Note:** Within a single run, agent packages installed to `.pyuserbase/`
+> are fully functional — `PYTHONUSERBASE` is on `sys.path`, so imports and
+> tests work correctly.  The problem is only *cross-run* leakage.
 
 ### Three-Layer Defense
 
@@ -1697,14 +1720,24 @@ treated as stale and trigger an automatic rebuild on the next run.
   instances.  Caching avoids reinstalling these on every run.
 
 - **Agent-installed packages should NOT be cached** — they are
-  benchmark-specific and installed into the container's ephemeral
-  site-packages.  The `PYTHONUSERBASE` stripping in `_exec_command`
+  benchmark-specific and should be isolated per run.  The
+  `PYTHONUSERBASE` stripping in `_exec_command` (simulate path)
   ensures pip does not discover stale packages from previous runs.
 
+- **Collect path tolerates userbase installation** — because the
+  container runs as non-root and conda site-packages is root-owned,
+  agent `pip install` unavoidably falls back to `--user`.  This is
+  harmless *within* a single run (the packages are functional) and
+  the contamination is cleaned by the bootstrap check before the
+  next run starts.
+
+- **Non-root is intentional** — matches the official SWE-bench
+  evaluation environment.  Granting root would deviate from the
+  reference setup and risk agent modifications to system state.
+
 - **The contamination check is a safety net** — it catches any
-  residual contamination that may have occurred before the
-  `PYTHONUSERBASE` stripping was deployed, or from manual
-  intervention on the host.
+  residual contamination that may have occurred before these
+  defenses were deployed, or from manual intervention on the host.
 
 ### Checking for Contamination
 
