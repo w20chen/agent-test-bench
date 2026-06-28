@@ -818,7 +818,7 @@ async def _prepare_container_session(
     # Inspect the image platform *before* starting the container so that a
     # failed inspection doesn't leak a running container.  This mirrors the
     # ordering in resolve_task_container_exec_config (collect path).
-    image_platform = _inspect_image_platform(fixed_name, container_executable)
+    image_platform = _inspect_image_platform(fixed_name, container_executable=container_executable)
     extra_args: list[str] | None = None
     if cpu_limit is not None:
         extra_args = [f"--cpus={cpu_limit}"]
