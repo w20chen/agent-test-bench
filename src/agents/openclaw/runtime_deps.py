@@ -8,7 +8,7 @@ OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS: tuple[str, ...] = (
     "PyYAML>=6.0,<7.0",
     "json-repair>=0.30,<1.0",
     "loguru>=0.7,<1.0",
-    "pydantic>=2.0,<3.0",
+    "pydantic>=2.5,<3.0",
     "socksio>=1.0,<2.0",
     "tiktoken>=0.7,<1.0",
 )
