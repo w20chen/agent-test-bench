@@ -66,15 +66,22 @@ def _bootstrap_marker_matches(
     marker: Path,
     *,
     requirements: tuple[str, ...],
-    runtime: str,
 ) -> bool:
+    """True when *marker* was written for the exact same *requirements*.
+
+    Python version is intentionally NOT included in the marker so that
+    the same cache works across architectures (x86, ARM+QEMU) where
+    ``sys.executable`` may resolve symlinks differently.  ABI
+    compatibility is enforced by ``pip install --only-binary=:all:``
+    during bootstrap.
+    """
     if not marker.exists():
         return False
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except Exception:
         return False
-    return payload == {"requirements": list(requirements), "python": runtime}
+    return payload == {"requirements": list(requirements)}
 
 
 def _is_retryable_get_pip_error(exc: Exception) -> bool:
@@ -654,7 +661,6 @@ def bootstrap_task_container_python(
     if _bootstrap_marker_matches(
         marker,
         requirements=requirements,
-        runtime=exec_config.runtime,
     ):
         print(
             f"[bootstrap] shared cache hit: {marker}",
@@ -670,7 +676,6 @@ def bootstrap_task_container_python(
         if _bootstrap_marker_matches(
             marker,
             requirements=requirements,
-            runtime=exec_config.runtime,
         ):
             print(
                 f"[bootstrap] shared cache hit (after lock): {marker}",
@@ -717,7 +722,6 @@ import time as _time
 def _log(msg):
     print(f"[bootstrap] {{msg}}", flush=True)
 
-runtime = {exec_config.runtime!r}
 site_dir = pathlib.Path({str(exec_config.bootstrap_site_dir)!r})
 marker = pathlib.Path({str(marker)!r})
 userbase = pathlib.Path({str(userbase)!r})
@@ -764,7 +768,7 @@ _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
 _log("step 3/3: writing marker ...")
 marker.write_text(
-    json.dumps({{"requirements": requirements, "python": runtime}}),
+    json.dumps({{"requirements": requirements}}),
     encoding="utf-8",
 )
 # Keep userbase intact so the agent can use pip at runtime.
