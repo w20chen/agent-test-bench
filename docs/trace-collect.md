@@ -46,6 +46,7 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
 - [Stress Test Analysis](#stress-test-analysis)
 - [Recording Internals](#recording-internals)
 - [Ksys System Metrics](#ksys-system-metrics)
+- [Container Environment Reproducibility](#container-environment-reproducibility)
 
 ---
 
@@ -1598,4 +1599,136 @@ PYTHONPATH=src python -m trace_collect.cli \
     --mcp-config none \
     --sample 1 \
     --ksys
+```
+
+---
+
+## Container Environment Reproducibility
+
+For container-mode benchmarks (e.g., swe-rebench), **collect** and
+**simulate** must produce identical tool-execution outputs for the same
+tool call.  If the container environment differs between the two modes
+(e.g., different pre-installed Python packages), the agent in simulate
+may see different results and diverge from the original trace.
+
+### Architecture
+
+```
+                          HOST FILESYSTEM
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  $HOME/.cache/task-container-bootstrap/                         │
+ │  ├── pydeps/                   ← pip install --target (bootstrap)│
+ │  │   └── .bootstrap-ready.json ← marker: requirements + manifest│
+ │  └── .pyuserbase/              ← get-pip.py --user              │
+ │      ├── bin/pip                                                │
+ │      └── lib/python3.12/site-packages/                          │
+ │                                                                  │
+ │  Mounted into every container via -v $HOME:$HOME                │
+ └──────────────────────────────────────────────────────────────────┘
+
+              CONTAINER (ephemeral)         CONTAINER (ephemeral)
+              ┌──────────────────┐         ┌──────────────────┐
+              │ /testbed         │         │ /testbed         │
+              │ site-packages/   │         │ site-packages/   │
+              │ (容器内，不持久) │         │ (容器内，不持久) │
+              └──────────────────┘         └──────────────────┘
+```
+
+### Two Caches, Two Risks
+
+The bootstrap process maintains **two** shared directories on the host
+filesystem, both mounted into every container:
+
+| Directory | Purpose | Populated by |
+|-----------|---------|-------------|
+| `pydeps/` | Agent runtime dependencies (openai, pydantic, tiktoken, …) | `pip install --target` during bootstrap |
+| `.pyuserbase/lib/.../site-packages/` | pip itself (installed by `get-pip.py --user`) + its transitive dependencies | `get-pip.py --user` during bootstrap |
+
+The container has `PYTHONUSERBASE` set, which causes Python to add
+`.pyuserbase/lib/python3.12/site-packages/` to `sys.path`.  Any
+packages installed there by a **previous run** (collect or simulate)
+will persist and be importable by all subsequent containers.
+
+### How Contamination Happens
+
+1. **Run A** (any benchmark instance): the agent runs `pip install -e .`
+   or `pip install some-package`.  Because `PYTHONUSERBASE` is set in the
+   container environment, pip may install packages into `.pyuserbase/`
+   or discover already-installed packages there and skip system
+   installation.
+
+2. **Run B** (simulate of a different instance): a new container starts.
+   `PYTHONUSERBASE` is still set → Python's import system finds the
+   stale packages from Run A → the simulate agent sees a **different
+   environment** than the original collect agent did.
+
+### Three-Layer Defense
+
+The codebase implements three complementary defenses:
+
+| Layer | Location | Mechanism |
+|-------|----------|-----------|
+| **Source prevention** | `_REPLAY_AGENT_SCRIPT._exec_command` in `openclaw_tools.py` | Strips `PYTHONUSERBASE` from the subprocess environment before executing agent tool commands (pip install, pytest, etc.). Agent tools now install to the container's ephemeral site-packages. |
+| **Cache-hit verification** | `_bootstrap_marker_matches` in `task_container.py` | On every bootstrap cache hit, compares the actual `.dist-info` directories in both `pydeps/` and `.pyuserbase/site-packages/` against the package manifest recorded in `.bootstrap-ready.json`. |
+| **Auto-rebuild on contamination** | `bootstrap_task_container_python` in `task_container.py` | When contamination is detected (extra or missing packages vs. the manifest), the stale directories are removed and the bootstrap is rebuilt from scratch. |
+
+The marker JSON (`.bootstrap-ready.json`) records:
+
+```json
+{
+  "requirements": ["openai>=2.0,<3.0", "httpx>=0.27,<1.0", "..."],
+  "arch": "amd64",
+  "packages": ["annotated_types", "anyio", "certifi", "..."],
+  "userbase_packages": ["pip", "setuptools", "wheel"]
+}
+```
+
+- `packages` — packages installed to `pydeps/` via `pip install --target`
+- `userbase_packages` — packages installed to `.pyuserbase/site-packages/`
+  via `get-pip.py --user`
+
+**Legacy markers** (without `packages` / `userbase_packages` keys) are
+treated as stale and trigger an automatic rebuild on the next run.
+
+### Design Rationale
+
+- **Bootstrap packages are cached by design** — they are fixed
+  (`openai`, `pydantic`, etc.) and identical across all benchmark
+  instances.  Caching avoids reinstalling these on every run.
+
+- **Agent-installed packages should NOT be cached** — they are
+  benchmark-specific and installed into the container's ephemeral
+  site-packages.  The `PYTHONUSERBASE` stripping in `_exec_command`
+  ensures pip does not discover stale packages from previous runs.
+
+- **The contamination check is a safety net** — it catches any
+  residual contamination that may have occurred before the
+  `PYTHONUSERBASE` stripping was deployed, or from manual
+  intervention on the host.
+
+### Checking for Contamination
+
+If you suspect environment drift, check the bootstrap log:
+
+```bash
+# Look for contamination messages in simulate output
+grep "contamination" trace_output.log
+# Example output:
+# [bootstrap] userbase cache contamination detected in .../site-packages:
+#   extra=['traitlets', 'xarray_leaflet', ...]
+```
+
+Or inspect the shared cache directly:
+
+```bash
+ls ~/.cache/task-container-bootstrap/pydeps/*.dist-info/
+ls ~/.cache/task-container-bootstrap/.pyuserbase/lib/python*/site-packages/*.dist-info/
+cat ~/.cache/task-container-bootstrap/pydeps/.bootstrap-ready.json | python -m json.tool
+```
+
+To force a clean rebuild for the next run:
+
+```bash
+rm -rf ~/.cache/task-container-bootstrap/pydeps
+rm -rf ~/.cache/task-container-bootstrap/.pyuserbase/lib/python*/site-packages
 ```
