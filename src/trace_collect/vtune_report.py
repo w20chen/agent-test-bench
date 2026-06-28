@@ -82,6 +82,7 @@ def vtune_container_run_args(
     return [
         "--cap-add", "PERFMON",
         "--cap-add", "SYS_ADMIN",
+        "--cap-add", "SYS_PTRACE",   # hotspots mode needs ptrace for stack unwinding
         "-v", f"{root}:{root}:ro",
         "-e", "VTUNE_PROFILE=1",
         "-e", f"VTUNE_BIN={vtune_bin}",

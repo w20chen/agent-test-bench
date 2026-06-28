@@ -414,6 +414,15 @@ class ExecTool(Tool):
 
             if stderr:
                 stderr_text = stderr.decode("utf-8", errors="replace")
+                # Strip VTune's own diagnostic lines so the agent doesn't
+                # see profiler noise (e.g. ptrace errors, collection warnings).
+                if vtune_window is not None:
+                    stderr_lines = stderr_text.splitlines()
+                    stderr_lines = [
+                        line for line in stderr_lines
+                        if not (line.startswith("vtune:") or line.startswith("amplxe:"))
+                    ]
+                    stderr_text = "\n".join(stderr_lines)
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
 
