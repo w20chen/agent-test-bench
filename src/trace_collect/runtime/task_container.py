@@ -69,14 +69,21 @@ def _bootstrap_marker_matches(
     marker: Path,
     *,
     requirements: tuple[str, ...],
+    arch: str | None = None,
 ) -> bool:
-    """True when *marker* was written for the exact same *requirements*.
+    """True when *marker* was written for the exact same *requirements* and *arch*.
 
-    Python version is intentionally NOT included in the marker so that
-    the same cache works across architectures (x86, ARM+QEMU) where
-    ``sys.executable`` may resolve symlinks differently.  ABI
-    compatibility is enforced by ``pip install --only-binary=:all:``
-    during bootstrap.
+    Architecture MUST be included in the marker because ``--only-binary=:all:``
+    enforces pre-built wheels which are architecture-specific.  An ARM64 cache
+    containing ``_tiktoken.cpython-311-aarch64-linux-gnu.so`` will fail with
+    a circular-import error when reused for an x86_64 container (Python looks
+    for ``_tiktoken.cpython-311-x86_64-linux-gnu.so``, doesn't find it, and
+    falls back to a Python submodule import that hits the still-initialising
+    ``tiktoken/__init__.py``).
+
+    Python version is intentionally NOT included so that the same cache works
+    across minor Python updates and symlink variations (e.g. ``/usr/local/bin/python``
+    vs ``/usr/local/bin/python3`` on the same image).
     """
     if not marker.exists():
         return False
@@ -84,7 +91,10 @@ def _bootstrap_marker_matches(
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except Exception:
         return False
-    return payload == {"requirements": list(requirements)}
+    expected: dict[str, Any] = {"requirements": list(requirements)}
+    if arch:
+        expected["arch"] = arch
+    return payload == expected
 
 
 def _is_retryable_get_pip_error(exc: Exception) -> bool:
@@ -643,6 +653,24 @@ def _bootstrap_lock() -> Iterator[None]:
         os.close(fd)
 
 
+def _bootstrap_arch(exec_config: TaskContainerExecConfig) -> str:
+    """Extract the container architecture slug from *exec_config*.
+
+    Returns e.g. ``"amd64"`` or ``"arm64"``.  When the image platform
+    could not be inspected, falls back to the host architecture (which
+    is correct for native-mode runs where the image arch always matches
+    the host).
+    """
+    if exec_config.image_platform:
+        # "linux/amd64" → "amd64"  (also normalises x86_64→amd64, aarch64→arm64)
+        parts = exec_config.image_platform.split("/")
+        if len(parts) == 2:
+            return _normalize_arch(parts[1]) or parts[1]
+    # platform.machine() always returns a non-None str; _normalize_arch
+    # always returns a str for non-None input, so this never returns None.
+    return _normalize_arch(platform.machine())  # type: ignore[return-value]
+
+
 def bootstrap_task_container_python(
     *,
     container_id: str,
@@ -654,6 +682,7 @@ def bootstrap_task_container_python(
     if not exec_config.bootstrap or exec_config.bootstrap_site_dir is None:
         return
 
+    arch = _bootstrap_arch(exec_config)
     marker = exec_config.bootstrap_site_dir / ".bootstrap-ready.json"
     requirements = tuple(
         dict.fromkeys(OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS + extra_requirements)
@@ -664,9 +693,10 @@ def bootstrap_task_container_python(
     if _bootstrap_marker_matches(
         marker,
         requirements=requirements,
+        arch=arch,
     ):
         print(
-            f"[bootstrap] shared cache hit: {marker}",
+            f"[bootstrap] shared cache hit ({arch}): {marker}",
             file=sys.stderr,
             flush=True,
         )
@@ -679,9 +709,10 @@ def bootstrap_task_container_python(
         if _bootstrap_marker_matches(
             marker,
             requirements=requirements,
+            arch=arch,
         ):
             print(
-                f"[bootstrap] shared cache hit (after lock): {marker}",
+                f"[bootstrap] shared cache hit ({arch}, after lock): {marker}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -709,7 +740,7 @@ def bootstrap_task_container_python(
         )
         print(
             f"[bootstrap] installing pip + {len(requirements)} runtime deps "
-            f"from {pip_index_url} into container {container_id[:12]}...",
+            f"from {pip_index_url} into container {container_id[:12]} ({arch})...",
             file=sys.stderr,
             flush=True,
         )
@@ -729,6 +760,7 @@ site_dir = pathlib.Path({str(exec_config.bootstrap_site_dir)!r})
 marker = pathlib.Path({str(marker)!r})
 userbase = pathlib.Path({str(userbase)!r})
 requirements = {list(requirements)!r}
+arch = {arch!r}
 site_dir.mkdir(parents=True, exist_ok=True)
 userbase.mkdir(parents=True, exist_ok=True)
 
@@ -771,7 +803,7 @@ _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
 _log("step 3/3: writing marker ...")
 marker.write_text(
-    json.dumps({{"requirements": requirements}}),
+    json.dumps({{"requirements": requirements, "arch": arch}}),
     encoding="utf-8",
 )
 # Keep userbase intact so the agent can use pip at runtime.

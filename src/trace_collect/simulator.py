@@ -797,6 +797,7 @@ async def _prepare_container_session(
         _SHARED_BOOTSTRAP_CACHE,
         _DEFAULT_RUNTIME_PYTHONPATH,
         _CONTAINER_SYSTEM_PYTHON,
+        _inspect_image_platform,
         TaskContainerExecConfig,
         bootstrap_task_container_python,
     )
@@ -814,6 +815,10 @@ async def _prepare_container_session(
         normalized,
         container_executable=container_executable,
     )
+    # Inspect the image platform *before* starting the container so that a
+    # failed inspection doesn't leak a running container.  This mirrors the
+    # ordering in resolve_task_container_exec_config (collect path).
+    image_platform = _inspect_image_platform(fixed_name, container_executable)
     extra_args: list[str] | None = None
     if cpu_limit is not None:
         extra_args = [f"--cpus={cpu_limit}"]
@@ -837,6 +842,7 @@ async def _prepare_container_session(
         start_extra_args=(),
         bootstrap=True,
         bootstrap_site_dir=site_dir,
+        image_platform=image_platform,
     )
     try:
         await asyncio.to_thread(

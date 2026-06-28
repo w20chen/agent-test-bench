@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trace_collect.runtime.task_container import _CONTAINER_PYTHON_CANDIDATES
+
 logger = logging.getLogger(__name__)
 
 _OPENCLAW_EXEC_DEFAULT_TIMEOUT_S = 300.0
@@ -361,16 +363,10 @@ _IDEMPOTENT_TOOLS = frozenset({"read_file", "list_dir"})
 
 class ContainerAgent:
 
-    # Container Python interpreter candidates, searched in order.
-    # Mirrors the probing logic in task_container.resolve_running_container_exec_config.
-    _PYTHON_CANDIDATES: tuple[str, ...] = (
-        "/usr/bin/python3",
-        "/usr/bin/python",
-        "/usr/local/bin/python3",
-        "/usr/local/bin/python",
-        "python3",
-        "python",
-    )
+    # Container Python interpreter candidates — MUST match
+    # _CONTAINER_PYTHON_CANDIDATES in trace_collect.runtime.task_container
+    # so that the same Python is selected in both collect and simulate.
+    _PYTHON_CANDIDATES: tuple[str, ...] = _CONTAINER_PYTHON_CANDIDATES
 
     def __init__(
         self,
