@@ -286,12 +286,18 @@ If you see `permission denied` errors in VTune output, this is the fix.
 - **Opt-in by default**: `--vtune` defaults to `False`. Existing workflows
   are completely unaffected.
 - **No synthetic/mock data**: VTune runs against the real containerized
-  pytest. If VTune is not installed, the feature fails early with a clear
-  error message rather than silently producing empty results.
-- **Per-test-window slicing**: Rather than profiling the entire agent run,
-  each pytest invocation is profiled independently. The host-side
+  tool execution. If VTune is not installed, the feature fails early with a
+  clear error message rather than silently producing empty results.
+- **Per-tool-window slicing**: Rather than profiling the entire agent run,
+  each matching tool invocation is profiled independently. The host-side
   `finalize_vtune` function correlates `ContainerStatsSampler` samples
-  with each test's `window.json` to produce per-test metrics.
+  with each invocation's `window.json` to produce per-invocation metrics.
+- **Classifier-based matching**: Exec tool detection reuses the same
+  `exec_classifier` logic that produces trace tool names (``exec-pytest``,
+  ``exec-pip``, etc.).  This avoids fragile regex matching and correctly
+  handles compound commands, preamble stripping, and ``python -m``
+  redirection.  The ``--vtune-tools`` parameter accepts any tool name
+  (exec or non-exec) for forward compatibility.
 
 ## Limitations
 

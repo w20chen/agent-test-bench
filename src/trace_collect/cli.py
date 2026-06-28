@@ -202,6 +202,18 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--vtune-tools",
+        type=str,
+        default="exec-pytest",
+        help=(
+            "Comma-separated full tool names to profile with --vtune "
+            "(default: exec-pytest).  Accepts any tool name: "
+            "``exec-pytest,exec-pip,list_dir,read_file``.  "
+            "Exec tools use the classifier (python -m pytest → exec-pytest); "
+            "non-exec tools match by their canonical tool name."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=positive_int_arg,
         default=1,
@@ -843,6 +855,11 @@ def _run_collect(args: argparse.Namespace) -> None:
                 vtune=args.vtune,
                 vtune_coarse=args.vtune_coarse,
                 vtune_fine=args.vtune_fine,
+                vtune_tools=(
+                    [t.strip() for t in args.vtune_tools.split(",") if t.strip()]
+                    if args.vtune_tools
+                    else []
+                ),
                 concurrency=args.concurrency,
                 eviction_config=eviction_config,
                 sparse_attention_config=sparse_attention_config,

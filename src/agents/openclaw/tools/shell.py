@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from agents.openclaw.tools.base import Tool
+from trace_collect.exec_classifier import classify_exec_tool_name
 
 
 MAX_EXEC_TOOL_TIMEOUT_SEC = 600
@@ -110,11 +111,26 @@ class ExecTool(Tool):
             env["PATH"] = self.path_append + os.pathsep + env.get("PATH", "")
 
         # When --vtune is active (signalled via env from the host), wrap a
-        # pytest invocation with VTune so it is profiled for exactly its
-        # lifetime. No-op for any other command or when --vtune is off.
+        # matching tool invocation with VTune so it is profiled for exactly
+        # its lifetime.  Detection uses the project's exec classifier (same
+        # logic that produces ``exec-pytest``, ``exec-make``, etc. tool names
+        # in traces) and matches against the ``VTUNE_TOOLS`` env var
+        # (comma-separated full tool names, default ``exec-pytest``).
+        #
+        # Examples recognised as exec-pytest:
+        #   ``pytest test_foo.py``, ``python -m pytest tests/``,
+        #   ``timeout 120 pytest -v``, ``cd /x && pytest``
+        # Examples NOT recognised:
+        #   ``pip install pytest`` (classifies as ``exec-pip``),
+        #   ``echo pytest`` (classifies as ``exec-echo``),
+        #   ``grep pytest *.py`` (classifies as ``exec-grep``)
         run_command = command
         vtune_window: dict[str, Any] | None = None
-        if os.environ.get("VTUNE_PROFILE") == "1" and re.search(r"\bpytest\b", command):
+        vtune_tools_raw = os.environ.get("VTUNE_TOOLS", "exec-pytest")
+        vtune_tools = {t.strip() for t in vtune_tools_raw.split(",") if t.strip()}
+        if os.environ.get("VTUNE_PROFILE") == "1" and classify_exec_tool_name(
+            "exec", {"command": command}
+        ) in vtune_tools:
             vtune_bin = os.environ.get("VTUNE_BIN", "vtune")
             vtune_out = os.environ.get("VTUNE_OUT", cwd)
             run_dir = os.path.join(

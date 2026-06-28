@@ -53,15 +53,23 @@ def _resolve_vtune() -> tuple[str, str]:
     return vtune_bin, root
 
 
-def vtune_container_run_args(out_dir: Path) -> list[str]:
+def vtune_container_run_args(
+    out_dir: Path, *, tools: list[str] | None = None
+) -> list[str]:
     """Extra ``docker run`` args enabling in-container VTune profiling.
 
     The host VTune install is bind-mounted read-only at its native path so the
     same absolute ``VTUNE_BIN`` resolves inside the container. ``out_dir`` lives
     under the bind-mounted attempt directory, so results land on the host too.
+
+    Args:
+        out_dir: Directory for per-pytest-window VTune results.
+        tools: Exec classifier category slugs to profile (e.g. ``["pytest",
+               "make"]``).  Defaults to ``["pytest"]`` when omitted.
     """
     vtune_bin, root = _resolve_vtune()
     out_dir.mkdir(parents=True, exist_ok=True)
+    resolved_tools = tools or ["exec-pytest"]
     return [
         "--cap-add", "PERFMON",
         "--cap-add", "SYS_ADMIN",
@@ -69,6 +77,7 @@ def vtune_container_run_args(out_dir: Path) -> list[str]:
         "-e", "VTUNE_PROFILE=1",
         "-e", f"VTUNE_BIN={vtune_bin}",
         "-e", f"VTUNE_OUT={out_dir.resolve()}",
+        "-e", f"VTUNE_TOOLS={','.join(resolved_tools)}",
     ]
 
 

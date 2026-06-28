@@ -917,6 +917,7 @@ async def collect_traces(
     vtune: bool = False,
     vtune_coarse: bool = False,
     vtune_fine: bool = False,
+    vtune_tools: list[str] | None = None,
     concurrency: int = 1,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
@@ -949,9 +950,11 @@ async def collect_traces(
         raise ValueError("--vtune-coarse / --vtune-fine require --vtune")
     if vtune and runtime_mode != "task_container_agent":
         raise ValueError(
-            "--vtune wraps in-container pytest and only applies to "
+            "--vtune wraps in-container commands and only applies to "
             f"task-container benchmarks, not runtime_mode={runtime_mode!r}"
         )
+    if vtune_tools is None:
+        vtune_tools = ["exec-pytest"]  # default when --vtune is on
     if (
         execution_environment == "container" or runtime_mode == "task_container_agent"
     ) and container_executable is None:
@@ -1073,6 +1076,7 @@ async def collect_traces(
                         vtune=vtune,
                         vtune_coarse=vtune_coarse,
                         vtune_fine=vtune_fine,
+                        vtune_tools=vtune_tools,
                     )
 
                 assert runner is not None
@@ -1244,6 +1248,7 @@ async def _run_openclaw_in_task_container(
     vtune: bool = False,
     vtune_coarse: bool = False,
     vtune_fine: bool = False,
+    vtune_tools: list[str] | None = None,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1265,7 +1270,9 @@ async def _run_openclaw_in_task_container(
     if vtune:
         from trace_collect.vtune_report import vtune_container_run_args
 
-        start_extra_args.extend(vtune_container_run_args(vtune_out_dir))
+        start_extra_args.extend(
+            vtune_container_run_args(vtune_out_dir, tools=vtune_tools or ["exec-pytest"])
+        )
     container_id = start_task_container(
         fixed_image,
         executable=container_executable,
