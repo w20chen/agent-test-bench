@@ -88,7 +88,7 @@ sudo chmod +x scripts/setup/*.sh
 
 ### Step 1 — One-Time Environment Setup
 
-**Native mode (default):**
+**Native mode (default, yet not recommended):**
 
 ```bash
 # Build the ARM-native base image and download SWE-rebench data + repos

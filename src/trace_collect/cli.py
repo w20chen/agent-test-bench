@@ -679,6 +679,8 @@ def main() -> None:
     sub = sys.argv[1] if len(sys.argv) > 1 else None
     if sub == "simulate":
         _run_simulate(parse_simulate_args(sys.argv[2:]))
+    elif sub == "collect":
+        _run_collect(parse_collect_args(sys.argv[2:]))
     elif sub == "import-claude-code":
         _run_import_claude_code(parse_import_claude_code_args(sys.argv[2:]))
     elif sub == "inspect":
