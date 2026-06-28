@@ -1,27 +1,36 @@
-# VTune Profiling for In-Container Pytest
+# Per-Tool Profiling (VTune / Ksys)
 
 > **Added**: `feat/hyf` branch, ported to `main` on 2026-06-27.
+> **Renamed**: `--vtune` → `--tool-profiling vtune` on 2026-06-29.
 > **Scope**: Container-mode benchmarks only (`runtime_mode = task_container_agent`).
 
 ## Overview
 
-The `--vtune` feature wraps each `pytest` invocation inside a benchmark task
-container with **Intel VTune Profiler** (uarch-exploration), producing
-per-test-window performance reports. Combined with the built-in
-`ContainerStatsSampler`, it yields three layers of metric granularity:
+The `--tool-profiling` flag wraps each matching tool invocation (e.g.
+`pytest`) inside a benchmark task container with a platform-specific
+hardware profiler.  Currently supported backends:
 
-| Output File | Contents |
-|---|---|
-| `summary.json` | Command, wall-clock duration, return code, sample count |
-| `coarse.json` | CPU%, memory, disk I/O, network, context switches |
-| `fine.json` | VTune Top-down Microarchitecture Analysis (TMA) + perf IPC, L1I hit rate, branch miss rate |
+| `--tool-profiling` | Hardware | Profiler | Data Source |
+|---|---|---|---|
+| `vtune` | Intel x86_64 | Intel VTune Profiler (uarch-exploration) | VTune PMU + in-container `/proc` sampler |
+| `ksys` | Huawei Kunpeng ARM64 | Huawei ksys | (not yet implemented) |
+| `off` | — | — | No per-tool profiling (default) |
 
-Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<pid>/`.
+When active, each profiled tool invocation produces **three layers** of
+per-invocation metrics:
+
+| Output File | Contents | Data Source |
+|---|---|---|
+| `summary.json` | Command, wall-clock duration, return code, sample count, coarse source label | `window.json` metadata |
+| `coarse.json` | CPU%, memory, disk I/O, network, context switches | In-container `/proc` proc-tree sampler (`per_tool_samples.jsonl`) — accurate even with concurrent invocations |
+| `fine.json` | VTune Top-down Microarchitecture Analysis (TMA) — Front/Back-End Bound, Memory Bound, CPI, etc. | VTune `-report summary` CSV parsing |
+
+Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<microsecond>_<pid>/`.
 
 ## Quick Start
 
-Basic: wrap every in-container pytest with VTune
 ```bash
+# Profile every pytest invocation with VTune (coarse + fine always on)
 PYTHONPATH=src python3 -m trace_collect.cli collect \
   --scaffold openclaw \
   --benchmark swe-bench-verified \
@@ -30,33 +39,16 @@ PYTHONPATH=src python3 -m trace_collect.cli collect \
   --mcp-config none \
   --provider deepseek \
   --model deepseek-v4-flash \
-  --vtune
-```
+  --tool-profiling vtune
 
-With coarse system metrics per test window
-```bash
+# Profile multiple tool types
 PYTHONPATH=src python3 -m trace_collect.cli collect \
-  --scaffold openclaw \
-  --benchmark swe-bench-verified \
-  --container docker \
-  --sample 1 \
-  --mcp-config none \
-  --provider deepseek \
-  --model deepseek-v4-flash \
-  --vtune --vtune-coarse
-```
+  ... \
+  --tool-profiling vtune \
+  --tool-profiling-tools exec-pytest,exec-make
 
-With full TMA breakdown
-```bash
-PYTHONPATH=src python3 -m trace_collect.cli collect \
-  --scaffold openclaw \
-  --benchmark swe-bench-verified \
-  --container docker \
-  --sample 1 \
-  --mcp-config none \
-  --provider deepseek \
-  --model deepseek-v4-flash \
-  --vtune --vtune-coarse --vtune-fine
+# Future: Kunpeng per-tool profiling
+# --tool-profiling ksys
 ```
 
 ## Installation & Setup
@@ -222,46 +214,53 @@ If you see `permission denied` errors in VTune output, this is the fix.
 ## Prerequisites
 
 1. **Intel x86 native** — no QEMU emulation (VTune relies on hardware PMU
-   counters).
+   counters).  For Kunpeng, use `--tool-profiling ksys` (future).
 
 2. **Container-mode benchmark** — only benchmarks with
-   `runtime_mode = task_container_agent` are supported. Attempting `--vtune`
-   with `runtime_mode = host_controller` raises a clear error.
+   `runtime_mode = task_container_agent` are supported.  Attempting
+   `--tool-profiling vtune` with `runtime_mode = host_controller` raises a
+   clear error.
 
 ## Architecture
 
 ```
-┌─ Host ───────────────────────────────────────────────────────┐
-│                                                              │
-│  CLI (--vtune)                                               │
-│    │                                                         │
-│    ▼                                                         │
-│  collector.py                                                │
-│    │  if vtune:                                              │
-│    │    vtune_report.vtune_container_run_args()              │
-│    │    → mount VTune into container (read-only)             │
-│    │    → grant CAP_PERFMON, CAP_SYS_ADMIN                   │
-│    │    → set VTUNE_PROFILE=1 env var                        │
-│    │                                                         │
-│    │  After agent finishes:                                  │
-│    │    vtune_report.finalize_vtune()                        │
-│    │    → slice ContainerStatsSampler samples per test       │
-│    │    → emit summary.json / coarse.json / fine.json        │
-│    │                                                         │
-├─────── Container boundary ───────────────────────────────────┤
-│    │                                                         │
-│    ▼                                                         │
-│  shell.py (ExecTool)                                         │
-│    │  if VTUNE_PROFILE=1 and command contains "pytest":      │
-│    │    wrap: vtune -collect uarch-exploration -- bash ...   │
-│    │    record ts_start / ts_end / returncode → window.json  │
-│    │                                                         │
-│    ▼                                                         │
-│  VTune result dir (per pytest invocation)                    │
-│    + window.json                                             │
-│    + result/          ← raw VTune data                       │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+┌─ Host ───────────────────────────────────────────────────────────┐
+│                                                                  │
+│  CLI (--tool-profiling vtune)                                    │
+│    │                                                             │
+│    ▼                                                             │
+│  collector.py                                                    │
+│    │  if tool_profiling == "vtune":                              │
+│    │    vtune_report.vtune_container_run_args()                  │
+│    │    → mount VTune into container (read-only)                 │
+│    │    → grant CAP_PERFMON, CAP_SYS_ADMIN                       │
+│    │    → set VTUNE_PROFILE=1 env var                            │
+│    │    → disable host-side PMU (perf stat) to avoid counter     │
+│    │      contention with VTune                                  │
+│    │                                                             │
+│    │  After agent finishes:                                      │
+│    │    vtune_report.finalize_vtune()                            │
+│    │    → read per_tool_samples.jsonl (in-container /proc)       │
+│    │    → fall back to ContainerStatsSampler samples if absent    │
+│    │    → emit summary.json + coarse.json + fine.json            │
+│    │                                                             │
+├─────── Container boundary ───────────────────────────────────────┤
+│    │                                                             │
+│    ▼                                                             │
+│  shell.py (ExecTool)                                             │
+│    │  if VTUNE_PROFILE=1 and tool matches VTUNE_TOOLS:           │
+│    │    wrap: vtune -collect uarch-exploration -- bash ...       │
+│    │    start per-tool /proc sampler thread (0.5 s interval)     │
+│    │    record ts_start / ts_end / returncode → window.json      │
+│    │                                                             │
+│    ▼                                                             │
+│  Per-invocation output directory:                                │
+│    pytest_<ts>_<us>_<pid>/                                       │
+│      ├── window.json               timing + exit code            │
+│      ├── result/                    VTune raw PMU data            │
+│      └── per_tool_samples.jsonl     /proc proc-tree samples       │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Output Structure
@@ -269,39 +268,64 @@ If you see `permission denied` errors in VTune output, this is the fix.
 ```
 <run_dir>/<instance_id>/<attempt>/
 └── vtune/
-    ├── pytest_20260627T120000_42/
-    │   ├── window.json       {"cmd": "...", "ts_start": ..., "ts_end": ..., "returncode": 0}
-    │   ├── result/            VTune raw data (for -report)
-    │   ├── summary.json       Per-test summary
-    │   ├── coarse.json        System metrics (if --vtune-coarse)
-    │   └── fine.json          TMA + perf counters (if --vtune-fine)
-    └── pytest_20260627T120142_57/
+    ├── pytest_20260627T120000_123456_42/
+    │   ├── window.json               {"cmd": "...", "ts_start": ..., "ts_end": ..., "returncode": 0}
+    │   ├── result/                    VTune raw data (for vtune -report)
+    │   ├── per_tool_samples.jsonl     In-container /proc proc-tree samples
+    │   ├── summary.json               Per-invocation summary + coarse_source label
+    │   ├── coarse.json                CPU/mem/disk/net/ctx per invocation
+    │   └── fine.json                  VTune TMA + perf counters
+    └── pytest_20260627T120142_654321_42/
         └── ...
 ```
 
+`coarse.json` metrics are sourced from the in-container `/proc` proc-tree
+sampler (`per_tool_samples.jsonl`) when available, which gives accurate
+per-process-tree data even when multiple pytest invocations overlap in time.
+When the file is absent (e.g. traces collected before this feature), the
+host-side `ContainerStatsSampler` samples are time-sliced as a fallback.
+The `coarse_source` field in `summary.json` records which source was used
+(`"per_tool_proc"` or `"container_cgroup"`).
+
 ## Design Decisions
 
-- **Lazy imports**: `vtune_report` is only imported when `--vtune` is active.
-  Zero overhead for non-VTune runs.
-- **Opt-in by default**: `--vtune` defaults to `False`. Existing workflows
-  are completely unaffected.
-- **No synthetic/mock data**: VTune runs against the real containerized
-  tool execution. If VTune is not installed, the feature fails early with a
-  clear error message rather than silently producing empty results.
+- **Lazy imports**: `vtune_report` is only imported when
+  `--tool-profiling vtune` is active.  Zero overhead otherwise.
+- **Opt-in by default**: `--tool-profiling` defaults to `off`.
+  Existing workflows are completely unaffected.
 - **Per-tool-window slicing**: Rather than profiling the entire agent run,
-  each matching tool invocation is profiled independently. The host-side
-  `finalize_vtune` function correlates `ContainerStatsSampler` samples
-  with each invocation's `window.json` to produce per-invocation metrics.
+  each matching tool invocation is profiled independently.
+- **In-container `/proc` sampler**: CPU, memory, disk I/O, and context
+  switches are sampled from `/proc/<pid>` inside the container, scoped to
+  the exact pytest process tree.  This avoids cgroup-level contamination
+  when multiple tool invocations overlap.
 - **Classifier-based matching**: Exec tool detection reuses the same
   `exec_classifier` logic that produces trace tool names (``exec-pytest``,
-  ``exec-pip``, etc.).  This avoids fragile regex matching and correctly
-  handles compound commands, preamble stripping, and ``python -m``
-  redirection.  The ``--vtune-tools`` parameter accepts any tool name
+  ``exec-pip``, etc.).  ``--tool-profiling-tools`` accepts any tool name
   (exec or non-exec) for forward compatibility.
+- **PMU conflict avoidance**: When `--tool-profiling vtune` is active, the
+  host-side `--pmu-monitoring` is automatically disabled to prevent PMU
+  counter contention between the host `perf stat` and in-container VTune.
+- **No synthetic/mock data**: VTune runs against the real containerized
+  tool execution.  If VTune is not installed, the feature fails early with
+  a clear error message.
+
+## Analysis
+
+Aggregated analysis across many pytest invocations is provided by
+`scripts/analyze_vtune_aggregate.py`:
+
+```bash
+python scripts/analyze_vtune_aggregate.py --input traces/my_sweep/
+# Produces: vtune_aggregate.csv, vtune_aggregate_summary.txt, vtune_aggregate_topn.txt
+# Add --plot for KDE distribution charts (requires matplotlib + scipy)
+```
 
 ## Limitations
 
-- Intel x86 native only (no ARM, no QEMU).
+- Intel x86 native only (no ARM, no QEMU) for `--tool-profiling vtune`.
 - Container-mode benchmarks only.
 - Adds modest overhead: VTune uarch-exploration collects PMU counters during
-  the pytest run. Expect 5–15% runtime increase per profiled test.
+  the pytest run.  Expect 5–15% runtime increase per profiled test.
+- The in-container `/proc` sampler adds negligible overhead (~60 syscalls
+  per 0.5 s interval for a typical pytest process tree).

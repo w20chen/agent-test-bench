@@ -914,10 +914,8 @@ async def collect_traces(
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
     ksys_monitoring: str = "auto",
-    vtune: bool = False,
-    vtune_coarse: bool = False,
-    vtune_fine: bool = False,
-    vtune_tools: list[str] | None = None,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
     concurrency: int = 1,
     eviction_config: "EvictionPolicyConfig | None" = None,
     sparse_attention_config: "SparseAttentionConfig | None" = None,
@@ -946,15 +944,19 @@ async def collect_traces(
         raise NotImplementedError(
             f"Unsupported benchmark.runtime_mode_for({scaffold!r}): {runtime_mode!r}"
         )
-    if (vtune_coarse or vtune_fine) and not vtune:
-        raise ValueError("--vtune-coarse / --vtune-fine require --vtune")
+    if tool_profiling not in {"off", "vtune", "ksys"}:
+        raise ValueError(
+            f"--tool-profiling must be 'off', 'vtune', or 'ksys', got {tool_profiling!r}"
+        )
+    vtune = tool_profiling == "vtune"
     if vtune and runtime_mode != "task_container_agent":
         raise ValueError(
-            "--vtune wraps in-container commands and only applies to "
+            "--tool-profiling vtune wraps in-container commands and only applies to "
             f"task-container benchmarks, not runtime_mode={runtime_mode!r}"
         )
-    if vtune_tools is None:
-        vtune_tools = ["exec-pytest"]  # default when --vtune is on
+    # Future: add ksys per-tool validation here when implemented.
+    if tool_profiling_tools is None:
+        tool_profiling_tools = ["exec-pytest"]
     if (
         execution_environment == "container" or runtime_mode == "task_container_agent"
     ) and container_executable is None:
@@ -1073,10 +1075,8 @@ async def collect_traces(
                         mcp_config=mcp_config,
                         container_executable=container_executable,
                         record_internals=record_internals,
-                        vtune=vtune,
-                        vtune_coarse=vtune_coarse,
-                        vtune_fine=vtune_fine,
-                        vtune_tools=vtune_tools,
+                        tool_profiling=tool_profiling,
+                        tool_profiling_tools=tool_profiling_tools,
                     )
 
                 assert runner is not None
@@ -1245,10 +1245,8 @@ async def _run_openclaw_in_task_container(
     max_context_tokens: int,
     mcp_config: str | None,
     record_internals: bool = False,
-    vtune: bool = False,
-    vtune_coarse: bool = False,
-    vtune_fine: bool = False,
-    vtune_tools: list[str] | None = None,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1267,11 +1265,12 @@ async def _run_openclaw_in_task_container(
     )
     start_extra_args = list(exec_config.start_extra_args)
     vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
+    vtune = tool_profiling == "vtune"
     if vtune:
         from trace_collect.vtune_report import vtune_container_run_args
 
         start_extra_args.extend(
-            vtune_container_run_args(vtune_out_dir, tools=vtune_tools or ["exec-pytest"])
+            vtune_container_run_args(vtune_out_dir, tools=tool_profiling_tools or ["exec-pytest"])
         )
     container_id = start_task_container(
         fixed_image,
@@ -1291,7 +1290,12 @@ async def _run_openclaw_in_task_container(
             container_id=container_id,
             interval_s=0.5,
             executable=container_executable,
-            enable_pmu=ctx.enable_pmu_monitoring,
+            # When VTune is active, the host-side perf-stat PMU sampling
+            # competes with VTune's own PMU collection for the same set of
+            # hardware counters, causing kernel multiplexing and degraded
+            # accuracy on both sides.  Disable the host PMU to give VTune
+            # exclusive counter access during profiled pytest windows.
+            enable_pmu=ctx.enable_pmu_monitoring and not vtune,
             enable_memory_bandwidth=ctx.enable_memory_bandwidth_monitoring,
         )
         _stats_sampler.start()
@@ -1409,8 +1413,6 @@ async def _run_openclaw_in_task_container(
             finalize_vtune(
                 vtune_out_dir,
                 ctx.samples or [],
-                coarse=vtune_coarse,
-                fine=vtune_fine,
             )
         container_logs = stop_task_container(
             container_id,

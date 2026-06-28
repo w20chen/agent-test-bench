@@ -10,12 +10,14 @@ attempt can record CPU, memory, disk I/O, network I/O, context switches, host
 memory bandwidth, and CPU micro-architecture (PMU) metrics. Two sampler
 backends cover both containerised and host-process workloads.
 
-The CLI exposes three independent controls:
+The CLI exposes five independent controls:
 
 - `--resource-monitoring auto|on|off` for CPU, memory, disk, network,
   context switches, and host memory bandwidth.
 - `--pmu-monitoring auto|on|off` for micro-architecture counters.
 - `--ksys-monitoring auto|on|off` for Huawei Kunpeng ksys telemetry.
+- `--tool-profiling off|vtune|ksys` for per-tool platform profiling.
+- `--tool-profiling-tools <list>` to select which tool names to profile.
 
 Host memory bandwidth does **not** have its own CLI switch. It is
 automatically enabled whenever built-in resource monitoring is active in a
@@ -42,6 +44,8 @@ parallel attempts. See
 - [7. Metric Aggregation](#7-metric-aggregation)
 - [8. Architecture Support Matrix](#8-architecture-support-matrix)
 - [9. HTML Visualization](#9-html-visualization)
+- [10. Per-Tool Profiling](#10-per-tool-profiling)
+- [11. System-Level Resource Monitor](#11-system-level-resource-monitor)
 
 ---
 
@@ -349,7 +353,78 @@ a descriptive error message with the specific reason and remediation hint.
 
 ---
 
-## 10. System-Level Resource Monitor
+## 10. Per-Tool Profiling
+
+The `--tool-profiling` flag enables per-invocation profiling of individual
+agent tool calls (e.g. `pytest`).  Unlike the agent-level samplers described
+above, per-tool profiling wraps each matching tool invocation inside the
+container with a hardware profiler and an in-container `/proc` sampler.
+
+### Architecture
+
+```
+Host                                    Container
+────                                    ─────────
+collector.py                            shell.py (ExecTool)
+  │                                       │
+  ├─ vtune_container_run_args()           ├─ vtune -collect uarch-exploration
+  │   → mount VTune, set env vars         │   -- bash -lc "pytest ..."
+  │                                       │
+  ├─ ContainerStatsSampler (always)       ├─ _sample_proc_tree() thread
+  │   → cgroup CPU/mem/disk/net/ctx       │   → /proc/<pid>/stat, statm, io, status
+  │                                       │
+  └─ finalize_vtune()                     └─ → per_tool_samples.jsonl
+      → prefer per_tool_samples.jsonl
+      → fall back to cgroup time-slicing
+      → emit coarse.json + fine.json
+```
+
+### Per-tool metrics (coarse.json)
+
+Sourced from the in-container `/proc` proc-tree sampler:
+
+| Metric | `/proc` Source | Notes |
+|---|---|---|
+| CPU % | `/proc/<pid>/stat` utime+stime delta | Scoped to exact pytest process tree |
+| Memory RSS | `/proc/<pid>/statm` RSS pages | Summed across all descendants |
+| Disk read/write | `/proc/<pid>/io` read_bytes, write_bytes | Cumulative; delta between first/last sample |
+| Context switches | `/proc/<pid>/status` voluntary+nonvoluntary | Summed across all descendants |
+| Network I/O | N/A | Network is container-level; omitted from per-tool samples |
+
+### Per-tool metrics (fine.json)
+
+Sourced from VTune `uarch-exploration` + `-report summary -format csv`:
+
+| Metric | VTune TMA Field |
+|---|---|
+| Front-End Bound | Pipeline stalls due to instruction fetch |
+| Back-End Bound | Pipeline stalls due to data/memory |
+| Retiring | Useful work completing |
+| Bad Speculation | Mispredicted branches + machine clears |
+| Memory Bound | Back-end stalls due to cache/memory |
+| Core Bound | Back-end stalls due to execution units |
+| CPI Rate | Cycles per instruction |
+
+### Concurrency isolation
+
+When multiple pytest invocations overlap in time (e.g. concurrent subagents),
+the per-tool `/proc` sampler provides accurate per-invocation metrics without
+cgroup-level cross-contamination.  Each invocation's process tree is sampled
+independently via its root PID.
+
+### Conflict with agent-level PMU
+
+When `--tool-profiling vtune` is active, the host-side `--pmu-monitoring` is
+automatically disabled to prevent PMU counter contention between the host
+`perf stat` and the in-container VTune collector.
+
+See [VTune Profiling](vtune-profiling.md) for setup instructions and
+[`scripts/analyze_vtune_aggregate.py`](../scripts/analyze_vtune_aggregate.py)
+for batch analysis.
+
+---
+
+## 11. System-Level Resource Monitor
 
 The per-attempt samplers described above measure resources **attributed to a
 single container or process**.  When running N:M simulation sweeps (many

@@ -176,43 +176,31 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     _add_monitoring_arguments(parser)
     parser.add_argument(
-        "--vtune",
-        action="store_true",
+        "--tool-profiling",
+        choices=["off", "vtune", "ksys"],
+        default="off",
         help=(
-            "Wrap each in-container pytest invocation with Intel VTune "
-            "uarch-exploration; results under <attempt>/vtune/. Container "
-            "benchmarks only; requires VTune on the host (VTUNE_BIN / "
-            "VTUNE_ROOT) and Intel x86 native (no QEMU)."
+            "Wrap each in-container tool invocation with a platform-specific "
+            "profiler.  'vtune' uses Intel VTune uarch-exploration (x86 only); "
+            "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
+            "'off' disables per-tool profiling (default).  "
+            "Results land under <attempt>/vtune/ (or <attempt>/ksys_tool/).  "
+            "Container benchmarks only."
         ),
     )
     parser.add_argument(
-        "--vtune-coarse",
-        action="store_true",
-        help=(
-            "With --vtune, also emit coarse.json (CPU/mem/net/disk/"
-            "context-switch) sliced to each pytest window."
-        ),
-    )
-    parser.add_argument(
-        "--vtune-fine",
-        action="store_true",
-        help=(
-            "With --vtune, also emit fine.json (VTune TMA front/back-end "
-            "plus perf branch/L1I/IPC) for each pytest window."
-        ),
-    )
-    parser.add_argument(
-        "--vtune-tools",
+        "--tool-profiling-tools",
         type=str,
         default="exec-pytest",
         help=(
-            "Comma-separated full tool names to profile with --vtune "
+            "Comma-separated full tool names to profile with --tool-profiling "
             "(default: exec-pytest).  Accepts any tool name: "
             "``exec-pytest,exec-pip,list_dir,read_file``.  "
             "Exec tools use the classifier (python -m pytest → exec-pytest); "
             "non-exec tools match by their canonical tool name."
         ),
     )
+
     parser.add_argument(
         "--concurrency",
         type=positive_int_arg,
@@ -852,12 +840,10 @@ def _run_collect(args: argparse.Namespace) -> None:
                 resource_monitoring=args.resource_monitoring,
                 pmu_monitoring=args.pmu_monitoring,
                 ksys_monitoring=effective_ksys_monitoring,
-                vtune=args.vtune,
-                vtune_coarse=args.vtune_coarse,
-                vtune_fine=args.vtune_fine,
-                vtune_tools=(
-                    [t.strip() for t in args.vtune_tools.split(",") if t.strip()]
-                    if args.vtune_tools
+                tool_profiling=args.tool_profiling,
+                tool_profiling_tools=(
+                    [t.strip() for t in args.tool_profiling_tools.split(",") if t.strip()]
+                    if args.tool_profiling_tools
                     else []
                 ),
                 concurrency=args.concurrency,

@@ -174,8 +174,10 @@ image pulling). See [Benchmarks](docs/benchmarks.md) for per-benchmark setup
 commands, invocation examples, and runtime notes for SWE-Bench Verified,
 SWE-rebench, Terminal-Bench, Deep Research Bench, BrowseComp, and BFCL.
 
-For task selection (`--sample`, `--instance-ids`), concurrency, resuming, and
-monitoring controls, see [Trace Collect](docs/trace-collect.md).
+For task selection (`--sample`, `--instance-ids`), concurrency, resuming,
+monitoring controls (`--resource-monitoring`, `--pmu-monitoring`,
+`--ksys-monitoring`), and per-tool profiling (`--tool-profiling`), see
+[Trace Collect](docs/trace-collect.md).
 
 For **simulate mode** (trace replay at scale), see the [Simulate
 section](docs/trace-collect.md#simulate-trace-replay) for flags like
@@ -197,7 +199,8 @@ Detailed documentation lives under `docs/`:
 | [Trace Collect](docs/trace-collect.md) | CLI reference, concurrent execution, recording internals, ksys metrics |
 | [Case Inspection](docs/case-inspection.md) | Browsing SWE-bench tasks without running an agent |
 | [Benchmarks](docs/benchmarks.md) | Registered benchmarks, BFCL, plugin architecture |
-| [Resource Measurement](docs/resource-measurement.md) | CPU/memory/disk/network/PMU sampling architecture |
+| [Resource Measurement](docs/resource-measurement.md) | CPU/memory/disk/network/PMU sampling, per-tool profiler |
+| [VTune Profiling](docs/vtune-profiling.md) | Per-tool VTune setup, architecture, and output format |
 
 ---
 

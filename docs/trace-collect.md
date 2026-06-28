@@ -84,9 +84,10 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--run-id <path>` | Resume an interrupted run |
 | `--prompt-template <name>` | Override the benchmark default prompt |
 | `--resource-monitoring auto\|on\|off` | Control CPU, memory, disk, network, context-switch, and host memory bandwidth sampling |
-| `--pmu-monitoring auto\|on\|off` | Control PMU sampling; concurrent `on` is forbidden |
-| `--ksys-monitoring auto\|on\|off` | Control Huawei Kunpeng system metrics |
-| `--ksys` | Compatibility alias for `--ksys-monitoring on` |
+| `--pmu-monitoring auto\|on\|off` | Control PMU sampling; concurrent `on` is forbidden; auto-disabled when `--tool-profiling` is active |
+| `--ksys-monitoring auto\|on\|off` | Control Huawei Kunpeng ksys system-level telemetry |
+| `--tool-profiling off\|vtune\|ksys` | Wrap each matching tool invocation with a platform profiler (VTune for Intel x86, ksys for Kunpeng) |
+| `--tool-profiling-tools <list>` | Comma-separated tool names to profile (default: `exec-pytest`) |
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |
 | `--model` | Model identifier |
@@ -295,19 +296,29 @@ These three flags are **orthogonal** and compose freely:
 
 ### Resource-monitoring defaults
 
-The CLI exposes three independent tri-state switches for resource monitoring:
+The CLI exposes independent tri-state switches for resource monitoring,
+plus a per-tool profiling selector:
 
 | Flag | Controls | Default |
 |------|----------|---------|
 | `--resource-monitoring auto\|on\|off` | CPU, memory, disk I/O, network I/O, context switches, and host memory bandwidth | `auto` |
 | `--pmu-monitoring auto\|on\|off` | CPU micro-architecture PMU counters (cache, branch, instructions) | `auto` |
 | `--ksys-monitoring auto\|on\|off` | Huawei Kunpeng ksys system-level telemetry | `auto` |
-| `--ksys` | Compatibility alias for `--ksys-monitoring on` | — |
+| `--tool-profiling off\|vtune\|ksys` | Per-tool platform profiler (VTune x86 / ksys Kunpeng) | `off` |
+| `--tool-profiling-tools <list>` | Tool names to profile (comma-separated) | `exec-pytest` |
 
 Host memory bandwidth does **not** have its own CLI switch. It is
 automatically enabled whenever built-in resource monitoring is active
 in a non-concurrent execution mode (see table below). It cannot be
 enabled independently.
+
+Per-tool profiling (`--tool-profiling`) wraps individual tool invocations
+(e.g. `pytest`) with a hardware profiler.  When `vtune` is selected, the
+host-side PMU monitoring is automatically disabled to avoid PMU counter
+contention.  Coarse system metrics (CPU/mem/disk/net/ctx) for each profiled
+tool invocation come from an in-container `/proc` proc-tree sampler, giving
+accurate per-invocation data even with concurrent tool calls.  See
+[VTune Profiling](vtune-profiling.md) for setup and architecture details.
 
 **`auto` resolution matrix:**
 
@@ -329,6 +340,8 @@ enabled independently.
 | `--resource-monitoring on` with host simulation | Host agent has no isolated process PID |
 | `--resource-monitoring on` with concurrent host collection | Attempts cannot be isolated by PID |
 | `--pmu-monitoring on` with `--resource-monitoring off` | PMU requires base resource sampling |
+| `--tool-profiling vtune` with `runtime_mode = host_controller` | VTune wraps in-container commands only |
+| `--tool-profiling vtune` + `--pmu-monitoring on` | PMU auto-disabled (no error — VTune gets exclusive PMU access) |
 | `--ksys` + `--ksys-monitoring off` | Conflicting flags |
 
 **Where monitoring policy is recorded:**

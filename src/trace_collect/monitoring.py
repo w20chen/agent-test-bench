@@ -21,6 +21,10 @@ class MonitoringPolicy:
     memory_bandwidth_enabled: bool
     ksys_enabled: bool
     concurrent: bool
+    #: Per-tool profiler selection: ``"off"``, ``"vtune"``, or ``"ksys"``.
+    tool_profiling: str = "off"
+    #: Tool names to profile when *tool_profiling* is not ``"off"``.
+    tool_profiling_tools: list[str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable policy record."""
