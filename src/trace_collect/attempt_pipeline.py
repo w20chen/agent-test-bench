@@ -61,6 +61,15 @@ _TASK_CONTAINER_ENV_PASSTHROUGH = (
     "NANOBOT_MAX_CONCURRENT_REQUESTS",
 )
 
+# Set TASK_CONTAINER_NO_PROXY=1 to skip forwarding host proxy settings
+# into the container.  Useful when the host proxy (e.g. a SOCKS5 proxy
+# that breaks HTTPS) should not affect in-container pip operations.
+if os.environ.get("TASK_CONTAINER_NO_PROXY") == "1":
+    _TASK_CONTAINER_ENV_PASSTHROUGH = tuple(
+        v for v in _TASK_CONTAINER_ENV_PASSTHROUGH
+        if not v.endswith("PROXY") and not v.endswith("proxy")
+    )
+
 
 def _utcnow_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "")
