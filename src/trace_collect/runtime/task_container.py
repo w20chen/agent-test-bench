@@ -717,6 +717,7 @@ import time as _time
 def _log(msg):
     print(f"[bootstrap] {{msg}}", flush=True)
 
+runtime = {exec_config.runtime!r}
 site_dir = pathlib.Path({str(exec_config.bootstrap_site_dir)!r})
 marker = pathlib.Path({str(marker)!r})
 userbase = pathlib.Path({str(userbase)!r})
@@ -763,7 +764,7 @@ _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
 _log("step 3/3: writing marker ...")
 marker.write_text(
-    json.dumps({{"requirements": requirements, "python": sys.executable}}),
+    json.dumps({{"requirements": requirements, "python": runtime}}),
     encoding="utf-8",
 )
 # Keep userbase intact so the agent can use pip at runtime.
