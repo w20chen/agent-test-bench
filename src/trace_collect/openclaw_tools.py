@@ -263,11 +263,17 @@ class ContainerAgent:
         "python",
     )
 
-    def __init__(self, container_id: str, container_executable: str) -> None:
+    def __init__(
+        self,
+        container_id: str,
+        container_executable: str,
+        pythonpath: str | None = None,
+    ) -> None:
         self._container_id = container_id
         self._executable = container_executable
         self._process: asyncio.subprocess.Process | None = None
         self._python_runtime: str = "python3"  # fallback, overwritten in start()
+        self._pythonpath: str | None = pythonpath
 
     async def _probe_python(self) -> str:
         """Find a working Python >=3.11 interpreter inside the container."""
@@ -300,9 +306,18 @@ class ContainerAgent:
 
     async def start(self) -> None:
         self._python_runtime = await self._probe_python()
-        self._process = await asyncio.create_subprocess_exec(
+        cmd: list[str] = [
             self._executable, "exec", "-i", "-w", "/testbed",
+        ]
+        # Propagate PYTHONPATH so replayed subprocesses (e.g. pytest)
+        # can find packages installed by bootstrap_task_container_python.
+        if self._pythonpath:
+            cmd.extend(["-e", f"PYTHONPATH={self._pythonpath}"])
+        cmd.extend([
             self._container_id, self._python_runtime, "-u", "-c", _REPLAY_AGENT_SCRIPT,
+        ])
+        self._process = await asyncio.create_subprocess_exec(
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

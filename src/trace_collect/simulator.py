@@ -694,6 +694,13 @@ async def _prepare_container_session(
 ) -> PreparedTraceSession:
     """Prepare a Docker/Podman container and start a persistent replay agent."""
     from trace_collect.openclaw_tools import ContainerAgent
+    from trace_collect.runtime.task_container import (
+        _SHARED_BOOTSTRAP_CACHE,
+        _DEFAULT_RUNTIME_PYTHONPATH,
+        _CONTAINER_SYSTEM_PYTHON,
+        TaskContainerExecConfig,
+        bootstrap_task_container_python,
+    )
 
     t_setup_start = time.monotonic()
 
@@ -719,7 +726,29 @@ async def _prepare_container_session(
         extra_args=extra_args,
     )
 
-    agent = ContainerAgent(container_id, container_executable)
+    # Bootstrap Python runtime dependencies inside the container so that
+    # replayed tool commands (e.g. pytest) can find packages like sniffio
+    # that were available during the original collect run.  This mirrors
+    # what _run_openclaw_in_task_container does in collect mode.
+    site_dir = _SHARED_BOOTSTRAP_CACHE / "pydeps"
+    pythonpath = f"{site_dir}:{_DEFAULT_RUNTIME_PYTHONPATH}"
+    exec_config = TaskContainerExecConfig(
+        runtime=_CONTAINER_SYSTEM_PYTHON,
+        pythonpath=pythonpath,
+        start_extra_args=(),
+        bootstrap=True,
+        bootstrap_site_dir=site_dir,
+    )
+    await asyncio.to_thread(
+        bootstrap_task_container_python,
+        container_id=container_id,
+        exec_config=exec_config,
+        container_executable=container_executable,
+    )
+
+    agent = ContainerAgent(
+        container_id, container_executable, pythonpath=pythonpath,
+    )
     try:
         await agent.start()
     except Exception:
