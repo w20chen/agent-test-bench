@@ -326,8 +326,8 @@ while IFS= read -r line; do
     h=${h:-0}; m=${m:-0}; s=${s:-0}
     total_s=$((h * 3600 + m * 60 + s))
     if [[ ${total_s} -gt 0 ]]; then
-      aps=$(echo "scale=3; ${n_val} / ${total_s}" | bc -l 2>/dev/null || echo "N/A")
-      apm=$(echo "scale=1; ${n_val} / ${total_s} * 60" | bc -l 2>/dev/null || echo "N/A")
+      aps=$(awk -v n="${n_val}" -v t="${total_s}" 'BEGIN { printf "%.3f", n / t }' 2>/dev/null || echo "N/A")
+      apm=$(awk -v n="${n_val}" -v t="${total_s}" 'BEGIN { printf "%.1f", n * 60 / t }' 2>/dev/null || echo "N/A")
     else
       aps="N/A"; apm="N/A"
     fi

@@ -101,8 +101,8 @@ def _not_found_msg(old_text, content, path):
             old_lines, lines[best_start:best_start+window],
             fromfile="old_text (provided)",
             tofile=f"{path} (actual, line {best_start+1})", lineterm=""))
-        return f"Error: old_text not found in {path}.\nBest match ({best_ratio:.0%}) at line {best_start+1}:\n{diff}"
-    return f"Error: old_text not found in {path}. No similar text found."
+        return f"Error: old_text not found in {path}.\nBest match ({best_ratio:.0%} similar) at line {best_start+1}:\n{diff}"
+    return f"Error: old_text not found in {path}. No similar text found. Verify the file content."
 
 _MAX_OUTPUT = 10_000
 
@@ -112,37 +112,47 @@ def _truncate_output(text, limit=_MAX_OUTPUT):
     half = limit // 2
     return text[:half] + f"\n\n... ({len(text) - limit} chars truncated) ...\n\n" + text[-half:]
 
+def _exec_command(cmd, timeout, cwd="/testbed"):
+    """Run one shell command; returns (text, returncode, timed_out).
+
+    Output format matches :class:`ExecTool`: stdout, then ``STDERR:\\n``
+    prefix for stderr.  The ``Exit code:`` line is appended by the
+    orchestration layer (``execute_trace_tool``) so both the
+    original collect path and the replay path produce identical output.
+    """
+    env = {**os.environ, "PAGER": "cat", "MANPAGER": "cat", "LESS": "-R"}
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=cwd,
+                           capture_output=True, text=True, timeout=timeout, env=env)
+        output_parts = []
+        if r.stdout:
+            output_parts.append(r.stdout.rstrip())
+        if r.stderr and r.stderr.strip():
+            output_parts.append(f"STDERR:\n{r.stderr.rstrip()}")
+        result = "\n".join(output_parts) if output_parts else "(no output)"
+        return result, r.returncode, False
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after {timeout} seconds", 124, True
+
 def handle_exec(args):
     cmd = args.get("command", "")
     timeout = args.get("timeout", 600)
-    env = {**os.environ, "PAGER": "cat", "MANPAGER": "cat", "LESS": "-R"}
-    try:
-        r = subprocess.run(cmd, shell=True, cwd="/testbed",
-                           capture_output=True, text=True, timeout=timeout, env=env)
-        output = (r.stdout or "") + (r.stderr or "")
-        return {"ok": r.returncode == 0, "result": _truncate_output(output), "returncode": r.returncode}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "result": "[timeout]", "returncode": 124}
+    output, rc, _timed_out = _exec_command(cmd, timeout)
+    return {"ok": rc == 0, "result": _truncate_output(output), "returncode": rc}
 
 def handle_commands(args):
     cmds = args.get("commands", [])
     timeout = args.get("timeout", 600)
-    env = {**os.environ, "PAGER": "cat", "MANPAGER": "cat", "LESS": "-R"}
     all_output = []
     last_rc = 0
     for i, cmd in enumerate(cmds):
-        try:
-            r = subprocess.run(cmd, shell=True, cwd="/testbed",
-                               capture_output=True, text=True, timeout=timeout, env=env)
-            all_output.append((r.stdout or "") + (r.stderr or ""))
-            last_rc = r.returncode
-        except subprocess.TimeoutExpired:
-            all_output.append("[timeout]")
-            last_rc = 124
-    if len(cmds) > 1:
-        combined = "\n".join(f"[call {k}]\n{out}" for k, out in enumerate(all_output))
-    else:
-        combined = all_output[0] if all_output else ""
+        output, rc, _timed_out = _exec_command(cmd, timeout)
+        if len(cmds) > 1:
+            all_output.append(f"[call {i}]\n{output}")
+        else:
+            all_output.append(output)
+        last_rc = rc
+    combined = "\n".join(all_output) if all_output else ""
     return {"ok": last_rc == 0, "result": combined, "returncode": last_rc}
 
 _READ_MAX_CHARS = 128_000
@@ -150,17 +160,44 @@ _READ_DEFAULT_LIMIT = 2000
 
 def handle_read_file(args):
     path = args.get("path", "")
-    offset = int(args.get("offset", 0))
+    # 1-indexed offset (matches ReadFileTool default: offset=1 = first line).
+    offset = int(args.get("offset", 1))
     limit = int(args.get("limit", _READ_DEFAULT_LIMIT))
     try:
         content = open(path).read()
         if not content:
             return {"ok": True, "result": f"(Empty file: {path})"}
         lines = content.splitlines()
-        selected = lines[offset:offset + limit]
-        numbered = "\n".join(f"{offset + i + 1}| {ln}" for i, ln in enumerate(selected))
+        total = len(lines)
+        if offset < 1:
+            offset = 1
+        if offset > total:
+            return {
+                "ok": False,
+                "result": f"Error: offset {offset} is beyond end of file ({total} lines)",
+            }
+        start = offset - 1
+        end = min(start + limit, total)
+        selected = lines[start:end]
+        numbered = "\n".join(
+            f"{start + i + 1}| {ln}" for i, ln in enumerate(selected)
+        )
+        if end < total:
+            numbered += (
+                f"\n\n(Showing lines {offset}-{end} of {total}."
+                f" Use offset={end + 1} to continue.)"
+            )
+        else:
+            numbered += f"\n\n(End of file — {total} lines total)"
         if len(numbered) > _READ_MAX_CHARS:
-            numbered = numbered[:_READ_MAX_CHARS] + f"\n\n... (truncated at {_READ_MAX_CHARS} chars)"
+            trimmed: list[str] = []
+            chars = 0
+            for line in numbered.splitlines(keepends=True):
+                chars += len(line)
+                if chars > _READ_MAX_CHARS:
+                    break
+                trimmed.append(line.rstrip("\n"))
+            numbered = "\n".join(trimmed)
         return {"ok": True, "result": numbered}
     except Exception as e:
         return {"ok": False, "result": f"Error: {e}"}
@@ -172,7 +209,7 @@ def handle_write_file(args):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
-        return {"ok": True, "result": f"Successfully wrote {path}"}
+        return {"ok": True, "result": f"Successfully wrote {len(content)} bytes to {path}"}
     except Exception as e:
         return {"ok": False, "result": f"Error: {e}"}
 
@@ -189,9 +226,19 @@ def handle_edit_file(args):
         if match is None:
             return {"ok": False, "result": _not_found_msg(old_text, content, path)}
         if count > 1 and not replace_all:
-            return {"ok": False, "result": f"Warning: old_text appears {count} times. Provide more context or set replace_all=true."}
+            return {
+                "ok": False,
+                "result": (
+                    f"Warning: old_text appears {count} times. "
+                    "Provide more context to make it unique, or set replace_all=true."
+                ),
+            }
         norm_new = new_text.replace("\r\n", "\n")
-        new_content = content.replace(match, norm_new) if replace_all else content.replace(match, norm_new, 1)
+        new_content = (
+            content.replace(match, norm_new)
+            if replace_all
+            else content.replace(match, norm_new, 1)
+        )
         if uses_crlf:
             new_content = new_content.replace("\n", "\r\n")
         open(path, "wb").write(new_content.encode("utf-8"))
@@ -199,19 +246,81 @@ def handle_edit_file(args):
     except Exception as e:
         return {"ok": False, "result": f"Error editing file: {e}"}
 
-_LIST_IGNORE = {".git", "node_modules", "__pycache__", ".venv", ".tox", ".mypy_cache", ".pytest_cache"}
+_LIST_IGNORE = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".coverage", "htmlcov",
+}
 _LIST_MAX = 200
 
 def handle_list_dir(args):
     path = args.get("path", ".")
+    recursive = args.get("recursive", False)
+    max_entries = args.get("max_entries")
     try:
-        entries = sorted(e for e in os.listdir(path) if e not in _LIST_IGNORE)
-        if len(entries) > _LIST_MAX:
-            entries = entries[:_LIST_MAX]
-            entries.append(f"... ({len(os.listdir(path)) - _LIST_MAX} more entries)")
-        return {"ok": True, "result": "\n".join(entries)}
-    except Exception as e:
+        if not os.path.exists(path):
+            return {"ok": False, "result": f"Error: Directory not found: {path}"}
+        if not os.path.isdir(path):
+            return {"ok": False, "result": f"Error: Not a directory: {path}"}
+
+        cap = max_entries or _LIST_MAX
+        items: list[str] = []
+        total = 0
+
+        if recursive:
+            for dirpath, dirnames, filenames in os.walk(path):
+                # Filter ignored dirs in-place so os.walk does not
+                # descend into them (mirrors Path.rglob semantics).
+                dirnames[:] = sorted(
+                    d for d in dirnames if d not in _LIST_IGNORE
+                )
+                rel_dir = os.path.relpath(dirpath, path)
+                for d in dirnames:
+                    total += 1
+                    if len(items) < cap:
+                        rel = (
+                            os.path.join(rel_dir, d)
+                            if rel_dir != "."
+                            else d
+                        )
+                        items.append(f"{rel}/")
+                for f in sorted(filenames):
+                    if f in _LIST_IGNORE:
+                        continue
+                    total += 1
+                    if len(items) < cap:
+                        rel = (
+                            os.path.join(rel_dir, f)
+                            if rel_dir != "."
+                            else f
+                        )
+                        items.append(rel)
+        else:
+            for name in sorted(os.listdir(path)):
+                if name in _LIST_IGNORE:
+                    continue
+                total += 1
+                if len(items) < cap:
+                    pfx = (
+                        "📁 "
+                        if os.path.isdir(os.path.join(path, name))
+                        else "📄 "
+                    )
+                    items.append(f"{pfx}{name}")
+
+        if not items and total == 0:
+            return {"ok": True, "result": f"Directory {path} is empty"}
+
+        result = "\n".join(items)
+        if total > cap:
+            result += (
+                f"\n\n(truncated, showing first {cap} of {total} entries)"
+            )
+        return {"ok": True, "result": result}
+    except PermissionError as e:
         return {"ok": False, "result": f"Error: {e}"}
+    except Exception as e:
+        return {"ok": False, "result": f"Error listing directory: {e}"}
 
 HANDLERS = {
     "exec": handle_exec,
@@ -457,7 +566,17 @@ def _resolve_tool_request(
         return None, command_timeout_s  # missing command/commands
 
     if tool_name == "read_file":
-        return {"tool": "read_file", "args": {"path": params.get("path", "")}}, command_timeout_s
+        return (
+            {
+                "tool": "read_file",
+                "args": {
+                    "path": params.get("path", ""),
+                    "offset": int(params.get("offset", 1)),
+                    "limit": int(params.get("limit", 2000)),
+                },
+            },
+            command_timeout_s,
+        )
 
     if tool_name == "write_file":
         return (
@@ -480,7 +599,17 @@ def _resolve_tool_request(
         )
 
     if tool_name == "list_dir":
-        return {"tool": "list_dir", "args": {"path": params.get("path", ".")}}, command_timeout_s
+        return (
+            {
+                "tool": "list_dir",
+                "args": {
+                    "path": params.get("path", "."),
+                    "recursive": bool(params.get("recursive", False)),
+                    "max_entries": int(params.get("max_entries", 0)) or None,
+                },
+            },
+            command_timeout_s,
+        )
 
     # ── Host-mode tools (web, spawn, message) ──────────────────────
     if tool_name == "web_search":
