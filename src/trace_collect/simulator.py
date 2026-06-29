@@ -844,11 +844,14 @@ async def _prepare_container_session(
         extra_args.append(f"--cpus={cpu_limit}")
     # When VTune per-tool profiling is active, add capabilities, bind-mounts,
     # and env vars to the container start args.  VTune results are written to
-    # <output_dir>/<agent_id>/vtune/ (bind-mounted so they survive teardown).
+    # <task_dir>/vtune/ (bind-mounted so they survive teardown).
     if tool_profiling == "vtune" and output_dir is not None:
         from trace_collect.vtune_report import _resolve_vtune
         vtune_bin, vtune_root = _resolve_vtune()
-        vtune_out = output_dir.resolve() / loaded.agent_id / "vtune"
+        # output_dir is the attempt-level directory (e.g. .../attempt_1/).
+        # VTune results go into its vtune/ subdirectory so that each
+        # attempt gets an independent profiling directory.
+        vtune_out = output_dir.resolve() / "vtune"
         vtune_out.mkdir(parents=True, exist_ok=True)
         resolved_tools = tool_profiling_tools or ["exec-pytest"]
         extra_args.extend([
@@ -1985,6 +1988,13 @@ def _worker_run_cloud_model(
             loaded: LoadedTraceSession,
         ) -> PreparedTraceSession:
             uses_container = not _is_host_mode(loaded)
+            # Compute attempt directory BEFORE container preparation so
+            # that VTune output goes into the attempt-level directory
+            # (prevents subsequent attempts from overwriting VTune data).
+            instance_dir = output_path / loaded.agent_id
+            attempt_n = _next_attempt_number(instance_dir)
+            task_dir = instance_dir / f"attempt_{attempt_n}"
+            task_dir.mkdir(parents=True, exist_ok=True)
             if uses_container and prep_semaphore is not None:
                 await asyncio.to_thread(prep_semaphore.acquire)
             try:
@@ -1994,6 +2004,9 @@ def _worker_run_cloud_model(
                     prepare_kwargs: dict[str, Any] = {
                         "container_executable": container_executable,
                         "network_mode": network_mode,
+                        "tool_profiling": tool_profiling,
+                        "tool_profiling_tools": tool_profiling_tools,
+                        "output_dir": task_dir,
                     }
                     if cpu_limit is not None:
                         prepare_kwargs["cpu_limit"] = cpu_limit
@@ -2004,12 +2017,10 @@ def _worker_run_cloud_model(
                 if uses_container and prep_semaphore is not None:
                     prep_semaphore.release()
             prepared.monitoring_policy = monitoring_policy
+            prepared.task_output_dir = task_dir
+            if tool_profiling != "off":
+                prepared.vtune_out_dir = task_dir / "vtune"
             try:
-                instance_dir = output_path / loaded.agent_id
-                attempt_n = _next_attempt_number(instance_dir)
-                task_dir = instance_dir / f"attempt_{attempt_n}"
-                task_dir.mkdir(parents=True, exist_ok=True)
-                prepared.task_output_dir = task_dir
                 if (
                     prepared.container is not None
                     and monitoring_policy.resource_enabled
@@ -2429,6 +2440,13 @@ async def simulate(
 
     # ── Helpers for session lifecycle ──────────────────────────────
     async def _prepare_one(loaded: LoadedTraceSession) -> PreparedTraceSession:
+        # Compute attempt directory BEFORE container preparation so that
+        # VTune output goes into the attempt-level directory (prevents
+        # subsequent attempts from overwriting VTune data).
+        instance_dir = output_path / loaded.agent_id
+        attempt_n = _next_attempt_number(instance_dir)
+        task_dir = instance_dir / f"attempt_{attempt_n}"
+        task_dir.mkdir(parents=True, exist_ok=True)
         if _is_host_mode(loaded):
             prepared = await _prepare_host_session(loaded)
         else:
@@ -2441,7 +2459,7 @@ async def simulate(
                 "network_mode": network_mode,
                 "tool_profiling": tool_profiling,
                 "tool_profiling_tools": tool_profiling_tools,
-                "output_dir": output_path,
+                "output_dir": task_dir,
             }
             if cpu_limit is not None:
                 prepare_kwargs["cpu_limit"] = cpu_limit
@@ -2456,20 +2474,12 @@ async def simulate(
                 if shared_prep_semaphore is not None:
                     shared_prep_semaphore.release()
         prepared.monitoring_policy = monitoring_policy
+        prepared.task_output_dir = task_dir
+        if tool_profiling != "off":
+            prepared.vtune_out_dir = task_dir / "vtune"
         return prepared
 
     async def _setup_one(prepared: PreparedTraceSession) -> None:
-        instance_dir = output_path / prepared.loaded.agent_id
-        attempt_n = _next_attempt_number(instance_dir)
-        task_dir = instance_dir / f"attempt_{attempt_n}"
-        task_dir.mkdir(parents=True, exist_ok=True)
-        prepared.task_output_dir = task_dir
-        # When VTune/ksys per-tool profiling is active, record where the
-        # in-container VTune data was written so teardown can call
-        # finalize_vtune().  The path mirrors what _prepare_container_session
-        # sets in VTUNE_OUT: <output_dir>/<agent_id>/vtune/.
-        if tool_profiling != "off":
-            prepared.vtune_out_dir = output_path / prepared.loaded.agent_id / "vtune"
         if prepared.container is None or not monitoring_policy.resource_enabled:
             return
         sampler = ContainerStatsSampler(
