@@ -153,7 +153,7 @@ def _maybe_vtune_wrap(command):
 
     wrapped = (
         f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
-        f"-data-limit=0 -allow-multiple-runs "
+        f"-data-limit=0 "
         f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
         f"-- bash -lc {shlex.quote(command)}"
     )

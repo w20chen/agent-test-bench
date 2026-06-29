@@ -319,11 +319,11 @@ class ExecTool(Tool):
                 # VTune mode: wrap command with VTune profiler.
                 # uarch-exploration gives the full TMA hierarchy (Front-End Bound,
                 # Back-End Bound, Memory Bound, etc.) via PMU multiplexing.
-                # -allow-multiple-runs lets repeated short-lived pytest invocations
-                # start new collections without VTune complaining about prior runs.
+                # Each pytest invocation gets its own result/ directory so
+                # there is no conflict between consecutive collections.
                 run_command = (
                     f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
-                    f"-data-limit=0 -allow-multiple-runs "
+                    f"-data-limit=0 "
                     f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
                     f"-- bash -lc {shlex.quote(command)}"
                 )
