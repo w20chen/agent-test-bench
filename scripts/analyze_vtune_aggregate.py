@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Aggregate VTune profiling results across many pytest invocations.
+"""Aggregate VTune profiling results across many tool invocations.
 
-Walks ``<base_dir>/**/vtune/pytest_*/``, reads ``summary.json`` /
+Walks ``<base_dir>/**/vtune/*/``, reads ``summary.json`` /
 ``coarse.json`` / ``fine.json`` from each window, and produces:
 
-1. ``vtune_aggregate.csv`` — one row per pytest invocation, flat columns.
+1. ``vtune_aggregate.csv`` — one row per tool invocation, flat columns.
 2. ``vtune_aggregate_summary.txt`` — distribution statistics (p5/p50/p95/…)
    for every numeric metric, grouped by coarse / perf-PMU / VTune-TMA layers.
 3. ``vtune_aggregate_dist.png`` — kernel density estimation (KDE) distribution
@@ -168,13 +168,13 @@ def _parse_vtune_tma(tma: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collect_all_windows(base_dir: Path) -> list[dict[str, Any]]:
-    """Recursively find all pytest_* directories and collect their JSON."""
+    """Recursively find all VTune tool-invocation directories and collect their JSON."""
     rows: list[dict[str, Any]] = []
     n_skipped = 0
     n_coarse = 0
     n_fine = 0
 
-    for window_path in sorted(base_dir.rglob("vtune/pytest_*/summary.json")):
+    for window_path in sorted(base_dir.rglob("vtune/*/summary.json")):
         run_dir = window_path.parent
         rel = run_dir.relative_to(base_dir)
 
@@ -195,8 +195,8 @@ def _collect_all_windows(base_dir: Path) -> list[dict[str, Any]]:
         }
 
         # Derive hierarchy path parts for grouping
-        # Path structure: .../<instance_id>/<attempt>/vtune/pytest_<ts>_<pid>/
-        #   parts[-1] = pytest_<ts>_<pid>
+        # Path structure: .../<instance_id>/<attempt>/vtune/<tool>_<ts>_<pid>/
+        #   parts[-1] = <tool>_<ts>_<pid>
         #   parts[-2] = vtune
         #   parts[-3] = attempt
         #   parts[-4] = instance_id
@@ -227,7 +227,7 @@ def _collect_all_windows(base_dir: Path) -> list[dict[str, Any]]:
         rows.append(row)
 
     print(
-        f"[collect] {len(rows)} pytest windows found"
+        f"[collect] {len(rows)} tool invocation windows found"
         f" ({n_coarse} with coarse, {n_fine} with fine)"
         f", {n_skipped} skipped",
         file=sys.stderr,
@@ -316,7 +316,7 @@ def _write_summary_txt(rows: list[dict[str, Any]], output_path: Path) -> None:
     lines.append("=" * 72)
     lines.append("VTune Aggregate — Distribution Summary")
     lines.append("=" * 72)
-    lines.append(f"Total pytest windows: {len(rows)}")
+    lines.append(f"Total tool invocation windows: {len(rows)}")
     lines.append(f"TMA metrics available:   {len(tma_keys_seen)} keys")
     lines.append(f"Perf PMU metrics:        {len(perf_keys_seen)} keys")
     lines.append(f"Coarse system metrics:   {len(coarse_keys_seen)} keys")
@@ -525,7 +525,7 @@ def _write_top_n(rows: list[dict[str, Any]], output_path: Path) -> None:
     lines.append("")
 
     # Top-20 by duration
-    lines.append("── Top-20 longest pytest invocations ──")
+    lines.append("── Top-20 longest tool invocations ──")
     by_dur = sorted(
         [r for r in rows if r.get("duration_s") is not None],
         key=lambda r: r.get("duration_s", 0), reverse=True,
@@ -590,13 +590,13 @@ def _write_top_n(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Aggregate VTune profiling results across many pytest windows.",
+        description="Aggregate VTune profiling results across many tool invocation windows.",
     )
     parser.add_argument(
         "--input", "-i",
         type=Path,
         required=True,
-        help="Base directory containing **/vtune/pytest_*/ directories.",
+        help="Base directory containing **/vtune/*/ directories.",
     )
     parser.add_argument(
         "--output", "-o",
@@ -621,7 +621,7 @@ def main() -> None:
     # 1. Collect
     rows = _collect_all_windows(base)
     if not rows:
-        print("No pytest windows found — nothing to do.", file=sys.stderr)
+        print("No tool invocation windows found — nothing to do.", file=sys.stderr)
         sys.exit(0)
 
     # 2. CSV

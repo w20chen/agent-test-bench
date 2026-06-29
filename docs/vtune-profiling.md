@@ -25,7 +25,8 @@ per-invocation metrics:
 | `coarse.json` | CPU%, memory, disk I/O, network, context switches | In-container `/proc` proc-tree sampler (`per_tool_samples.jsonl`) — accurate even with concurrent invocations |
 | `fine.json` | VTune uarch-exploration TMA summary — CPI, instructions, clockticks, branch mispredict, cache metrics, full TMA hierarchy | Intel VTune official CLI: `vtune -report summary -format csv` |
 
-Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<microsecond>_<pid>/`.
+Results land under `<attempt_dir>/vtune/<tool>_<timestamp>_<microsecond>_<pid>/`
+(e.g. `exec-pytest_20260629T143021_123456_42/`).
 
 The `vtune` block in `fine.json` is a **direct parse** of Intel's official
 `vtune -report summary -format csv` output.  No custom computation,
@@ -261,7 +262,7 @@ If you see `permission denied` errors in VTune output, this is the fix.
 │    │                                                             │
 │    ▼                                                             │
 │  Per-invocation output directory:                                │
-│    pytest_<ts>_<us>_<pid>/                                       │
+│    <tool>_<ts>_<us>_<pid>/                                      │
 │      ├── window.json               timing + exit code            │
 │      ├── result/                    VTune raw PMU data           │
 │      └── per_tool_samples.jsonl     /proc proc-tree samples      │
@@ -274,14 +275,14 @@ If you see `permission denied` errors in VTune output, this is the fix.
 ```
 <run_dir>/<instance_id>/<attempt>/
 └── vtune/
-    ├── pytest_20260627T120000_123456_42/
+    ├── exec-pytest_20260627T120000_123456_42/
     │   ├── window.json               {"cmd": "...", "ts_start": ..., "ts_end": ..., "returncode": 0}
     │   ├── result/                    VTune raw data (for vtune -report)
     │   ├── per_tool_samples.jsonl     In-container /proc proc-tree samples
     │   ├── summary.json               Per-invocation summary + coarse_source label
     │   ├── coarse.json                CPU/mem/disk/net/ctx per invocation
     │   └── fine.json                  VTune TMA + perf counters
-    └── pytest_20260627T120142_654321_42/
+    └── exec-pytest_20260627T120142_654321_42/
         └── ...
 ```
 

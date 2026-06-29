@@ -146,7 +146,7 @@ def _maybe_vtune_wrap(command):
     now_ns = time.time_ns()
     run_dir = os.path.join(
         vtune_out,
-        f"pytest_{time.strftime('%Y%m%dT%H%M%S')}"
+        f"{classified}_{time.strftime('%Y%m%dT%H%M%S')}"
         f"_{(now_ns // 1_000) % 1_000_000:06d}_{os.getpid()}",
     )
     os.makedirs(run_dir, exist_ok=True)

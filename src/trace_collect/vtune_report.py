@@ -246,7 +246,7 @@ def finalize_vtune(
 ) -> None:
     """Emit ``summary.json`` + ``coarse.json`` + ``fine.json`` per run.
 
-    Each ``pytest_*`` directory was created in-container with a ``window.json``
+    Each tool-invocation directory was created in-container with a ``window.json``
     (cmd/ts_start/ts_end), a ``per_tool_samples.jsonl`` (in-container proc-tree
     sampler), and a raw ``result/`` VTune result dir.  When per-tool samples are
     present they are preferred for coarse metrics; otherwise the container-level
@@ -255,7 +255,9 @@ def finalize_vtune(
     out_dir = Path(out_dir)
     if not out_dir.is_dir():
         return
-    for run_dir in sorted(out_dir.glob("pytest_*")):
+    for run_dir in sorted(out_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
         window_path = run_dir / "window.json"
         if not window_path.exists():
             continue

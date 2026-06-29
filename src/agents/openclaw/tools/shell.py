@@ -303,15 +303,14 @@ class ExecTool(Tool):
         # /proc sampler runs whenever tool-profiling is active (vtune or ksys).
         # VTune wrapping only happens when VTUNE_BIN is also set (vtune mode).
         _tool_profile = os.environ.get("VTUNE_PROFILE") == "1"
-        if _tool_profile and classify_exec_tool_name(
-            "exec", {"command": command}
-        ) in vtune_tools:
+        _classified = classify_exec_tool_name("exec", {"command": command})
+        if _tool_profile and _classified in vtune_tools:
             vtune_bin = os.environ.get("VTUNE_BIN", "")
             vtune_out = os.environ.get("VTUNE_OUT", cwd)
             now_ns = time.time_ns()
             run_dir = os.path.join(
                 vtune_out,
-                f"pytest_{time.strftime('%Y%m%dT%H%M%S')}"
+                f"{_classified}_{time.strftime('%Y%m%dT%H%M%S')}"
                 f"_{(now_ns // 1_000) % 1_000_000:06d}_{os.getpid()}",
             )
             os.makedirs(run_dir, exist_ok=True)
@@ -319,7 +318,7 @@ class ExecTool(Tool):
                 # VTune mode: wrap command with VTune profiler.
                 # uarch-exploration gives the full TMA hierarchy (Front-End Bound,
                 # Back-End Bound, Memory Bound, etc.) via PMU multiplexing.
-                # Each pytest invocation gets its own result/ directory so
+                # Each tool invocation gets its own result/ directory so
                 # there is no conflict between consecutive collections.
                 run_command = (
                     f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
