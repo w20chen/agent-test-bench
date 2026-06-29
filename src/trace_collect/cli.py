@@ -134,6 +134,12 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only run the first N tasks (for testing).",
     )
     parser.add_argument(
+        "--skip",
+        type=int,
+        default=None,
+        help="Skip the first N tasks before applying --sample (e.g. '--skip 10 --sample 5' runs tasks 11-15).",
+    )
+    parser.add_argument(
         "--instance-ids",
         default=None,
         help="Comma-separated list of instance IDs to run (e.g., 'django__django-12345,sympy__sympy-67890').",
@@ -827,6 +833,7 @@ def _run_collect(args: argparse.Namespace) -> None:
                 top_k=args.top_k,
                 repetition_penalty=args.repetition_penalty,
                 sample=args.sample,
+                skip=args.skip,
                 instance_ids=(
                     args.instance_ids.split(",") if args.instance_ids else None
                 ),

@@ -80,6 +80,7 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--scaffold` | `openclaw` or `tongyi-deepresearch` |
 | `--mcp-config` | Required for `openclaw`; YAML path or the literal `none` |
 | `--sample N` | Run only the first N tasks |
+| `--skip N` | Skip the first N tasks before applying `--sample` (e.g. `--skip 10 --sample 5` runs tasks 11–15) |
 | `--instance-ids a,b,c` | Run only specified instance(s) |
 | `--run-id <path>` | Resume an interrupted run |
 | `--prompt-template <name>` | Override the benchmark default prompt |
@@ -94,6 +95,55 @@ reference, see `src/trace_collect/CLAUDE.md`.
 
 See `src/trace_collect/CLAUDE.md` for the complete flag reference, provider
 registry, checkpointing behavior, and trace schema v5 layout.
+
+### Task Selection Rules
+
+`--instance-ids`, `--skip`, and `--sample` combine in a fixed pipeline order.
+Each flag narrows the list left-to-right:
+
+```
+Benchmark tasks (all)
+    │
+    ▼  --instance-ids  (optional)
+  Filter to explicit IDs, preserving the order you wrote them.
+    │
+    ▼  --skip N  (optional)
+  Drop the first N tasks.
+    │
+    ▼  --sample N  (optional)
+  Keep only the first N remaining tasks.
+    │
+    ▼
+  Final task list
+```
+
+Examples:
+
+```bash
+# Run tasks 11-15 of the benchmark (skip first 10, take next 5)
+--skip 10 --sample 5
+
+# Run 5 specific instances in a chosen order
+--instance-ids django__django-11133,sympy__sympy-12345,scikit-learn__scikit-learn-67890 --sample 5
+
+# Skip the first 3 matching instances, take the next 2
+--instance-ids A,B,C,D,E --skip 3 --sample 2
+# → runs [D, E]
+
+# --instance-ids with more IDs than --sample: only the first N run
+--instance-ids A,B,C,D,E,F,G,H --sample 3
+# → runs [A, B, C]
+```
+
+Key rules:
+
+- `--instance-ids` order is preserved — the first ID you write gets priority.
+- `--skip` runs **after** `--instance-ids` filtering, **before** `--sample`.
+- If `--sample` is larger than the remaining task count, all remaining tasks
+  run (no error).
+- `--concurrency > 1` requires at least one of `--instance-ids`, `--skip`,
+  or `--sample` to prevent accidentally running the entire benchmark with
+  high parallelism.
 
 ### OpenClaw Standalone CLI
 

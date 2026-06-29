@@ -241,8 +241,14 @@ def _select_tasks(
     *,
     instance_ids: list[str] | None,
     sample: int | None,
+    skip: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter tasks while preserving the explicit ``instance_ids`` order."""
+    """Filter tasks while preserving the explicit ``instance_ids`` order.
+
+    *instance_ids* selects specific tasks by ID.
+    *skip* drops the first N tasks (applied before *sample*).
+    *sample* keeps only the first N remaining tasks.
+    """
     selected = list(tasks)
     if instance_ids is not None:
         by_id = {task["instance_id"]: task for task in tasks}
@@ -252,6 +258,8 @@ def _select_tasks(
         if missing:
             raise ValueError(f"No tasks matched instance_ids: {missing}")
         selected = [by_id[instance_id] for instance_id in instance_ids]
+    if skip is not None:
+        selected = selected[skip:]
     if sample is not None:
         selected = selected[:sample]
     return selected
@@ -903,6 +911,7 @@ async def collect_traces(
     top_k: int | None = None,
     repetition_penalty: float | None = None,
     sample: int | None = None,
+    skip: int | None = None,
     instance_ids: list[str] | None = None,
     run_id: str | None = None,
     max_context_tokens: int = 256_000,
@@ -925,9 +934,9 @@ async def collect_traces(
         raise ValueError(
             "--record-internals currently supports scaffold='openclaw' only"
         )
-    if concurrency > 1 and instance_ids is None and sample is None:
+    if concurrency > 1 and instance_ids is None and sample is None and skip is None:
         raise ValueError(
-            "--concurrency > 1 requires --instance-ids or --sample. "
+            "--concurrency > 1 requires --instance-ids, --sample, or --skip. "
             "Running all benchmark instances with high concurrency is "
             "almost certainly unintentional. "
             "Specify --instance-ids <id> or --sample N to limit the scope."
@@ -1038,6 +1047,7 @@ async def collect_traces(
         tasks = _select_tasks(
             benchmark.load_tasks(),
             instance_ids=instance_ids,
+            skip=skip,
             sample=sample,
         )
 
