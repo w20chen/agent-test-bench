@@ -61,7 +61,7 @@ def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
         default="off",
         help=(
             "Wrap each in-container tool invocation with a platform-specific "
-            "profiler.  'vtune' uses Intel VTune hotspots (x86 only); "
+            "profiler.  'vtune' uses Intel VTune uarch-exploration (x86 only); "
             "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
             "'off' disables per-tool profiling (default).  "
             "Container benchmarks only."
@@ -908,6 +908,12 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "cpu_limit": args.cpu_limit,
         "workers": args.workers,
         "prep_concurrency": args.prep_concurrency,
+        "tool_profiling": getattr(args, "tool_profiling", "off"),
+        "tool_profiling_tools": (
+            [t.strip() for t in args.tool_profiling_tools.split(",") if t.strip()]
+            if getattr(args, "tool_profiling_tools", None)
+            else []
+        ),
     }
 
     if args.num_agents < 0:

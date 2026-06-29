@@ -23,6 +23,8 @@ feature was added).
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import shutil
@@ -82,7 +84,7 @@ def vtune_container_run_args(
     return [
         "--cap-add", "PERFMON",
         "--cap-add", "SYS_ADMIN",
-        "--cap-add", "SYS_PTRACE",   # hotspots mode needs ptrace for stack unwinding
+        "--cap-add", "SYS_PTRACE",   # uarch-exploration needs ptrace for HW event stack sampling
         "-v", f"{root}:{root}:ro",
         "-e", "VTUNE_PROFILE=1",
         "-e", f"VTUNE_BIN={vtune_bin}",
@@ -94,12 +96,16 @@ def vtune_container_run_args(
 def _vtune_summary(result_dir: Path) -> dict[str, Any]:
     """Parse ``vtune -report summary -format csv`` into a flat metric dict.
 
-    Works for both ``hotspots`` and ``uarch-exploration`` collection modes.
     VTune ``-report summary`` CSV has three columns::
 
         Hierarchy Level, Metric Name, Metric Value
 
     We use the second column as key and the third as value.
+
+    Note: only metrics available in ``-report summary`` are captured here.
+    Cache hit-rate metrics (L1 Hit Rate, L2 Hit Rate, LLC Miss Rate) are
+    reported by ``vtune -report hw-events``, not ``-report summary``, and
+    require a separate collection / report pass if needed.
     """
     vtune_bin, _ = _resolve_vtune()
     try:
@@ -113,18 +119,14 @@ def _vtune_summary(result_dir: Path) -> dict[str, Any]:
     if proc.returncode != 0:
         return {"error": (proc.stderr.strip()[:500] or "vtune report nonzero exit")}
     metrics: dict[str, Any] = {}
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
+    reader = csv.reader(io.StringIO(proc.stdout))
+    for row in reader:
+        if len(row) < 2:
             continue
-        # Split into at most 3 parts: level, name, value
-        parts = line.split(",", 2)
-        if len(parts) < 2:
-            continue
-        name = parts[1].strip()
+        name = row[1].strip()
         if not name or name == "Metric Name":
             continue  # skip header and empty-name rows
-        value = parts[2].strip() if len(parts) > 2 else ""
+        value = row[2].strip() if len(row) > 2 else ""
         # Convert percentages and numbers where possible
         if value.endswith("%"):
             try:

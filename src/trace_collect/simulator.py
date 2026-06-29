@@ -153,6 +153,8 @@ class PreparedTraceSession:
     _resources_written: bool = False
     # Timing: seconds spent preparing the container/image before replay.
     container_setup_s: float = 0.0
+    # Per-tool profiling output directory (vtune/ksys results land here).
+    vtune_out_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -790,6 +792,9 @@ async def _prepare_container_session(
     container_executable: str,
     network_mode: str = "host",
     cpu_limit: float | None = None,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
+    output_dir: Path | None = None,
 ) -> PreparedTraceSession:
     """Prepare a Docker/Podman container and start a persistent replay agent."""
     from trace_collect.openclaw_tools import ContainerAgent
@@ -820,15 +825,41 @@ async def _prepare_container_session(
     # failed inspection doesn't leak a running container.  This mirrors the
     # ordering in resolve_task_container_exec_config (collect path).
     image_platform = _inspect_image_platform(fixed_name, container_executable=container_executable)
-    extra_args: list[str] | None = None
+    extra_args: list[str] = []
     if cpu_limit is not None:
-        extra_args = [f"--cpus={cpu_limit}"]
+        extra_args.append(f"--cpus={cpu_limit}")
+    # When VTune per-tool profiling is active, add capabilities, bind-mounts,
+    # and env vars to the container start args.  VTune results are written to
+    # <output_dir>/<agent_id>/vtune/ (bind-mounted so they survive teardown).
+    if tool_profiling == "vtune" and output_dir is not None:
+        from trace_collect.vtune_report import _resolve_vtune
+        vtune_bin, vtune_root = _resolve_vtune()
+        vtune_out = output_dir.resolve() / loaded.agent_id / "vtune"
+        vtune_out.mkdir(parents=True, exist_ok=True)
+        resolved_tools = tool_profiling_tools or ["exec-pytest"]
+        extra_args.extend([
+            "--cap-add", "PERFMON",
+            "--cap-add", "SYS_ADMIN",
+            "--cap-add", "SYS_PTRACE",
+            "-v", f"{vtune_root}:{vtune_root}:ro",
+            "-v", f"{output_dir.resolve()}:{output_dir.resolve()}",
+            "-e", "VTUNE_PROFILE=1",
+            "-e", f"VTUNE_BIN={vtune_bin}",
+            "-e", f"VTUNE_OUT={vtune_out.resolve()}",
+            "-e", f"VTUNE_TOOLS={','.join(resolved_tools)}",
+        ])
+    elif tool_profiling == "ksys":
+        tools = ",".join(tool_profiling_tools or ["exec-pytest"])
+        extra_args.extend([
+            "-e", "VTUNE_PROFILE=1",
+            "-e", f"VTUNE_TOOLS={tools}",
+        ])
     container_id = await asyncio.to_thread(
         start_task_container,
         fixed_name,
         executable=container_executable,
         network_mode=network_mode,
-        extra_args=extra_args,
+        extra_args=extra_args if extra_args else None,
     )
 
     # Bootstrap Python runtime dependencies inside the container so that
@@ -2111,25 +2142,26 @@ async def _teardown_one_worker(
     session_resource_enabled = (
         monitoring_policy.resource_enabled and prepared.container is not None
     )
+    _container_samples: list[dict[str, Any]] = []
     try:
         if prepared.sampler is not None:
             sampler = prepared.sampler
             prepared.sampler = None
-            samples = sampler.stop()
+            _container_samples = sampler.stop()
             if prepared.task_output_dir is not None:
-                summary = summarize_samples(samples)
+                summary = summarize_samples(_container_samples)
                 summary["monitoring"] = {
                     **monitoring_policy.to_dict(),
                     "status": (
-                        "collected" if samples else "enabled_no_samples"
+                        "collected" if _container_samples else "enabled_no_samples"
                     ),
                 }
                 attempt_layout.write_resources_json(
-                    prepared.task_output_dir, samples, summary,
+                    prepared.task_output_dir, _container_samples, summary,
                 )
                 logger.info(
                     "Wrote %d resource samples → %s",
-                    len(samples),
+                    len(_container_samples),
                     prepared.task_output_dir / "resources.json",
                 )
         elif (
@@ -2157,6 +2189,22 @@ async def _teardown_one_worker(
             prepared.loaded.agent_id,
             exc,
         )
+
+    # Finalize per-tool profiling (VTune/ksys) data if available.
+    # Must run before the container is stopped so the bind-mounted
+    # VTune result directory is still accessible.
+    if prepared.vtune_out_dir is not None and prepared.vtune_out_dir.is_dir():
+        try:
+            from trace_collect.vtune_report import finalize_vtune
+            finalize_vtune(prepared.vtune_out_dir, _container_samples)
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            logger.error(
+                "VTune finalization failed for %s: %s",
+                prepared.loaded.agent_id,
+                exc,
+            )
 
     ctr = prepared.container
     if ctr is None:
@@ -2234,6 +2282,8 @@ async def simulate(
     cpu_limit: float | None = None,
     workers: int = 1,
     prep_concurrency: int = 0,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
 ) -> Path:
     if workers < 1:
         raise ValueError('workers must be >= 1')
@@ -2249,6 +2299,18 @@ async def simulate(
         raise ValueError("simulate requires source_trace, source_dir, or trace_manifest")
     if mode not in {"local_model", "cloud_model"}:
         raise ValueError(f"Unsupported simulate mode: {mode}")
+    if tool_profiling not in {"off", "vtune", "ksys"}:
+        raise ValueError(
+            f"--tool-profiling must be 'off', 'vtune', or 'ksys', got {tool_profiling!r}"
+        )
+    vtune = tool_profiling == "vtune"
+    if vtune and container_executable is None:
+        raise ValueError(
+            "--tool-profiling vtune wraps in-container commands and only applies "
+            "to container-mode traces (--container docker|podman)."
+        )
+    if tool_profiling_tools is None:
+        tool_profiling_tools = ["exec-pytest"]
 
     if trace_manifest is not None:
         trace_inputs = _load_trace_manifest(
@@ -2363,6 +2425,9 @@ async def simulate(
             prepare_kwargs: dict[str, Any] = {
                 "container_executable": container_executable,
                 "network_mode": network_mode,
+                "tool_profiling": tool_profiling,
+                "tool_profiling_tools": tool_profiling_tools,
+                "output_dir": output_path,
             }
             if cpu_limit is not None:
                 prepare_kwargs["cpu_limit"] = cpu_limit
@@ -2385,13 +2450,24 @@ async def simulate(
         task_dir = instance_dir / f"attempt_{attempt_n}"
         task_dir.mkdir(parents=True, exist_ok=True)
         prepared.task_output_dir = task_dir
+        # When VTune/ksys per-tool profiling is active, record where the
+        # in-container VTune data was written so teardown can call
+        # finalize_vtune().  The path mirrors what _prepare_container_session
+        # sets in VTUNE_OUT: <output_dir>/<agent_id>/vtune/.
+        if tool_profiling != "off":
+            prepared.vtune_out_dir = output_path / prepared.loaded.agent_id / "vtune"
         if prepared.container is None or not monitoring_policy.resource_enabled:
             return
         sampler = ContainerStatsSampler(
             container_id=prepared.container.container_id,
             interval_s=0.5,
             executable=prepared.container.container_executable,
-            enable_pmu=monitoring_policy.pmu_enabled,
+            # When VTune is active, the host-side perf-stat PMU sampling
+            # competes with VTune's own PMU collection for the same set of
+            # hardware counters, causing kernel multiplexing and degraded
+            # accuracy on both sides.  Disable the host PMU to give VTune
+            # exclusive counter access during profiled pytest windows.
+            enable_pmu=monitoring_policy.pmu_enabled and not vtune,
             enable_memory_bandwidth=(
                 monitoring_policy.memory_bandwidth_enabled
             ),

@@ -43,15 +43,25 @@ from typing import Any
 
 # VTune ``-report summary`` CSV keys we explicitly recognise and type-cast.
 # Keys NOT in this map are still collected as raw strings.
+#
+# Source: ``vtune -report summary -format csv`` after ``-collect uarch-exploration``.
+#
+# .. note::
+#    The following keys are NOT available in ``-report summary`` and will
+#    appear as 0 / missing unless a separate ``-report hw-events`` pass is
+#    added (currently not implemented):
+#      - L1 Hit Rate
+#      - L2 Hit Rate
+#      - LLC Miss Rate
 _VTUNE_TMA_NUMERIC_KEYS: set[str] = {
-    # Timing / throughput
+    # Timing / throughput — always present in -report summary
     "Elapsed Time",
     "CPI Rate",
     "CPI Rate (estimated)",
     "Instructions Retired",
     "Clockticks",
     "Clockticks per Instruction Retired",
-    # TMA Level 1
+    # TMA Level 1 — present in uarch-exploration -report summary
     "Front-End Bound",
     "Back-End Bound",
     "Retiring",
@@ -71,7 +81,7 @@ _VTUNE_TMA_NUMERIC_KEYS: set[str] = {
     "L3 Bound",
     "DRAM Bound",
     "Store Bound",
-    # Cache
+    # Cache hit rates — NOT in -report summary; needs -report hw-events
     "L1 Hit Rate",
     "L2 Hit Rate",
     "LLC Miss Rate",

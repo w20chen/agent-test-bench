@@ -317,8 +317,13 @@ class ExecTool(Tool):
             os.makedirs(run_dir, exist_ok=True)
             if vtune_bin:
                 # VTune mode: wrap command with VTune profiler.
+                # uarch-exploration gives the full TMA hierarchy (Front-End Bound,
+                # Back-End Bound, Memory Bound, etc.) via PMU multiplexing.
+                # -allow-multiple-runs lets repeated short-lived pytest invocations
+                # start new collections without VTune complaining about prior runs.
                 run_command = (
-                    f"{shlex.quote(vtune_bin)} -collect hotspots -data-limit=0 "
+                    f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
+                    f"-data-limit=0 -allow-multiple-runs "
                     f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
                     f"-- bash -lc {shlex.quote(command)}"
                 )
