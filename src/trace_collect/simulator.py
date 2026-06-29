@@ -701,12 +701,26 @@ def _ensure_unique_agent_ids(sessions: list[LoadedTraceSession]) -> None:
 
 
 def _resolve_docker_image(loaded: LoadedTraceSession) -> str | None:
-    """Resolve docker image: manifest override > task[image_name] > task[docker_image]."""
-    return (
+    """Resolve docker image: manifest override > task[image_name] > task[docker_image].
+
+    When the tasks JSON was downloaded directly from HuggingFace (no benchmark
+    plugin normalization), neither field is present.  In that case derive the
+    canonical SWE-bench image name from the instance_id.
+    """
+    image = (
         loaded.docker_image_override
         or loaded.task.get("image_name")
         or loaded.task.get("docker_image")
     )
+    if image:
+        return str(image)
+    instance_id = loaded.task.get("instance_id")
+    if instance_id:
+        docker_compatible_id = str(instance_id).replace("__", "_1776_")
+        return (
+            f"docker.io/swebench/sweb.eval.x86_64.{docker_compatible_id}:latest"
+        ).lower()
+    return None
 
 
 def _execution_environment(loaded: LoadedTraceSession) -> str:

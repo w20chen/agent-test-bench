@@ -420,14 +420,30 @@ class ExecTool(Tool):
             if stderr:
                 stderr_text = stderr.decode("utf-8", errors="replace")
                 # Strip VTune's own diagnostic lines so the agent doesn't
-                # see profiler noise (e.g. ptrace errors, collection warnings).
+                # see profiler noise (e.g. collection progress, warnings).
+                # Errors are preserved to a vtune_stderr.log alongside
+                # window.json so collection failures are diagnosable.
                 if vtune_window is not None:
                     stderr_lines = stderr_text.splitlines()
+                    vtune_diag_lines = [
+                        line for line in stderr_lines
+                        if line.startswith("vtune:") or line.startswith("amplxe:")
+                    ]
                     stderr_lines = [
                         line for line in stderr_lines
                         if not (line.startswith("vtune:") or line.startswith("amplxe:"))
                     ]
                     stderr_text = "\n".join(stderr_lines)
+                    # Persist VTune diagnostics so failures don't vanish.
+                    if vtune_diag_lines:
+                        try:
+                            _diag_path = os.path.join(
+                                vtune_window["dir"], "vtune_stderr.log"
+                            )
+                            with open(_diag_path, "a", encoding="utf-8") as _f:
+                                _f.write("\n".join(vtune_diag_lines) + "\n")
+                        except OSError:
+                            pass
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
 

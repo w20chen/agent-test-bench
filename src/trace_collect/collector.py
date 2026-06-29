@@ -969,6 +969,8 @@ async def collect_traces(
         ksys=effective_ksys,
         concurrency=concurrency,
         execution_environment=execution_environment,
+        tool_profiling=tool_profiling,
+        tool_profiling_tools=tool_profiling_tools,
     )
 
     run_dir = Path(run_id) if run_id else build_run_dir(benchmark, model)

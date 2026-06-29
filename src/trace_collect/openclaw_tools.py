@@ -70,7 +70,7 @@ def _resolve_exec_timeout_s(params: dict[str, Any]) -> float:
 # capture_output=True to prevent stdout pollution of the protocol.
 # ---------------------------------------------------------------------------
 _REPLAY_AGENT_SCRIPT = textwrap.dedent(r'''
-import json, os, sys, subprocess, difflib, signal, time
+import json, os, sys, subprocess, difflib, signal, time, shlex
 
 def _find_match(content, old_text):
     if old_text in content:
@@ -114,6 +114,65 @@ def _truncate_output(text, limit=_MAX_OUTPUT):
     half = limit // 2
     return text[:half] + f"\n\n... ({len(text) - limit} chars truncated) ...\n\n" + text[-half:]
 
+def _maybe_vtune_wrap(command):
+    """If VTune tool-profiling is active and *command* matches the
+    configured tool set, return ``(wrapped_command, window_info)``.
+    Otherwise return ``(command, None)``.
+
+    Mirrors the VTune wrapping logic in
+    :class:`agents.openclaw.tools.shell.ExecTool` so that replayed
+    sessions produce VTune profiling data identical to collection runs.
+    """
+    if os.environ.get("VTUNE_PROFILE") != "1":
+        return command, None
+
+    # Classify the command to check whether it should be profiled.
+    try:
+        from trace_collect.exec_classifier import classify_exec_tool_name as _clf
+        classified = _clf("exec", {"command": command})
+    except Exception:
+        return command, None
+
+    vtune_tools_raw = os.environ.get("VTUNE_TOOLS", "exec-pytest")
+    vtune_tools = {t.strip() for t in vtune_tools_raw.split(",") if t.strip()}
+    if classified not in vtune_tools:
+        return command, None
+
+    vtune_bin = os.environ.get("VTUNE_BIN", "")
+    if not vtune_bin:
+        return command, None
+
+    vtune_out = os.environ.get("VTUNE_OUT", "/testbed")
+    now_ns = time.time_ns()
+    run_dir = os.path.join(
+        vtune_out,
+        f"pytest_{time.strftime('%Y%m%dT%H%M%S')}"
+        f"_{(now_ns // 1_000) % 1_000_000:06d}_{os.getpid()}",
+    )
+    os.makedirs(run_dir, exist_ok=True)
+
+    wrapped = (
+        f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
+        f"-data-limit=0 -allow-multiple-runs "
+        f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
+        f"-- bash -lc {shlex.quote(command)}"
+    )
+    window = {"dir": run_dir, "cmd": command, "ts_start": time.time()}
+    return wrapped, window
+
+
+def _finalize_vtune_window(window, returncode):
+    """Write ``window.json`` for a completed VTune-profiled invocation."""
+    if window is None:
+        return
+    window["ts_end"] = time.time()
+    window["returncode"] = returncode
+    try:
+        with open(os.path.join(window["dir"], "window.json"), "w") as f:
+            json.dump(window, f)
+    except OSError:
+        pass
+
 def _exec_command(cmd, timeout, cwd="/testbed"):
     """Run one shell command; returns (text, returncode, timed_out).
 
@@ -147,7 +206,9 @@ def _exec_command(cmd, timeout, cwd="/testbed"):
 def handle_exec(args):
     cmd = args.get("command", "")
     timeout = args.get("timeout", 600)
-    output, rc, _timed_out = _exec_command(cmd, timeout)
+    wrapped_cmd, vtune_window = _maybe_vtune_wrap(cmd)
+    output, rc, _timed_out = _exec_command(wrapped_cmd, timeout)
+    _finalize_vtune_window(vtune_window, rc)
     return {"ok": rc == 0, "result": _truncate_output(output), "returncode": rc}
 
 def handle_commands(args):
@@ -155,13 +216,23 @@ def handle_commands(args):
     timeout = args.get("timeout", 600)
     all_output = []
     last_rc = 0
-    for i, cmd in enumerate(cmds):
-        output, rc, _timed_out = _exec_command(cmd, timeout)
-        if len(cmds) > 1:
-            all_output.append(f"[call {i}]\n{output}")
-        else:
-            all_output.append(output)
+    # When VTune is active, combine commands into a single shell pipeline
+    # so the entire batch is profiled together (one VTune collection).
+    joined = " && ".join(cmds)
+    wrapped_cmd, vtune_window = _maybe_vtune_wrap(joined)
+    if vtune_window is not None:
+        output, rc, _timed_out = _exec_command(wrapped_cmd, timeout)
+        all_output.append(output)
         last_rc = rc
+    else:
+        for i, cmd in enumerate(cmds):
+            output, rc, _timed_out = _exec_command(cmd, timeout)
+            if len(cmds) > 1:
+                all_output.append(f"[call {i}]\n{output}")
+            else:
+                all_output.append(output)
+            last_rc = rc
+    _finalize_vtune_window(vtune_window, last_rc)
     combined = "\n".join(all_output) if all_output else ""
     return {"ok": last_rc == 0, "result": combined, "returncode": last_rc}
 

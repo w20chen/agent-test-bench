@@ -52,6 +52,8 @@ def resolve_collect_monitoring(
     ksys: MonitoringMode,
     concurrency: int,
     execution_environment: str,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
 ) -> MonitoringPolicy:
     """Resolve collection defaults and reject invalid combinations."""
     concurrent = concurrency > 1
@@ -78,6 +80,8 @@ def resolve_collect_monitoring(
         memory_bandwidth_enabled=resource_enabled and not concurrent,
         ksys_enabled=ksys == "on",
         concurrent=concurrent,
+        tool_profiling=tool_profiling,
+        tool_profiling_tools=tool_profiling_tools,
     )
 
 
@@ -89,6 +93,8 @@ def resolve_simulate_monitoring(
     concurrent: bool,
     has_host_session: bool,
     has_container_session: bool,
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
 ) -> MonitoringPolicy:
     """Resolve simulation defaults after source sessions are loaded."""
     if concurrent and pmu == "on":
@@ -118,4 +124,6 @@ def resolve_simulate_monitoring(
         memory_bandwidth_enabled=resource_enabled and not concurrent,
         ksys_enabled=ksys == "on",
         concurrent=concurrent,
+        tool_profiling=tool_profiling,
+        tool_profiling_tools=tool_profiling_tools,
     )
