@@ -151,11 +151,21 @@ def _maybe_vtune_wrap(command):
     )
     os.makedirs(run_dir, exist_ok=True)
 
+    # Write the command to a shell script to avoid nested quoting issues.
+    # The inline form ``bash -lc {shlex.quote(command)}`` passes through
+    # two levels of shell parsing (create_subprocess_shell + VTune's
+    # internal target launcher), which causes shell operators (&&, |,
+    # 2>&1) to be interpreted by the wrong shell layer.  See the
+    # matching fix in agents/openclaw/tools/shell.py for full rationale.
+    _script = os.path.join(run_dir, "run.sh")
+    with open(_script, "w") as _f:
+        _f.write(f"#!/bin/bash\nset -e\n{command}\n")
+    os.chmod(_script, 0o755)
     wrapped = (
         f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
         f"-data-limit=0 "
         f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
-        f"-- bash -lc {shlex.quote(command)}"
+        f"-- /bin/bash {shlex.quote(_script)}"
     )
     window = {"dir": run_dir, "cmd": command, "ts_start": time.time()}
     return wrapped, window

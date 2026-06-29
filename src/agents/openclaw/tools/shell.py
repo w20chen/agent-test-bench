@@ -320,11 +320,23 @@ class ExecTool(Tool):
                 # Back-End Bound, Memory Bound, etc.) via PMU multiplexing.
                 # Each tool invocation gets its own result/ directory so
                 # there is no conflict between consecutive collections.
+                #
+                # Write the command to a shell script and pass that to VTune
+                # instead of embedding the command inline.  The inline form
+                # ``bash -lc {shlex.quote(command)}`` passes through two levels
+                # of shell parsing (create_subprocess_shell + VTune's internal
+                # target launcher), which causes shell operators (&&, |, 2>&1)
+                # to be interpreted by the wrong shell.  The script-file
+                # approach avoids all nested quoting issues.
+                _script = os.path.join(run_dir, "run.sh")
+                with open(_script, "w") as _f:
+                    _f.write(f"#!/bin/bash\nset -e\n{command}\n")
+                os.chmod(_script, 0o755)
                 run_command = (
                     f"{shlex.quote(vtune_bin)} -collect uarch-exploration "
                     f"-data-limit=0 "
                     f"-r {shlex.quote(os.path.join(run_dir, 'result'))} "
-                    f"-- bash -lc {shlex.quote(command)}"
+                    f"-- /bin/bash {shlex.quote(_script)}"
                 )
             # else: ksys / coarse-only mode — run command directly, only
             # the /proc sampler collects data.

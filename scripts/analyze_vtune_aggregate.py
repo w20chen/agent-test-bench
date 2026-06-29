@@ -205,12 +205,30 @@ def _collect_all_windows(base_dir: Path) -> list[dict[str, Any]]:
             row["instance_id"] = parts[-4]
         if len(parts) >= 3:
             row["attempt"] = parts[-3]
+        # Extract tool type from directory name (e.g. "exec-grep_20260629T..." → "grep")
+        dir_name = run_dir.name
+        tool_type = dir_name.split("_")[0] if "_" in dir_name else "unknown"
+        if tool_type.startswith("exec-"):
+            tool_type = tool_type[5:]  # strip "exec-" prefix
+        row["tool_type"] = tool_type
 
         # --- coarse.json ---
         coarse = _try_read_json(run_dir / "coarse.json")
         if coarse:
             n_coarse += 1
             row.update(_flatten_nested(coarse, "coarse", keys=_COARSE_KEYS))
+            # Rate-based derived metrics (delta / duration)
+            _dur = row.get("duration_s")
+            if _dur and _dur > 0:
+                dw = coarse.get("disk_write_mb", {})
+                if isinstance(dw, dict) and dw.get("delta", 0) > 0:
+                    row["coarse_disk_write_mbps"] = round(dw["delta"] / _dur, 4)
+                dr = coarse.get("disk_read_mb", {})
+                if isinstance(dr, dict) and dr.get("delta", 0) > 0:
+                    row["coarse_disk_read_mbps"] = round(dr["delta"] / _dur, 4)
+                ctx = coarse.get("context_switches", {})
+                if isinstance(ctx, dict) and ctx.get("delta", 0) > 0:
+                    row["coarse_ctx_per_s"] = round(ctx["delta"] / _dur, 1)
 
         # --- fine.json ---
         fine = _try_read_json(run_dir / "fine.json")
@@ -512,6 +530,102 @@ def _make_dist_plots(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-tool-type workload summary
+# ---------------------------------------------------------------------------
+
+# Numeric metric keys worth reporting per tool type (stable across all data).
+_PER_TOOL_METRIC_KEYS: tuple[str, ...] = (
+    # Timing
+    "duration_s",
+    # Coarse — rates (computed from delta/duration)
+    "coarse_disk_write_mbps",
+    "coarse_disk_read_mbps",
+    "coarse_ctx_per_s",
+    # Coarse — min/max/avg (meaningful for non-cumulative: CPU%, memory)
+    "coarse_cpu_percent_avg",
+    "coarse_cpu_percent_max",
+    "coarse_memory_mb_avg",
+    "coarse_memory_mb_max",
+    # Coarse — cumulative delta totals
+    "coarse_disk_write_mb_delta",
+    "coarse_disk_read_mb_delta",
+    "coarse_context_switches_delta",
+    # VTune — scalar metrics (correct regardless of TMA availability)
+    "tma_Elapsed Time",
+    "tma_CPI Rate",
+    "tma_Instructions Retired",
+    "tma_Clockticks",
+    "tma_Average CPU Frequency",
+    "tma_Total Thread Count",
+)
+
+
+def _write_per_tool_summary(rows: list[dict[str, Any]], output_path: Path) -> None:
+    """Group by tool_type and emit per-type distribution statistics."""
+    tool_data: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        tool_data[r.get("tool_type", "unknown")].append(r)
+
+    lines: list[str] = []
+    lines.append("=" * 72)
+    lines.append("Per-Tool-Type Workload Characterization")
+    lines.append("=" * 72)
+    lines.append(f"Tool types found: {len(tool_data)} ({', '.join(sorted(tool_data))})")
+    lines.append("")
+
+    for tool_type in sorted(tool_data):
+        group = tool_data[tool_type]
+        n = len(group)
+        lines.append(f"{'─' * 72}")
+        lines.append(f"  [{tool_type}]  {n} invocation{'s' if n != 1 else ''}")
+        lines.append(f"{'─' * 72}")
+        lines.append(f"  {'Metric':<40s} {'N':>5s} {'p50':>10s} {'Mean':>10s} {'p95':>10s} {'Max':>10s}")
+        lines.append(f"  {'-' * 68}")
+
+        for key in _PER_TOOL_METRIC_KEYS:
+            vals: list[float] = []
+            for r in group:
+                v = r.get(key)
+                if isinstance(v, (int, float)) and math.isfinite(v):
+                    vals.append(v)
+            if len(vals) < 2:
+                continue
+            dist = _compute_distribution(vals)
+            lines.append(
+                f"  {key:<40s} {dist.get('count', 0):>5d} "
+                f"{dist.get('p50', 0):>10.4g} {dist.get('mean', 0):>10.4g} "
+                f"{dist.get('p95', 0):>10.4g} {dist.get('max', 0):>10.4g}"
+            )
+        lines.append("")
+
+    # Cross-tool comparison: top-3 tools by duration, CPU, memory
+    lines.append(f"{'─' * 72}")
+    lines.append("  Cross-Tool Rankings (by p50)")
+    lines.append(f"{'─' * 72}")
+    for label, key in [
+        ("Duration (s)", "duration_s"),
+        ("CPU % (avg)", "coarse_cpu_percent_avg"),
+        ("Memory MB (peak)", "coarse_memory_mb_max"),
+        ("Disk Write MB/s", "coarse_disk_write_mbps"),
+        ("Context Switches/s", "coarse_ctx_per_s"),
+    ]:
+        ranked: list[tuple[str, float]] = []
+        for tt, group in tool_data.items():
+            vals = [r.get(key) for r in group
+                    if isinstance(r.get(key), (int, float)) and math.isfinite(r.get(key, 0))]
+            if len(vals) >= 2:
+                ranked.append((tt, _percentile(sorted(vals), 50)))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        lines.append(f"  {label}:")
+        for i, (tt, p50) in enumerate(ranked[:5]):
+            lines.append(f"    {i+1}. {tt:<15s} p50={p50:.3g}")
+        lines.append("")
+
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[by-tool] wrote {output_path}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Top-N slowest / hottest
 # ---------------------------------------------------------------------------
 
@@ -633,7 +747,10 @@ def main() -> None:
     # 4. Top-N
     _write_top_n(rows, Path(str(prefix) + "_topn.txt"))
 
-    # 5. Plots (optional)
+    # 5. Per-tool-type workload summary
+    _write_per_tool_summary(rows, Path(str(prefix) + "_by_tool.txt"))
+
+    # 6. Plots (optional)
     if args.plot:
         _make_dist_plots(rows, Path(str(prefix) + "_dist.png"))
 

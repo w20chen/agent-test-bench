@@ -854,10 +854,18 @@ async def _prepare_container_session(
         vtune_out = output_dir.resolve() / "vtune"
         vtune_out.mkdir(parents=True, exist_ok=True)
         resolved_tools = tool_profiling_tools or ["exec-pytest"]
+        # Pass SEP driver device node so VTune can use hardware PMU
+        # counters instead of falling back to Driverless Perf mode.
+        _sep_devices: list[str] = []
+        for _candidate in ("/dev/sep5", "/dev/sep"):
+            if os.path.exists(_candidate):
+                _sep_devices.extend(["--device", _candidate])
+                break
         extra_args.extend([
             "--cap-add", "PERFMON",
             "--cap-add", "SYS_ADMIN",
             "--cap-add", "SYS_PTRACE",
+            *_sep_devices,
             "-v", f"{vtune_root}:{vtune_root}:ro",
             "-v", f"{output_dir.resolve()}:{output_dir.resolve()}",
             "-e", "VTUNE_PROFILE=1",

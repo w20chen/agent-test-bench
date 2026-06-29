@@ -81,10 +81,20 @@ def vtune_container_run_args(
     vtune_bin, root = _resolve_vtune()
     out_dir.mkdir(parents=True, exist_ok=True)
     resolved_tools = tools or ["exec-pytest"]
+    # Detect active SEP driver version (sep, sep5, etc.) and pass its
+    # device node into the container.  Without this VTune falls back to
+    # Driverless Perf system-wide sampling, which produces degraded TMA
+    # resolution compared to hardware PMU counter access via SEP.
+    _sep_devices: list[str] = []
+    for _candidate in ("/dev/sep5", "/dev/sep"):
+        if os.path.exists(_candidate):
+            _sep_devices.extend(["--device", _candidate])
+            break
     return [
         "--cap-add", "PERFMON",
         "--cap-add", "SYS_ADMIN",
         "--cap-add", "SYS_PTRACE",   # uarch-exploration needs ptrace for HW event stack sampling
+        *_sep_devices,
         "-v", f"{root}:{root}:ro",
         "-e", "VTUNE_PROFILE=1",
         "-e", f"VTUNE_BIN={vtune_bin}",
