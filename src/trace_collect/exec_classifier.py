@@ -90,6 +90,9 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
     "pip": "pip",
     "pip3": "pip",
     "pytest": "pytest",
+    # Django test runner: ``python -m django test`` is the SWE-bench
+    # Django equivalent of pytest (same role, same profiling target).
+    "django": "pytest",
     "python3.12": "python",
     "python3.11": "python",
     "python3.10": "python",
@@ -171,6 +174,7 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "pip": 4,
     "pip3": 4,
     "pytest": 4,
+    "django": 4,  # python -m django test (SWE-bench Django test runner)
     "python": 3,
     "python3": 3,
     "python3.12": 3,
