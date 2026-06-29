@@ -23,9 +23,15 @@ per-invocation metrics:
 |---|---|---|
 | `summary.json` | Command, wall-clock duration, return code, sample count, coarse source label | `window.json` metadata |
 | `coarse.json` | CPU%, memory, disk I/O, network, context switches | In-container `/proc` proc-tree sampler (`per_tool_samples.jsonl`) — accurate even with concurrent invocations |
-| `fine.json` | VTune hotspots summary — CPI, instructions, clockticks, branch mispredict, cache metrics | VTune `-report summary` CSV parsing |
+| `fine.json` | VTune uarch-exploration TMA summary — CPI, instructions, clockticks, branch mispredict, cache metrics, full TMA hierarchy | Intel VTune official CLI: `vtune -report summary -format csv` |
 
 Results land under `<attempt_dir>/vtune/pytest_<timestamp>_<microsecond>_<pid>/`.
+
+The `vtune` block in `fine.json` is a **direct parse** of Intel's official
+`vtune -report summary -format csv` output.  No custom computation,
+aggregation, or transformation is performed — every metric name and value
+comes straight from VTune's own reporting engine.  See [VTune Reporting
+Pipeline](#vtune-reporting-pipeline) for details.
 
 ## Quick Start
 
@@ -249,7 +255,7 @@ If you see `permission denied` errors in VTune output, this is the fix.
 │    ▼                                                             │
 │  shell.py (ExecTool)                                             │
 │    │  if VTUNE_PROFILE=1 and tool matches VTUNE_TOOLS:           │
-│    │    wrap: vtune -collect hotspots -- bash ...              │
+│    │    wrap: vtune -collect uarch-exploration -- bash -lc ... │
 │    │    start per-tool /proc sampler thread (0.5 s interval)     │
 │    │    record ts_start / ts_end / returncode → window.json      │
 │    │                                                             │
@@ -293,10 +299,14 @@ The `coarse_source` field in `summary.json` records which source was used
   `--tool-profiling vtune` is active.  Zero overhead otherwise.
 - **Opt-in by default**: `--tool-profiling` defaults to `off`.
   Existing workflows are completely unaffected.
-- **hotspots mode**: VTune ``hotspots`` collection uses ~6 basic PMU events
-  (cycles, instructions, branches, cache) that fit within the per-core PMU
-  counter budget on any core count, avoiding the multi-core event distribution
-  issue that plagues ``uarch-exploration`` mode.
+- **uarch-exploration mode**: VTune ``uarch-exploration`` collection uses
+  PMU multiplexing to capture the full TMA (Top-down Microarchitecture
+  Analysis) hierarchy — Front-End Bound, Back-End Bound, Bad Speculation,
+  Retiring, and their sub-metrics.  This requires more PMU counter groups
+  than ``hotspots``, but provides a complete microarchitectural breakdown.
+  Because PMU counters are multiplexed across event groups, profiling runs
+  shorter than ~0.5 s may produce incomplete TMA data (see
+  [Limitations](#limitations)).
 - **Per-tool-window slicing**: Rather than profiling the entire agent run,
   each matching tool invocation is profiled independently.
 - **In-container `/proc` sampler**: CPU, memory, disk I/O, and context
@@ -314,6 +324,52 @@ The `coarse_source` field in `summary.json` records which source was used
   tool execution.  If VTune is not installed, the feature fails early with
   a clear error message.
 
+## VTune Reporting Pipeline
+
+The `vtune` block in `fine.json` is **not computed or derived** by this
+project — it is a direct parse of Intel VTune's official CLI report.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. Collection                                                   │
+│    vtune -collect uarch-exploration                             │
+│      → writes raw PMU samples to result/ directory              │
+│      → binary format: data.0/*, sqlite-db/, result.vtune        │
+├─────────────────────────────────────────────────────────────────┤
+│ 2. Official Intel Report                                        │
+│    vtune -report summary -r result/ -format csv                 │
+│      → VTune's own analysis engine computes TMA from raw PMU    │
+│      → outputs three-column CSV:                                │
+│          Hierarchy Level, Metric Name, Metric Value             │
+│      → Example rows:                                            │
+│          TMA Level 1, Retiring, 36.7                            │
+│          TMA Level 1, Front-End Bound, 28.3                     │
+│          TMA Level 1, Bad Speculation, 18.3                     │
+│          TMA Level 2, Branch Mispredict, 16.7                   │
+│          ...                                                    │
+├─────────────────────────────────────────────────────────────────┤
+│ 3. Parse & Store (vtune_report._vtune_summary)                  │
+│    → reads CSV, converts numeric strings to float,              │
+│      percentage strings (\"36.7%\") to float (36.7)              │
+│    → stores as flat dict in fine.json[\"vtune\"]                  │
+│                                                                  │
+│    ⚠ No custom math, no aggregation, no renaming.               │
+│    Metric names are VTune's original CSV column-2 values.       │
+│    Zero values ARE VTune's reported values (insufficient        │
+│    PMU samples for that metric).                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why some metrics are zero**: VTune's `uarch-exploration` uses PMU
+multiplexing to sample many hardware event groups in rotation.  Each
+group needs multiple sampling rounds for statistical significance.
+Profiling runs shorter than ~0.5 s may not complete enough rounds for
+TMA Level-2/3 metrics, resulting in zero values.  The basic counters
+(`Instructions Retired`, `Clockticks`, `CPI Rate`) are always correct
+because they are sampled in every round.  If you consistently see
+zero-valued TMA metrics, check the profiling duration — runs under
+0.5 s are expected to have incomplete TMA breakdowns.
+
 ## Analysis
 
 Aggregated analysis across many pytest invocations is provided by
@@ -329,8 +385,15 @@ python scripts/analyze_vtune_aggregate.py --input traces/my_sweep/
 
 - Intel x86 native only (no ARM, no QEMU) for `--tool-profiling vtune`.
 - Container-mode benchmarks only.
-- Adds modest overhead: VTune hotspots collects PMU counters during
-  the pytest run.  Expect 2–5% runtime increase per profiled test
-  (significantly lower than uarch-exploration's 5-15%).
+- Adds modest overhead: VTune uarch-exploration uses PMU multiplexing to
+  collect the full TMA hierarchy during the test run.  Expect 5–15% runtime
+  increase per profiled test.
+- **Short runs produce incomplete TMA data**: VTune's PMU multiplexing
+  needs sufficient sampling rounds to compute the full TMA breakdown.
+  Profiling runs shorter than ~0.5 s may show zero-valued TMA metrics
+  (Retiring, Front-End Bound, etc.) even though basic counters
+  (Instructions Retired, CPI) are correct.  This is a VTune-internal
+  limitation, not a parsing bug — the zero values come directly from
+  `vtune -report summary`.
 - The in-container `/proc` sampler adds negligible overhead (~60 syscalls
   per 0.5 s interval for a typical pytest process tree).
