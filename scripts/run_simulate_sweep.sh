@@ -56,7 +56,7 @@ SWEEP_VALUES="${SWEEP_VALUES:-40 80 160 320}"
 # Default: 1 (1 core per agent, CFS-throttled).
 # Set to empty (CPU_LIMIT="") for native Linux scheduling with no throttle.
 # Fractional values (e.g. 0.5) are supported.
-CPU_LIMIT="${CPU_LIMIT:-1}"
+CPU_LIMIT="${CPU_LIMIT-1}"
 # WORKERS: number of multiprocessing workers for cloud_model replay.
 # Distributes agents across multiple Python processes so each event loop
 # only handles N/WORKERS agents.  Default: number of host CPU cores.
