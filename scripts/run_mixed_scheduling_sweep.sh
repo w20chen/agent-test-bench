@@ -395,7 +395,7 @@ echo "  Right half:   ${CORE_RANGE_RIGHT}"
 echo
 
 # Pin this script to the full core range.
-taskset -c "${CORE_RANGE_FULL}" --pid $$
+taskset -pc "${CORE_RANGE_FULL}" $$
 
 # ── Main sweep loop ──────────────────────────────────────────────────────────
 
