@@ -1923,6 +1923,8 @@ def _worker_run_cloud_model(
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
     ksys_monitoring: str = "auto",
+    tool_profiling: str = "off",
+    tool_profiling_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a subset of cloud_model sessions in a subprocess.
 
@@ -2037,7 +2039,10 @@ def _worker_run_cloud_model(
                         container_id=prepared.container.container_id,
                         interval_s=0.5,
                         executable=prepared.container.container_executable,
-                        enable_pmu=monitoring_policy.pmu_enabled,
+                        enable_pmu=(
+                            monitoring_policy.pmu_enabled
+                            and tool_profiling != "vtune"
+                        ),
                         enable_memory_bandwidth=(
                             monitoring_policy.memory_bandwidth_enabled
                         ),
@@ -2815,6 +2820,8 @@ async def simulate(
                             resource_monitoring=resource_monitoring,
                             pmu_monitoring=pmu_monitoring,
                             ksys_monitoring=ksys_monitoring,
+                            tool_profiling=tool_profiling,
+                            tool_profiling_tools=tool_profiling_tools,
                         )
 
                         def _abort_if_worker_exits_early(

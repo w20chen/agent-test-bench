@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,13 +10,17 @@ import pytest
 
 from trace_collect.cli import _run_simulate, parse_simulate_args
 from trace_collect.simulator import (
+    LoadedTraceSession,
+    PreparedTraceSession,
     SimulateError,
+    WorkerTraceInput,
     _ensure_unique_agent_ids,
     _partition_sessions_and_offsets,
     _prepare_container_session,
     _resolve_prep_concurrency,
     _teardown_one_worker,
     _wait_for_global_replay_start,
+    _worker_run_cloud_model,
     _worker_trace_input,
     simulate,
 )
@@ -151,6 +156,115 @@ def test_simulate_api_rejects_invalid_worker_controls(tmp_path: Path) -> None:
         asyncio.run(simulate(**common, workers=0))
     with pytest.raises(ValueError, match="prep_concurrency must be >= 0"):
         asyncio.run(simulate(**common, prep_concurrency=-1))
+
+
+@pytest.mark.parametrize(
+    ("tool_profiling", "tool_profiling_tools"),
+    [
+        ("off", []),
+        ("ksys", ["exec-pytest"]),
+        ("vtune", ["exec-pytest"]),
+    ],
+)
+def test_worker_cloud_model_passes_tool_profiling_to_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_profiling: str,
+    tool_profiling_tools: list[str],
+) -> None:
+    loaded = LoadedTraceSession(
+        source_trace=tmp_path / "trace.jsonl",
+        task_source=tmp_path / "tasks.json",
+        agent_id="task",
+        scaffold="openclaw",
+        metadata=None,
+        summary=None,
+        task={"image_name": "example/image:latest"},
+        actions=[],
+        iterations={},
+    )
+    seen_prepare_kwargs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "trace_collect.simulator._load_trace_session",
+        lambda *_args, **_kwargs: loaded,
+    )
+    monkeypatch.setattr(
+        "trace_collect.simulator._validate_loaded_sessions",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trace_collect.simulator._is_host_mode",
+        lambda _session: False,
+    )
+
+    async def fake_prepare_container_session(
+        loaded_session: LoadedTraceSession,
+        **kwargs: object,
+    ) -> PreparedTraceSession:
+        seen_prepare_kwargs.append(kwargs)
+        return PreparedTraceSession(loaded=loaded_session)
+
+    async def fake_run_cloud_model_replay(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def fake_teardown_one_worker(
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "trace_collect.simulator._prepare_container_session",
+        fake_prepare_container_session,
+    )
+    monkeypatch.setattr(
+        "trace_collect.simulator._run_cloud_model_replay",
+        fake_run_cloud_model_replay,
+    )
+    monkeypatch.setattr(
+        "trace_collect.simulator._teardown_one_worker",
+        fake_teardown_one_worker,
+    )
+
+    start_event = threading.Event()
+    start_event.set()
+    result = _worker_run_cloud_model(
+        1,
+        [
+            WorkerTraceInput(
+                source_trace=str(loaded.source_trace),
+                task_source=str(loaded.task_source),
+                docker_image_override=None,
+                agent_id=loaded.agent_id,
+            )
+        ],
+        arrival_offsets=[0.0],
+        output_dir=str(tmp_path / "out"),
+        container_executable="docker",
+        network_mode="host",
+        replay_speed=1.0,
+        command_timeout_s=120.0,
+        warmup_skip_iterations=0,
+        cpu_limit=None,
+        prep_semaphore=None,
+        replay_start_barrier=threading.Barrier(1),
+        replay_start_event=start_event,
+        replay_start_wall_time=SimpleNamespace(value=time.time()),
+        tool_profiling=tool_profiling,
+        tool_profiling_tools=tool_profiling_tools,
+    )
+
+    assert result["success"] is True
+    assert seen_prepare_kwargs == [
+        {
+            "container_executable": "docker",
+            "network_mode": "host",
+            "tool_profiling": tool_profiling,
+            "tool_profiling_tools": tool_profiling_tools,
+            "output_dir": tmp_path / "out" / "task" / "attempt_1",
+        }
+    ]
 
 
 def test_bootstrap_failure_stops_started_container(
