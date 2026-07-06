@@ -43,7 +43,7 @@ supports `--scaffold openclaw` with the Docker runtime in phase 1.
 
 ---
 
-## SWE-Bench Verified
+## [SWE-Bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified)
 
 Container-mode benchmark. Prepare tasks and repositories once:
 
@@ -66,7 +66,7 @@ PYTHONPATH=src python -m trace_collect.cli \
 
 ---
 
-## SWE-rebench
+## [SWE-rebench](https://huggingface.co/datasets/nebius/SWE-rebench)
 
 Container-mode benchmark on the filtered SWE-rebench split. Prepare once:
 
@@ -91,7 +91,7 @@ On ARM hosts, see the QEMU or native setup in
 
 ---
 
-## Terminal-Bench
+## [Terminal-Bench](https://github.com/harbor-framework/terminal-bench)
 
 Requires Python 3.12+, the project dependencies (including the `terminal-bench`
 package), a working Docker daemon, **and the Docker Compose V2 plugin**
@@ -128,7 +128,7 @@ For the repository's known smoke case, use `--instance-ids fix-git` instead of
 
 ---
 
-## Deep Research Bench & BrowseComp
+## [Deep Research Bench](https://huggingface.co/datasets/muset-ai/DeepResearch-Bench-Dataset) & BrowseComp
 
 Host-mode benchmarks — no Docker containers required. See the
 [Trace Collect](trace-collect.md#deep-research-bench) CLI reference for
