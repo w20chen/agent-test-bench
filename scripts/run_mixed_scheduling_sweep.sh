@@ -154,6 +154,8 @@ trap _cleanup EXIT INT TERM
 #   $4: label for logging
 #   $5: (optional) taskset CPU range override
 #   $6: path to tasks JSON (--task-source)
+#   $7: resource monitoring mode (on|off), default on.
+#       Host-mode benchmarks (deep research) must use "off".
 _run_simulate() {
   local src_dir="$1"
   local output_dir="$2"
@@ -161,6 +163,7 @@ _run_simulate() {
   local label="$4"
   local cpu_range="${5:-}"
   local task_source="${6:-${REPO_ROOT}/data/swe-rebench/tasks.json}"
+  local resource_mon="${7:-on}"
 
   mkdir -p "${output_dir}"
 
@@ -203,7 +206,7 @@ _run_simulate() {
     --cpu-limit "${CPU_LIMIT}"
     --workers "${WORKERS}"
     --prep-concurrency "${PREP_CONCURRENCY}"
-    --resource-monitoring on
+    --resource-monitoring "${resource_mon}"
     --pmu-monitoring off
     --ksys-monitoring off
     --replay-speed "${REPLAY_SPEED}"
@@ -447,11 +450,12 @@ for N in ${SWEEP_VALUES}; do
     "${HALF_N}" \
     "seq-rebench" \
     "${CORE_RANGE_FULL}" \
-    "${TASK_SOURCE_REBENCH}"; then
+    "${TASK_SOURCE_REBENCH}" \
+    "on"; then
     REBENCH_OK=1
   fi
 
-  # Phase 2: N/2 deep research (all cores)
+  # Phase 2: N/2 deep research (all cores, host-mode → resource monitoring off)
   echo "[$(date +%H:%M:%S)] Phase 2/2: Running ${HALF_N} dr agents (all cores)..."
   DR_OK=0
   if _run_simulate \
@@ -460,7 +464,8 @@ for N in ${SWEEP_VALUES}; do
     "${HALF_N}" \
     "seq-dr" \
     "${CORE_RANGE_FULL}" \
-    "${TASK_SOURCE_DR}"; then
+    "${TASK_SOURCE_DR}" \
+    "off"; then
     DR_OK=1
   fi
 
@@ -507,7 +512,8 @@ for N in ${SWEEP_VALUES}; do
     "${HALF_N}" \
     "int-rebench" \
     "${CORE_RANGE_LEFT}" \
-    "${TASK_SOURCE_REBENCH}" &
+    "${TASK_SOURCE_REBENCH}" \
+    "on" &
   REBENCH_PID=$!
   _BG_PIDS+=("${REBENCH_PID}")
 
@@ -518,7 +524,8 @@ for N in ${SWEEP_VALUES}; do
     "${HALF_N}" \
     "int-dr" \
     "${CORE_RANGE_RIGHT}" \
-    "${TASK_SOURCE_DR}" &
+    "${TASK_SOURCE_DR}" \
+    "off" &
   DR_PID=$!
   _BG_PIDS+=("${DR_PID}")
 
