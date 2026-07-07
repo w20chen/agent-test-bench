@@ -111,6 +111,22 @@ def test_cluster_compact_is_valid_for_four_agents() -> None:
     assert placements["spread_clusters_same_llc"].cpus == [0, 4, 1, 5]
 
 
+def test_placements_avoid_smt_sibling_logical_cpus() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-15\n")
+        for cpu in range(16):
+            _cpu(root, cpu, shared="0-15", core_id=cpu // 2)
+
+        topology = probe_topology(root)
+        placements_8 = build_placements(topology, agent_count=8)
+        placements_4 = build_placements(topology, agent_count=4)
+
+    assert placements_8["compact_llc"].cpus == [0, 2, 4, 6, 8, 10, 12, 14]
+    assert placements_4["compact_cluster"].cpus == [0, 2, 4, 6]
+    assert placements_8["spread_clusters_same_llc"].cpus == [0, 8, 2, 10, 4, 12, 6, 14]
+
+
 def test_spread_across_four_llcs_round_robins_domains() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"

@@ -23,6 +23,11 @@ Implementation scope for this revision:
 - Treat Kunpeng sub-LLC clusters as explicit, documented inference from CPU
   numbering within each Linux LLC shared CPU list.  Do not present inferred
   clusters as firmware-proven physical CCL IDs.
+- When SMT siblings are exposed as separate logical CPUs, select only one
+  logical CPU per `core_id` for explicit placements.  On the checked Kunpeng
+  host each Linux LLC/NUMA domain exposes 80 logical CPUs but 40 unique
+  `core_id` values; using `0,1,2,3,...` would co-locate agents on sibling
+  threads and invalidate one-agent-one-core placement claims.
 - Run focused unit tests only.  Do not run placement experiments until the
   code review gate is clean and the human approves the concrete run command.
 

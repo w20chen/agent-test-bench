@@ -369,6 +369,31 @@ def _inferred_clusters(
     return clusters
 
 
+def _physical_core_representatives(
+    topology: list[CpuTopology],
+) -> dict[tuple[int | None, str], list[int]]:
+    """Return one logical CPU per physical core for each NUMA/LLC domain.
+
+    Linux exposes SMT siblings as separate CPU IDs that share the same
+    ``core_id``.  Placement experiments need one replay agent per physical
+    core, so we choose the lowest online logical CPU for each observed
+    ``core_id`` within a NUMA/LLC domain.  If ``core_id`` is unavailable,
+    fall back to the CPU ID so the probe still works on minimal fixtures.
+    """
+    by_core: dict[tuple[int | None, str, int], int] = {}
+    for rec in sorted(topology, key=lambda item: item.cpu):
+        core_key = rec.core_id if rec.core_id is not None else rec.cpu
+        key = (rec.numa_node, rec.llc_id, core_key)
+        by_core[key] = min(rec.cpu, by_core.get(key, rec.cpu))
+
+    by_domain: dict[tuple[int | None, str], list[int]] = {}
+    for numa_node, llc_id, _core_key in sorted(by_core):
+        by_domain.setdefault((numa_node, llc_id), []).append(
+            by_core[(numa_node, llc_id, _core_key)]
+        )
+    return {domain: sorted(cpus) for domain, cpus in by_domain.items()}
+
+
 def build_placements(
     topology: list[CpuTopology],
     *,
@@ -388,10 +413,7 @@ def build_placements(
     if cluster_size <= 0:
         raise ValueError("cluster_size must be positive")
 
-    by_domain: dict[tuple[int | None, str], list[int]] = {}
-    for rec in sorted(topology, key=lambda item: item.cpu):
-        by_domain.setdefault((rec.numa_node, rec.llc_id), []).append(rec.cpu)
-
+    by_domain = _physical_core_representatives(topology)
     domains = sorted(by_domain.items(), key=lambda item: min(item[1]))
     if not domains:
         raise RuntimeError("no CPU locality domains found")
