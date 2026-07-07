@@ -1,316 +1,216 @@
-# Current Plan: Resource monitoring controls
+# Current Plan: Kunpeng QEMU LLC Placement Experiment
 
 ## Goal
 
-Audit every resource-monitoring path, document when it is enabled or disabled,
-and add explicit controls without changing existing experiment defaults
-silently.
+Design and implement a small, reproducible script layer for the key experiment:
+8 concurrent OpenClaw agents on a Kunpeng ARM host in QEMU mode, constraining
+the whole concurrent run to either one LLC's CPU set or a CPU set spread across
+distinct LLCs, and comparing both against OS default placement.
 
-## Read-only audit findings
+The experiment should use one typical real agent case, preserve real tool
+execution, and collect enough topology and performance evidence to explain
+performance changes through shared LLC / memory-bandwidth contention.
 
-### Trace collection (`trace_collect.cli` collect path)
+## Research Integrity Guardrails
 
-- Serial collection (`--concurrency 1`, the default):
-  - Container attempts start `ContainerStatsSampler` by default.
-  - Host attempts start `ProcessStatsSampler` by default.
-  - Both samplers collect CPU, RSS memory, disk I/O, network I/O, and context
-    switches.
-  - Both samplers also call `attach_host_memory_bandwidth()` and
-    `attach_micro_arch()`, which lazily start module-level `perf` collectors.
-    These two metric families are therefore implicitly enabled whenever the
-    base sampler is enabled, although unsupported hardware/permissions produce
-    unavailable markers rather than samples.
-- Concurrent collection (`--concurrency > 1`):
-  - `collector._run_scaffold_tasks()` hardcodes
-    `disable_resource_monitoring=True` for every attempt.
-  - Container/process sampling, host memory bandwidth, and PMU sampling are all
-    skipped.
-  - `--ksys`, if explicitly passed, runs once for the whole batch.
-- `--ksys` is an independent opt-in flag and defaults to off.
-- There is no user-facing switch for the built-in sampler stack.
+- Do not introduce synthetic/mocked agent results as final evidence.
+- Do not tune the selected task for a favorable result. The selected case must
+  be documented as a fixed representative workload before running the
+  placement comparison.
+- Do not add per-benchmark CLI flags to trace collection. Benchmark settings
+  stay in benchmark YAML/plugin code.
+- Do not silently reduce concurrency, sample count, iterations, tool work, or
+  QEMU usage because a run is slow.
+- QEMU mode is explicit: use `ARM_IMAGE_MODE=qemu`, after validating binfmt.
+- Scripts must record the exact core lists, topology snapshot, environment, and
+  command line for every run.
 
-### Simulation (`trace_collect.cli simulate`)
+## Proposed Script Set
 
-- Container replay always starts `ContainerStatsSampler`; there is no switch.
-- Host replay writes an empty `resources.json` and does not start
-  `ProcessStatsSampler`.
-- vLLM scheduler/Prometheus snapshots are collected when `--metrics-url` is
-  provided; otherwise explicit empty snapshots are recorded.
-- GPU memory tracking has its own `--gpu-tracking on|off` switch and defaults
-  to off. It is supported only for `local_model` mode and requires the vLLM
-  metrics URL, PID, and startup log.
+### 1. Topology Probe
 
-### Dedicated GPU profiling
+Path: `scripts/experiments/probe_llc_topology.py`
 
-- `profile-gpu` is a dedicated command whose purpose is component-level GPU
-  memory profiling. Running the command always attaches attention/MLP forward
-  hooks.
-- It is separate from ordinary collection and simulation resource sampling.
+Responsibilities:
 
-### Standalone OpenClaw
+- Parse Linux topology from:
+  - `/sys/devices/system/cpu/cpu*/cache/index*/`
+  - `/sys/devices/system/cpu/cpu*/topology/`
+  - `/sys/devices/system/cpu/cpu*/node*`
+- Identify the last-level cache index per CPU by highest cache level.
+- Emit machine-readable topology:
+  - `cpu`
+  - `core_id`
+  - `socket_id` / physical package id
+  - `numa_node`
+  - `llc_id`
+  - `llc_level`
+  - `llc_shared_cpu_list`
+- Generate placement candidates:
+  - `same_llc_8`: 8 CPUs from one LLC sharing group.
+  - `spread_llc_8`: 8 CPUs round-robin across distinct LLC groups where possible.
+  - `os_default_8`: no affinity list.
+- Fail clearly if the host cannot provide a valid 8-core same-LLC or spread
+  placement. Do not silently substitute fewer cores.
 
-- The standalone `python -m agents.openclaw` path does not use the harness
-  resource samplers.
+Outputs:
 
-## Correctness issue found during audit
+- `topology.json`
+- `placements.json`
+- `topology.txt`
 
-`run_attempt()` currently writes the same
-`{"monitoring_disabled": true, "sample_count": 0}` summary both when monitoring
-was explicitly disabled and when monitoring was enabled but yielded no sample.
-That conflates policy with collection failure/unavailability and should be
-corrected as part of the control work.
+### 2. Placement Runner
 
-## Human-confirmed requirements
+Path: `scripts/experiments/run_kunpeng_llc_agent_case.py`
 
-- Provide three independent switches:
-  1. PMU micro-architecture monitoring.
-  2. Other built-in project resource monitoring.
-  3. ksys monitoring.
-- Keep GPU monitoring unchanged and outside this work.
-- PMU monitoring must be forbidden whenever execution is concurrent, for both
-  real collection and simulation. An explicit request to enable PMU in a
-  concurrent run must fail before work starts; it must never silently run.
-- Host memory-bandwidth monitoring must also be forbidden whenever execution
-  is concurrent. It uses a system-wide `perf` singleton and cannot produce
-  correctly isolated per-attempt concurrent measurements.
-- ksys controls must be supported by both collection and simulation.
-- Preserve the legacy `--ksys` flag as a compatibility alias for
-  `--ksys-monitoring on`.
-- Simulation concurrency means the default multi-trace `cloud_model` path
-  without `--serial`. `local_model` is single-session, while cloud replay with
-  `--serial` is serial.
+Responsibilities:
 
-## Approved design
+- Validate QEMU support with existing `scripts/setup/arm_setup.sh status/check`
+  guidance, but do not install anything automatically.
+- Run one fixed real benchmark task through existing `trace_collect.cli collect`.
+- Use `swe-rebench + openclaw` as the default because this repo already has
+  ARM/QEMU image handling for that path.
+- Launch three placement conditions:
+  - `os_default`
+  - `same_llc`
+  - `spread_llc`
+- For each condition:
+  - set `ARM_IMAGE_MODE=qemu`
+  - set `PYTHONPATH=src`
+  - run `--benchmark swe-rebench --scaffold openclaw`
+  - run `--concurrency 8`
+  - run `--instance-ids <fixed_case>`
+  - set `--resource-monitoring on`
+  - keep `--pmu-monitoring off` because current concurrent collection forbids
+    PMU per attempt
+  - optionally set `--ksys-monitoring on` only if requested by user/config
+  - apply process-level affinity using `taskset -c <core-list>` for same/spread
+    placement
+- Record the full command and environment in `run_config.json`.
+- Do not change benchmark plugin architecture or add benchmark-specific flags.
 
-1. Add independent tri-state switches to both `collect` and `simulate`:
-   - `--pmu-monitoring {auto,on,off}`
-   - `--resource-monitoring {auto,on,off}`
-   - `--ksys-monitoring {auto,on,off}`
-2. Resolve PMU policy before starting work:
-   - Concurrent execution always resolves PMU to off.
-   - Explicit `on` in concurrent execution raises a clear configuration error.
-   - Serial `auto` preserves the existing PMU behavior.
-3. Decouple PMU attachment from `ContainerStatsSampler` and
-   `ProcessStatsSampler`, so base resource sampling can run without starting
-   the module-level PMU singleton.
-4. Keep GPU behavior and `--gpu-tracking` unchanged.
-5. Record requested and resolved monitoring policy in trace/run metadata and
-   `resources.json`, distinguishing:
-   - disabled by policy;
-   - enabled with samples;
-   - enabled but unavailable/no samples.
-6. Update CLI help and `docs/trace-collect.md` /
-   `docs/resource-measurement.md` with a scenario/default matrix.
+Important limitation:
 
-### Exact `auto` semantics
+- `taskset` on the parent process constrains the whole concurrent run to the
+  chosen 8 CPUs. It does not by itself guarantee one agent process per named
+  core. This is still a valid placement comparison at the CPU-set level, but if
+  we need strict one-agent-one-core binding, we need a deeper change in the
+  concurrent scaffold launcher to assign per-attempt affinity. That touches the
+  evaluation pipeline and requires the mandatory reviewer gate.
 
-- PMU:
-  - Serial container/host collection: on when base resource monitoring is on.
-  - Serial container simulation: on when base resource monitoring is on.
-  - Every concurrent mode and host simulation: off.
-- Host memory bandwidth:
-  - On with base resource monitoring only in serial collection/container
-    simulation.
-  - Always off in concurrent modes and host simulation.
-- Other built-in resources:
-  - Collection: on in serial mode, off in concurrent mode.
-  - Simulation: on for container sessions, off for host sessions.
-- ksys: off everywhere unless explicitly enabled.
-- Concurrent container collection may explicitly enable other built-in
-  resources, while PMU and host memory bandwidth remain prohibited.
-- Explicit base resource monitoring in host simulation is rejected because
-  there is no isolated agent PID.
-- Explicit PMU monitoring requires base resource monitoring.
+### 3. Perf / Ksys Wrapper
 
-## Planned implementation after approval
+Path: `scripts/experiments/run_with_perf_stat.sh`
 
-1. Introduce a small typed three-channel monitoring-policy resolver shared by
-   CLI and runtime code.
-2. Thread the resolved policies through collection and simulation without
-   benchmark-specific branches.
-3. Make PMU attachment an explicit sampler option and enforce the concurrency
-   prohibition before any attempt/session starts.
-4. Fix resource artifact status metadata and preserve the existing sample
-   schema.
-5. Add CLI, serial/container, serial/host, concurrent, disabled, and no-sample
-   regression tests.
-6. Update documentation and changelog if present.
-7. Run focused tests, then the relevant trace-collection test group.
-8. Spawn a fresh strict reviewer sub-agent because this touches the evaluation
-   pipeline; fix all findings and record the review audit here.
+Responsibilities:
 
-## Checkpoints
+- Wrap each placement run with system-level `perf stat` events that work on
+  ARM/Kunpeng:
+  - `cycles`
+  - `instructions`
+  - `cache-references`
+  - `cache-misses`
+  - ARM raw events where supported through the existing harness docs:
+    `r04,r03,r14,r01,r12,r10,r19`
+- Write raw perf output per condition.
+- If `perf` permissions are unavailable, fail with a diagnostic instead of
+  producing partial results as if they were valid.
 
-- [x] Read-only source, test, CLI, and documentation audit
-- [x] Persist findings and proposed design
-- [x] Human confirmation of switch scope and semantics
-- [x] Implementation
-- [x] Mandatory independent review (2026-06-24)
-- [ ] Focused and regression verification
-- [ ] Final diff and scope audit
+Alternative:
 
----
+- When Kunpeng `ksys` is available and explicitly requested, use existing
+  `--ksys-monitoring on` rather than inventing a separate collection path.
 
-## Implementation Summary (2026-06-24)
+### 4. Result Summarizer
 
-### Completed
+Path: `scripts/experiments/summarize_llc_placement_runs.py`
 
-1. **`src/trace_collect/monitoring.py`** — `MonitoringPolicy` frozen dataclass
-   with three-channel resolver functions (`resolve_collect_monitoring`,
-   `resolve_simulate_monitoring`, `resolve_ksys_request`).
+Responsibilities:
 
-2. **`src/trace_collect/cli.py`** — CLI switches `--resource-monitoring`,
-   `--pmu-monitoring`, `--ksys-monitoring` (all `auto|on|off`) added to both
-   `collect` and `simulate` parsers via `_add_monitoring_arguments()`. Legacy
-   `--ksys` preserved as compatibility alias.
+- Read the trace outputs and resource summaries from each condition.
+- Preserve all intermediate trace fields; derive summaries in a separate file.
+- Compute:
+  - agent completion mean / p50 / p95
+  - tool latency mean / p50 / p95
+  - tool count per agent
+  - LLM time and tool time if trace events provide enough phase data
+  - resource sample availability and memory-bandwidth fields when present
+  - perf LLC/cache counters when available
+- Emit:
+  - `summary.csv`
+  - `summary.json`
+  - `README.md` describing methodology and caveats
 
-3. **`src/trace_collect/simulator.py`** — Policy threaded through `simulate()`
-   → `_setup_one()` → `ContainerStatsSampler(enable_pmu=..., enable_memory_bandwidth=...)`
-   → `_teardown_one()` writing `resources.json` with three-way status
-   (`"collected"` / `"enabled_no_samples"` / `"disabled"`).
+## Default Representative Case
 
-4. **`src/trace_collect/collector.py`** — Policy resolved in `collect_traces()`
-   and threaded to `_run_scaffold_tasks()` → `run_attempt()`. Concurrent path
-   passes `enable_ksys=False` per-attempt with one batch-level ksys process.
+Preferred default:
 
-5. **`src/trace_collect/attempt_pipeline.py`** — `run_attempt()` accepts
-   `disable_resource_monitoring`, `enable_pmu_monitoring`,
-   `enable_memory_bandwidth_monitoring` parameters and propagates them to
-   `ContainerStatsSampler`/`ProcessStatsSampler`.
+- Benchmark: `swe-rebench`
+- Scaffold: `openclaw`
+- Case selection: first explicitly available instance from existing local
+  `data/swe-rebench/tasks.json`, unless the user provides a specific
+  `--instance-id`.
 
-6. **`src/harness/container_stats_sampler.py`** — Added `enable_pmu` and
-   `enable_memory_bandwidth` parameters.
+Rationale:
 
-7. **`src/harness/process_stats_sampler.py`** — Added `enable_pmu` and
-   `enable_memory_bandwidth` parameters.
+- It is a real agent/code-editing workload with containerized tools.
+- It exercises QEMU path on Kunpeng through existing repo support.
+- It avoids synthetic final results.
+- It keeps benchmark-specific details inside the existing plugin/YAML.
 
-### Bugs Fixed (Independent Review Findings)
+Open question for user:
 
-| # | Severity | File | Issue | Fix |
-|---|----------|------|-------|-----|
-| 1 | 🔴 | `cli.py` `_run_simulate` | `ValueError` from `resolve_simulate_monitoring` not caught | Wrapped `asyncio.run(simulate(...))` in `try/except ValueError` |
-| 2 | 🔴 | `cli.py` `_run_collect` | `enable_ksys=False` hardcoded alongside resolved `ksys_monitoring` | Removed redundant `enable_ksys=False`; `collect_traces` no longer takes `enable_ksys` |
-| 3 | 🔴 | `collector.py` `collect_traces` | Redundant `resolve_ksys_request` re-resolution | Removed `enable_ksys` parameter; ksys resolved once in `_run_collect` |
-| 4 | 🟠 | `_run_scaffold_tasks` + `run_attempt` | Ksys startup duplicated across 3 locations with raw `subprocess.Popen` | Replaced with `KsysSession` from `harness/ksys.py`; removed `_stop_ksys` |
-| 5 | 🟠 | `attempt_pipeline.py` `AttemptContext` | Boolean defaults (True for PMU/MemBW) could silently override resolved policy | Changed defaults to safe values (all `False`) |
-| 6 | 🟡 | `_run_scaffold_tasks` | Dead code fallback `if monitoring_policy is None: resolve_collect_monitoring(...)` | Made `monitoring_policy` a required parameter |
-| 7 | 🟡 | `monitoring.py` | `resolve_ksys_request` error message vague | Added actual requested value to error message |
+- If the mentor expects the exact same task as previous trace-case slides, use
+  that fixed instance ID instead of the first local SWE-rebench task.
 
-### Correctness Issue Resolved
+## Implementation Checkpoints
 
-The original audit found that `run_attempt()` wrote the same summary for
-"disabled" vs "enabled_no_samples". This was fixed at both sites:
+- [x] Read current project instructions and existing ARM/QEMU/profiling code.
+- [x] Persist this plan to disk.
+- [x] Human approval of script scope: CPU-set placement is sufficient.
+- [x] Implement topology probe and placement runner.
+- [x] Implement perf wrapper and summarizer.
+- [x] Add focused tests for topology parsing / placement selection using
+      temporary sysfs-like fixtures.
+- [x] Run focused tests.
+- [ ] If strict one-agent-one-core binding is requested, implement in the
+      evaluation/concurrent launcher only after mandatory independent review.
 
-- **`attempt_pipeline.py` `run_attempt()`**: `resources.json` now uses
-  `"monitoring": {"status": "collected"|"enabled_no_samples"|"disabled"}`
-  plus the full `monitoring_policy` dict.
+## Commands The Runner Should Produce
 
-- **`simulator.py` `_teardown_one()`**: Same three-way status distinction.
+Example same-LLC run shape:
 
-### Documentation Updated
+```bash
+ARM_IMAGE_MODE=qemu PYTHONPATH=src taskset -c 0,1,2,3,4,5,6,7 \
+  python -m trace_collect.cli collect \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --instance-ids <fixed_case> \
+    --concurrency 8 \
+    --resource-monitoring on \
+    --pmu-monitoring off \
+    --ksys-monitoring off \
+    --run-id traces/experiments/kunpeng_llc/<timestamp>/same_llc
+```
 
-- `docs/resource-measurement.md` — Added note that host memory bandwidth has
-  no independent CLI switch; it follows `resource_enabled && !concurrent`.
-- `docs/trace-collect.md` — Updated CLI flag table to mention host memory
-  bandwidth under `--resource-monitoring`.
+Example spread-LLC run shape:
 
-### Pending
+```bash
+ARM_IMAGE_MODE=qemu PYTHONPATH=src taskset -c 0,16,32,48,64,80,96,112 \
+  python -m trace_collect.cli collect \
+    --benchmark swe-rebench \
+    --scaffold openclaw \
+    --container docker \
+    --mcp-config none \
+    --instance-ids <fixed_case> \
+    --concurrency 8 \
+    --resource-monitoring on \
+    --pmu-monitoring off \
+    --ksys-monitoring off \
+    --run-id traces/experiments/kunpeng_llc/<timestamp>/spread_llc
+```
 
-- Run focused regression tests (test_collector_*, test_monitoring_*, etc.)
-- Final diff review and scope audit
-- `run_manifest.json` in simulation path (awaiting user decision)
-
----
-
-## Concurrent Replay Cascade Failure Fix (2026-06-26)
-
-### Bug
-
-In `_run_cloud_model_replay()` (`src/trace_collect/simulator.py`),
-`asyncio.gather` was called without `return_exceptions=True`. When any
-single replay session raised an unhandled exception (typically from post-loop
-cleanup: sampler stop, `write_resources_json`, or `log_summary`), the gather
-immediately propagated it. The outer `finally` block then called
-`trace_logger.close()` on the **shared** `TraceLogger`, but other sessions
-were still running — every subsequent `trace_logger.log_trace_action()` call
-failed with `"I/O operation on closed file"`.
-
-This produced a cascade: one real exception → shared file closed → *all*
-remaining sessions report `"I/O operation on closed file"` for every action.
-
-### Fix (commit `52755be`)
-
-1. **`_run_cloud_model_replay`**: `asyncio.gather` now uses `return_exceptions=True`.
-   All sessions complete before the gather returns. Exceptions are collected,
-   logged individually, and the first is re-raised as `SimulateError`.
-
-2. **`_replay_cloud_model_session`**: Post-loop cleanup code (sampler stop,
-   `write_resources_json`, `log_summary`) is wrapped in `try/except` that
-   logs and re-raises — so a single session's cleanup failure is clearly
-   attributed and does not corrupt other sessions' data.
-
-### Documentation Updated
-
-- `docs/trace-collect.md` — Added "Interpreting Sweep Output" section (system_viz.html
-  metrics, measurement methodology, duration vs wall time, throughput data locations)
-  and "Concurrent Replay: Cascade Failure Prevention" section.
-
-## Scope guard
-
-- Do not change benchmark plugin behavior or benchmark-specific YAML.
-- Do not add dependencies.
-- Do not run experiments.
-- Preserve current defaults under `auto`.
-- Do not enable unsupported concurrent per-attempt PMU measurements.
-
----
-
-## Global Replay Start Barrier (2026-06-28)
-
-### Confirmed requirement
-
-For concurrent `cloud_model` simulation, every session must finish preparation
-before any session begins replay. This synchronization covers the main process
-and every subprocess worker.
-
-### Review findings
-
-- The previous implementation synchronized only within each worker, so faster
-  workers could replay while slower workers were still preparing.
-- `ProcessPoolExecutor` silently capped active child processes at host CPU
-  count while creating more chunks, which could queue complete
-  prepare/replay/teardown waves.
-- Worker payloads discarded globally assigned agent IDs, allowing N:M runs to
-  collide in output directories.
-- Poisson offsets were regenerated independently per worker, multiplying the
-  effective global arrival rate.
-- Preparation concurrency was per-worker rather than system-wide.
-- Bootstrap failures after container creation could leak the container.
-
-### Implemented design
-
-- [x] Preserve globally assigned agent IDs in typed worker inputs.
-- [x] Generate arrival offsets once globally and partition them with sessions.
-- [x] Use one manager-backed system-wide preparation semaphore; `auto`
-      preserves the historical limit of 20.
-- [x] Use a cross-process all-ready barrier plus shared wall-clock time zero.
-- [x] Start one live child process for every worker chunk so barrier
-      participants cannot remain queued.
-- [x] Abort the barrier when preparation or a worker process fails.
-- [x] Drain worker futures and shut down executor/manager resources.
-- [x] Stop a container when Python bootstrap fails after container creation.
-- [x] Reject negative `prep_concurrency` and invalid worker counts.
-- [x] Add no-Docker unit coverage for limits, partitioning, IDs, barrier
-      release/abort, CLI/API validation, and bootstrap cleanup.
-- [ ] Run focused pytest in an environment with project dev dependencies.
-- [ ] Complete fresh independent reviewer gate and resolve all findings.
-
-### Experiment semantics
-
-- `closed_loop`: all prepared processes are released from one global barrier;
-  small OS scheduling skew remains, but no worker may complete a replay wave
-  before another worker enters replay.
-- `poisson`: the same barrier establishes one time zero, then every agent uses
-  its slice of one globally generated arrival schedule.
-- `--prep-concurrency` limits preparation only. It does not change the number
-  of replaying agents once the global barrier opens.
+The actual CPU lists must come from the topology probe, not from hardcoded
+numbers.

@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import json
+import shutil
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+
+from scripts.experiments.probe_llc_topology import (
+    build_placements,
+    format_cpu_list,
+    parse_cpu_list,
+    probe_topology,
+    write_outputs,
+)
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _cpu(
+    root: Path,
+    cpu: int,
+    *,
+    shared: str,
+    core_id: int | None = None,
+    socket_id: int = 0,
+    node_id: int = 0,
+) -> None:
+    base = root / f"cpu{cpu}"
+    resolved_core_id = core_id if core_id is not None else cpu
+    _write(base / "topology" / "core_id", f"{resolved_core_id}\n")
+    _write(base / "topology" / "physical_package_id", f"{socket_id}\n")
+    (base / f"node{node_id}").mkdir(parents=True)
+    _write(base / "cache" / "index0" / "level", "1\n")
+    _write(base / "cache" / "index0" / "type", "Data\n")
+    _write(base / "cache" / "index0" / "shared_cpu_list", f"{cpu}\n")
+    _write(base / "cache" / "index3" / "level", "3\n")
+    _write(base / "cache" / "index3" / "type", "Unified\n")
+    _write(base / "cache" / "index3" / "shared_cpu_list", f"{shared}\n")
+
+
+@contextmanager
+def _temp_dir() -> Iterator[Path]:
+    base = Path(".tmp-tests")
+    base.mkdir(exist_ok=True)
+    path = base / f"agent-test-bench-llc-{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def test_parse_cpu_list() -> None:
+    assert parse_cpu_list("0-3,8,10-11") == [0, 1, 2, 3, 8, 10, 11]
+    assert format_cpu_list([0, 2, 4]) == "0,2,4"
+
+
+def test_build_same_and_spread_placements() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-15\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7", socket_id=0, node_id=0)
+        for cpu in range(8, 16):
+            _cpu(root, cpu, shared=f"{cpu}", socket_id=1, node_id=1)
+
+        topology = probe_topology(root)
+        placements = build_placements(topology, agent_count=8)
+
+    assert placements["same_llc"].cpus == list(range(8))
+    assert placements["same_llc"].llc_ids == ["0-7"]
+    assert placements["spread_llc"].cpus == [0, 8, 9, 10, 11, 12, 13, 14]
+    assert len(set(placements["spread_llc"].llc_ids)) == 8
+    assert placements["os_default"].cpus is None
+
+
+def test_spread_requires_distinct_llcs() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-7\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+
+        topology = probe_topology(root)
+
+    with pytest.raises(RuntimeError, match="need 8 for spread_llc"):
+        build_placements(topology, agent_count=8)
+
+
+def test_write_outputs() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-15\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+        for cpu in range(8, 16):
+            _cpu(root, cpu, shared=f"{cpu}")
+
+        topology = probe_topology(root)
+        placements = build_placements(topology, agent_count=8)
+
+        out = tmp_path / "out"
+        write_outputs(output_dir=out, topology=topology, placements=placements)
+
+        assert (out / "topology.txt").exists()
+        placement_payload = json.loads((out / "placements.json").read_text())
+        assert placement_payload["same_llc"]["cpus"] == list(range(8))
