@@ -806,6 +806,7 @@ async def _prepare_container_session(
     container_executable: str,
     network_mode: str = "host",
     cpu_limit: float | None = None,
+    cpuset_cpus: str | None = None,
     tool_profiling: str = "off",
     tool_profiling_tools: list[str] | None = None,
     output_dir: Path | None = None,
@@ -842,6 +843,8 @@ async def _prepare_container_session(
     extra_args: list[str] = []
     if cpu_limit is not None:
         extra_args.append(f"--cpus={cpu_limit}")
+    if cpuset_cpus:
+        extra_args.append(f"--cpuset-cpus={cpuset_cpus}")
     # When VTune per-tool profiling is active, add capabilities, bind-mounts,
     # and env vars to the container start args.  VTune results are written to
     # <task_dir>/vtune/ (bind-mounted so they survive teardown).
@@ -979,6 +982,7 @@ def _log_trace_metadata(
     monitoring_policy: MonitoringPolicy,
     network_mode: str = "host",
     cpu_limit: float | None = None,
+    cpuset_cpus: str | None = None,
 ) -> None:
     scaffolds = {session.scaffold for session in sessions}
     source_models = [
@@ -998,6 +1002,7 @@ def _log_trace_metadata(
         "source_models": source_models,
         "network_mode": network_mode,
         "cpu_limit": cpu_limit,
+        "cpuset_cpus": cpuset_cpus,
         "monitoring": monitoring_policy.to_dict(),
     }
     if source_trace is not None:
@@ -1916,6 +1921,7 @@ def _worker_run_cloud_model(
     command_timeout_s: float,
     warmup_skip_iterations: int,
     cpu_limit: float | None,
+    cpuset_cpus: str | None,
     prep_semaphore: Any,
     replay_start_barrier: Any,
     replay_start_event: Any,
@@ -2020,6 +2026,8 @@ def _worker_run_cloud_model(
                     }
                     if cpu_limit is not None:
                         prepare_kwargs["cpu_limit"] = cpu_limit
+                    if cpuset_cpus:
+                        prepare_kwargs["cpuset_cpus"] = cpuset_cpus
                     prepared = await _prepare_container_session(
                         loaded, **prepare_kwargs,
                     )
@@ -2318,6 +2326,7 @@ async def simulate(
     trace_assignment: str = "manifest",
     trace_assignment_seed: int | None = None,
     cpu_limit: float | None = None,
+    cpuset_cpus: str | None = None,
     workers: int = 1,
     prep_concurrency: int = 0,
     tool_profiling: str = "off",
@@ -2476,6 +2485,8 @@ async def simulate(
             }
             if cpu_limit is not None:
                 prepare_kwargs["cpu_limit"] = cpu_limit
+            if cpuset_cpus:
+                prepare_kwargs["cpuset_cpus"] = cpuset_cpus
             if shared_prep_semaphore is not None:
                 await asyncio.to_thread(shared_prep_semaphore.acquire)
             try:
@@ -2536,6 +2547,7 @@ async def simulate(
             network_mode=network_mode,
             monitoring_policy=monitoring_policy,
             cpu_limit=cpu_limit,
+            cpuset_cpus=cpuset_cpus,
         )
     ksys_session = (
         KsysSession.start(output_dir=output_path, log_dir=output_path)
@@ -2813,6 +2825,7 @@ async def simulate(
                             command_timeout_s=command_timeout_s,
                             warmup_skip_iterations=warmup_skip_iterations,
                             cpu_limit=cpu_limit,
+                            cpuset_cpus=cpuset_cpus,
                             prep_semaphore=shared_prep_semaphore,
                             replay_start_barrier=replay_start_barrier,
                             replay_start_event=replay_start_event,

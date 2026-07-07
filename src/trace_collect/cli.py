@@ -596,6 +596,15 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cpuset-cpus",
+        default=None,
+        help=(
+            "Optional Docker/Podman CPU set for container replay, passed to "
+            "each replay container as --cpuset-cpus=<list>. This is intended "
+            "for topology placement experiments."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -913,6 +922,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "trace_assignment": args.trace_assignment,
         "trace_assignment_seed": args.trace_assignment_seed,
         "cpu_limit": args.cpu_limit,
+        "cpuset_cpus": args.cpuset_cpus,
         "workers": args.workers,
         "prep_concurrency": args.prep_concurrency,
         "tool_profiling": getattr(args, "tool_profiling", "off"),
@@ -932,6 +942,13 @@ def _run_simulate(args: argparse.Namespace) -> None:
     if args.cpu_limit is not None and args.cpu_limit <= 0:
         print(
             "ERROR: --cpu-limit must be > 0 (got %.1f)." % args.cpu_limit,
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.cpuset_cpus and not args.container:
+        print(
+            "ERROR: --cpuset-cpus is supported only with container replay "
+            "(pass --container docker or --container podman).",
             file=sys.stderr,
         )
         sys.exit(2)

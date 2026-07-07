@@ -16,6 +16,7 @@ from scripts.experiments.probe_llc_topology import (
     probe_topology,
     write_outputs,
 )
+from scripts.experiments.run_kunpeng_llc_replay import _build_command
 
 
 def _write(path: Path, text: str) -> None:
@@ -139,3 +140,36 @@ def test_write_outputs() -> None:
         assert (out / "topology.txt").exists()
         placement_payload = json.loads((out / "placements.json").read_text())
         assert placement_payload["same_llc"]["cpus"] == list(range(8))
+
+
+def test_replay_command_passes_docker_cpuset_for_placement() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-15\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+        for cpu in range(8, 16):
+            _cpu(root, cpu, shared=f"{cpu}")
+        placements = build_placements(probe_topology(root), agent_count=8)
+
+        command = _build_command(
+            source_trace=Path("trace.jsonl"),
+            task_source=Path("tasks.json"),
+            output_dir=Path("out"),
+            placement=placements["same_llc"],
+            container="docker",
+            num_agents=8,
+            replay_speed=1.0,
+            network_mode="none",
+            command_timeout_s=600.0,
+            workers=1,
+            prep_concurrency=8,
+            resource_monitoring="on",
+            ksys_monitoring="off",
+            extra_args=[],
+        )
+
+    assert "--cpuset-cpus" in command
+    assert command[command.index("--cpuset-cpus") + 1] == "0,1,2,3,4,5,6,7"
+    assert "--cpu-limit" in command
+    assert command[command.index("--cpu-limit") + 1] == "1"

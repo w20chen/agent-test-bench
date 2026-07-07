@@ -3,25 +3,28 @@
 ## Goal
 
 Design and implement a small, reproducible script layer for the key experiment:
-8 concurrent OpenClaw agents on a Kunpeng ARM host in QEMU mode, constraining
-the whole concurrent run to either one LLC's CPU set or a CPU set spread across
-distinct LLCs, and comparing both against OS default placement.
+8 concurrent replayed OpenClaw agents on a Kunpeng ARM host in QEMU mode,
+constraining Docker containers to either one LLC's CPU set or a CPU set spread
+across LLCs, and comparing both against OS default placement.
 
-The experiment should use one typical real agent case, preserve real tool
-execution, and collect enough topology and performance evidence to explain
-performance changes through shared LLC / memory-bandwidth contention.
+The experiment should use an existing real trace, preserve real tool execution
+through `trace_collect.cli simulate --mode cloud_model`, avoid live LLM API
+calls, and collect enough topology/performance evidence to explain performance
+changes through shared LLC / memory-bandwidth contention.
 
 ## Research Integrity Guardrails
 
 - Do not introduce synthetic/mocked agent results as final evidence.
-- Do not tune the selected task for a favorable result. The selected case must
-  be documented as a fixed representative workload before running the
-  placement comparison.
+- Do not tune the selected task for a favorable result. The selected trace must
+  be documented as a fixed representative workload before running the placement
+  comparison.
 - Do not add per-benchmark CLI flags to trace collection. Benchmark settings
   stay in benchmark YAML/plugin code.
 - Do not silently reduce concurrency, sample count, iterations, tool work, or
   QEMU usage because a run is slow.
 - QEMU mode is explicit: use `ARM_IMAGE_MODE=qemu`, after validating binfmt.
+- Replay experiments must not pass provider/model/API-key arguments and must
+  use `cloud_model`, which replays source LLM timing without issuing requests.
 - Scripts must record the exact core lists, topology snapshot, environment, and
   command line for every run.
 
@@ -59,7 +62,7 @@ Outputs:
 - `placements.json`
 - `topology.txt`
 
-### 2. Placement Runner
+### 2. Live Placement Runner
 
 Path: `scripts/experiments/run_kunpeng_llc_agent_case.py`
 
@@ -97,6 +100,41 @@ Important limitation:
   we need strict one-agent-one-core binding, we need a deeper change in the
   concurrent scaffold launcher to assign per-attempt affinity. That touches the
   evaluation pipeline and requires the mandatory reviewer gate.
+
+This live runner is retained as a convenience path, but it is not the preferred
+LLC experiment because it calls live provider APIs and `taskset` does not
+strictly constrain Docker containers started by the daemon.
+
+### 2b. Replay Placement Runner
+
+Path: `scripts/experiments/run_kunpeng_llc_replay.py`
+
+Responsibilities:
+
+- Replay one fixed existing trace as `N=8` identical cloud-model agents.
+- Use:
+  - `trace_collect.cli simulate`
+  - `--mode cloud_model`
+  - `--source-trace <trace.jsonl>`
+  - `--num-agents 8`
+  - `--trace-assignment manifest`
+  - `--arrival-mode closed_loop`
+  - `--container docker`
+  - `--network-mode none` by default
+  - `--cpu-limit 1` per container
+- Apply Docker-level placement via the new generic simulate flag
+  `--cpuset-cpus <cpu-list>`, not parent-process `taskset`.
+- Record full commands and selected CPU/LLC lists in `run_config.json`.
+- Avoid live provider/API-key arguments entirely.
+
+Recommended source trace:
+
+- First choice: `django__django-10880` from the existing case-study traces.
+- Rationale: roughly 58s recorded tool time, with about 54s in `exec-pytest`;
+  this makes the replay CPU/QEMU/tool-heavy and less dominated by LLM/API
+  latency.
+- Fallback: any existing SWE/SWE-rebench trace with high `exec-pytest` or
+  `exec-python` tool time, selected before looking at placement results.
 
 ### 3. Perf / Ksys Wrapper
 
@@ -168,7 +206,8 @@ Open question for user:
 - [x] Read current project instructions and existing ARM/QEMU/profiling code.
 - [x] Persist this plan to disk.
 - [x] Human approval of script scope: CPU-set placement is sufficient.
-- [x] Implement topology probe and placement runner.
+- [x] Implement topology probe and live placement runner.
+- [x] Implement replay placement runner with Docker `--cpuset-cpus`.
 - [x] Implement perf wrapper and summarizer.
 - [x] Add focused tests for topology parsing / placement selection using
       temporary sysfs-like fixtures.
@@ -178,38 +217,46 @@ Open question for user:
 
 ## Commands The Runner Should Produce
 
-Example same-LLC run shape:
+Preferred replay same-LLC run shape:
 
 ```bash
-ARM_IMAGE_MODE=qemu PYTHONPATH=src taskset -c 0,1,2,3,4,5,6,7 \
-  python -m trace_collect.cli collect \
-    --benchmark swe-rebench \
-    --scaffold openclaw \
-    --container docker \
-    --mcp-config none \
-    --instance-ids <fixed_case> \
-    --concurrency 8 \
-    --resource-monitoring on \
-    --pmu-monitoring off \
-    --ksys-monitoring off \
-    --run-id traces/experiments/kunpeng_llc/<timestamp>/same_llc
+ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
+  --source-trace <trace.jsonl> \
+  --task-source data/swe-rebench/tasks.json \
+  --output-dir traces/experiments/kunpeng_llc_replay/<timestamp>/same_llc \
+  --mode cloud_model \
+  --container docker \
+  --network-mode none \
+  --num-agents 8 \
+  --trace-assignment manifest \
+  --arrival-mode closed_loop \
+  --replay-speed 1 \
+  --cpu-limit 1 \
+  --cpuset-cpus 0,1,2,3,4,5,6,7 \
+  --resource-monitoring on \
+  --pmu-monitoring off \
+  --ksys-monitoring off
 ```
 
-Example spread-LLC run shape:
+Preferred replay spread-LLC run shape:
 
 ```bash
-ARM_IMAGE_MODE=qemu PYTHONPATH=src taskset -c 0,16,32,48,64,80,96,112 \
-  python -m trace_collect.cli collect \
-    --benchmark swe-rebench \
-    --scaffold openclaw \
-    --container docker \
-    --mcp-config none \
-    --instance-ids <fixed_case> \
-    --concurrency 8 \
-    --resource-monitoring on \
-    --pmu-monitoring off \
-    --ksys-monitoring off \
-    --run-id traces/experiments/kunpeng_llc/<timestamp>/spread_llc
+ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
+  --source-trace <trace.jsonl> \
+  --task-source data/swe-rebench/tasks.json \
+  --output-dir traces/experiments/kunpeng_llc_replay/<timestamp>/spread_llc \
+  --mode cloud_model \
+  --container docker \
+  --network-mode none \
+  --num-agents 8 \
+  --trace-assignment manifest \
+  --arrival-mode closed_loop \
+  --replay-speed 1 \
+  --cpu-limit 1 \
+  --cpuset-cpus 0,80,160,240,1,81,161,241 \
+  --resource-monitoring on \
+  --pmu-monitoring off \
+  --ksys-monitoring off
 ```
 
 The actual CPU lists must come from the topology probe, not from hardcoded
