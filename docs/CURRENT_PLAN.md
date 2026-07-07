@@ -1,5 +1,43 @@
 # Current Plan: Kunpeng QEMU LLC Placement Experiment
 
+## 2026-07-08 Revision: Strict Kunpeng Placement Matrix
+
+The previous script layer is not sufficient for the mentor's question because
+it treated a shared Linux LLC/NUMA domain as a uniform placement target and
+passed one shared `--cpuset-cpus` list to every replay container.  For the
+Kunpeng follow-up, the goal is to compare explicit 1, 2, 4, and 8 agent
+placements, including placements inside one inferred sub-LLC CPU cluster and
+placements spread across clusters / LLC domains.
+
+Implementation scope for this revision:
+
+- Keep raw traces and benchmark definitions unchanged.
+- Keep benchmark-specific settings out of `trace_collect` core code.
+- Repair topology placement names so topology probe, runner, analyzer, and
+  tests agree.
+- Add per-agent replay container cpusets in `trace_collect.cli simulate` so
+  agent `i` can be constrained to CPU set `i`, rather than giving every
+  container the same CPU pool.
+- Generate placement plans for `--agent-count` values 1, 2, 4, and 8 without
+  silently substituting fewer CPUs.
+- Treat Kunpeng sub-LLC clusters as explicit, documented inference from CPU
+  numbering within each Linux LLC shared CPU list.  Do not present inferred
+  clusters as firmware-proven physical CCL IDs.
+- Run focused unit tests only.  Do not run placement experiments until the
+  code review gate is clean and the human approves the concrete run command.
+
+New implementation checklist:
+
+- [x] Mandatory independent reviewer started before touching replay/evaluation
+      pipeline code.
+- [x] Persist revised plan to disk.
+- [x] Repair placement generation and tests.
+- [x] Add per-agent cpuset plumbing to simulate CLI and replay preparation.
+- [x] Update replay runner/analyzer to consume the repaired placement names.
+- [x] Run focused tests available on this host.
+- [ ] Re-review if the reviewer reports critical or major issues.
+- [ ] Pause for human approval before running any real experiment.
+
 ## Goal
 
 Design and implement a small, reproducible script layer for the key experiment:
@@ -50,11 +88,15 @@ Responsibilities:
   - `llc_level`
   - `llc_shared_cpu_list`
 - Generate placement candidates:
-  - `same_llc_8`: 8 CPUs from one LLC sharing group.
-  - `spread_llc_8`: 8 CPUs round-robin across distinct LLC groups where possible.
-  - `os_default_8`: no affinity list.
-- Fail clearly if the host cannot provide a valid 8-core same-LLC or spread
-  placement. Do not silently substitute fewer cores.
+  - `compact_llc`: N CPUs from one LLC sharing group when available.
+  - `spread_llc`: N CPUs round-robin across LLC groups where possible.
+  - `compact_cluster`: N CPUs from one inferred sub-LLC CPU cluster when available.
+  - `spread_clusters_same_llc`: N CPUs spread across inferred clusters inside one LLC when available.
+  - `spread_clusters_all`: N CPUs spread across all inferred clusters when available.
+  - `near_numa_spread` / `far_numa_spread`: N CPUs split across near/far NUMA domains when available.
+  - `os_default`: no affinity list.
+- Fail clearly when a requested placement cannot allocate the requested N
+  agents. Do not silently substitute fewer cores or a different placement.
 
 Outputs:
 
@@ -75,7 +117,7 @@ Responsibilities:
   ARM/QEMU image handling for that path.
 - Launch three placement conditions:
   - `os_default`
-  - `same_llc`
+  - `compact_llc`
   - `spread_llc`
 - For each condition:
   - set `ARM_IMAGE_MODE=qemu`
@@ -122,8 +164,9 @@ Responsibilities:
   - `--container docker`
   - `--network-mode none` by default
   - `--cpu-limit 1` per container
-- Apply Docker-level placement via the new generic simulate flag
-  `--cpuset-cpus <cpu-list>`, not parent-process `taskset`.
+- Apply Docker-level placement via repeated per-agent simulate flags
+  `--agent-cpuset <cpu-list>`, not one shared `--cpuset-cpus` pool and not
+  parent-process `taskset`.
 - Record full commands and selected CPU/LLC lists in `run_config.json`.
 - Avoid live provider/API-key arguments entirely.
 
@@ -207,23 +250,26 @@ Open question for user:
 - [x] Persist this plan to disk.
 - [x] Human approval of script scope: CPU-set placement is sufficient.
 - [x] Implement topology probe and live placement runner.
-- [x] Implement replay placement runner with Docker `--cpuset-cpus`.
+- [x] Implement replay placement runner with per-agent Docker `--agent-cpuset`.
 - [x] Implement perf wrapper and summarizer.
 - [x] Add focused tests for topology parsing / placement selection using
       temporary sysfs-like fixtures.
-- [x] Run focused tests.
-- [ ] If strict one-agent-one-core binding is requested, implement in the
-      evaluation/concurrent launcher only after mandatory independent review.
+- [x] Run focused tests, including N=1/2/4/8 placement assignment coverage,
+      replay runner dry-run command generation, and analyzer manifest-based
+      placement discovery.
+- [x] Strict replay one-agent-one-core binding is implemented through
+      per-container `--agent-cpuset`.
+- [ ] Obtain clean independent review before any real experiment run.
 
 ## Commands The Runner Should Produce
 
-Preferred replay same-LLC run shape:
+Preferred replay compact-LLC run shape:
 
 ```bash
 ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
   --source-trace <trace.jsonl> \
   --task-source data/swe-rebench/tasks.json \
-  --output-dir traces/experiments/kunpeng_llc_replay/<timestamp>/same_llc \
+  --output-dir traces/experiments/kunpeng_llc_replay/<timestamp>/compact_llc \
   --mode cloud_model \
   --container docker \
   --network-mode none \
@@ -232,7 +278,14 @@ ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
   --arrival-mode closed_loop \
   --replay-speed 1 \
   --cpu-limit 1 \
-  --cpuset-cpus 0,1,2,3,4,5,6,7 \
+  --agent-cpuset 0 \
+  --agent-cpuset 1 \
+  --agent-cpuset 2 \
+  --agent-cpuset 3 \
+  --agent-cpuset 4 \
+  --agent-cpuset 5 \
+  --agent-cpuset 6 \
+  --agent-cpuset 7 \
   --resource-monitoring on \
   --pmu-monitoring off \
   --ksys-monitoring off
@@ -253,11 +306,18 @@ ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
   --arrival-mode closed_loop \
   --replay-speed 1 \
   --cpu-limit 1 \
-  --cpuset-cpus 0,80,160,240,1,81,161,241 \
+  --agent-cpuset 0 \
+  --agent-cpuset 80 \
+  --agent-cpuset 160 \
+  --agent-cpuset 240 \
+  --agent-cpuset 1 \
+  --agent-cpuset 81 \
+  --agent-cpuset 161 \
+  --agent-cpuset 241 \
   --resource-monitoring on \
   --pmu-monitoring off \
   --ksys-monitoring off
 ```
 
-The actual CPU lists must come from the topology probe, not from hardcoded
-numbers.
+The actual per-agent CPU sets must come from the topology probe's
+`agent_assignments`, not from hardcoded numbers.

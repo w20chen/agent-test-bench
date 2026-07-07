@@ -128,6 +128,7 @@ class LoadedTraceSession:
     actions: list[dict[str, Any]]
     iterations: dict[int, dict[str, Any]]
     docker_image_override: str | None = None
+    cpuset_cpus: str | None = None
 
 
 @dataclass(slots=True)
@@ -165,6 +166,7 @@ class WorkerTraceInput:
     task_source: str
     docker_image_override: str | None
     agent_id: str
+    cpuset_cpus: str | None = None
 
 
 def _resolve_prep_concurrency(requested: int, num_sessions: int) -> int:
@@ -184,6 +186,7 @@ def _worker_trace_input(session: LoadedTraceSession) -> WorkerTraceInput:
         task_source=str(session.task_source),
         docker_image_override=session.docker_image_override,
         agent_id=session.agent_id,
+        cpuset_cpus=session.cpuset_cpus,
     )
 
 
@@ -580,6 +583,7 @@ def _load_trace_session(
     source_trace: Path,
     task_source: Path,
     docker_image_override: str | None = None,
+    cpuset_cpus: str | None = None,
 ) -> LoadedTraceSession:
     agent_id, metadata, actions, summary = _parse_trace_session_file(source_trace)
     scaffold = metadata.get("scaffold", "unknown") if metadata else "unknown"
@@ -596,6 +600,7 @@ def _load_trace_session(
         actions=actions,
         iterations=_group_actions_by_iteration(actions),
         docker_image_override=docker_image_override,
+        cpuset_cpus=cpuset_cpus,
     )
 
 
@@ -603,7 +608,7 @@ def _load_trace_manifest(
     trace_manifest: Path,
     *,
     default_task_source: Path,
-) -> list[tuple[Path, Path, str | None]]:
+) -> list[tuple[Path, Path, str | None, str | None]]:
     try:
         raw = json.loads(trace_manifest.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -612,7 +617,7 @@ def _load_trace_manifest(
         raise SimulateError("trace manifest must be a non-empty JSON array")
 
     base_dir = trace_manifest.parent
-    entries: list[tuple[Path, Path, str | None]] = []
+    entries: list[tuple[Path, Path, str | None, str | None]] = []
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise SimulateError(
@@ -623,36 +628,41 @@ def _load_trace_manifest(
             raise SimulateError(f"trace manifest entry {index} is missing source_trace")
         task_value = entry.get("task_source")
         docker_image = entry.get("docker_image")
+        cpuset = entry.get("cpuset_cpus")
+        if cpuset is not None and not isinstance(cpuset, str):
+            raise SimulateError(
+                f"trace manifest entry {index} cpuset_cpus must be a string"
+            )
         source_path = Path(source_value)
         task_path = Path(task_value) if task_value else default_task_source
         if not source_path.is_absolute():
             source_path = (base_dir / source_path).resolve()
         if task_value and not task_path.is_absolute():
             task_path = (base_dir / task_path).resolve()
-        entries.append((source_path, task_path, docker_image))
+        entries.append((source_path, task_path, docker_image, cpuset))
     return entries
 
 
 def _discover_traces(
     source_dir: Path,
     default_task_source: Path,
-) -> list[tuple[Path, Path, str | None]]:
+) -> list[tuple[Path, Path, str | None, str | None]]:
     """Discover all ``trace.jsonl`` files under *source_dir*.
 
     Each discovered trace is paired with the default task source and no
     docker-image override.  Files are sorted for deterministic ordering.
     """
     found = sorted(source_dir.rglob("trace.jsonl"))
-    return [(p, default_task_source, None) for p in found]
+    return [(p, default_task_source, None, None) for p in found]
 
 
 def _expand_trace_inputs(
-    trace_inputs: list[tuple[Path, Path, str | None]],
+    trace_inputs: list[tuple[Path, Path, str | None, str | None]],
     *,
     num_agents: int = 0,
     trace_assignment: str = "manifest",
     trace_assignment_seed: int | None = None,
-) -> list[tuple[Path, Path, str | None]]:
+) -> list[tuple[Path, Path, str | None, str | None]]:
     """Expand *trace_inputs* for N:M trace-to-agent mapping.
 
     When *num_agents* ≤ 0, returns *trace_inputs* unchanged (1:1 mapping).
@@ -698,6 +708,25 @@ def _ensure_unique_agent_ids(sessions: list[LoadedTraceSession]) -> None:
             )
             session.agent_id = new_id
         used.add(session.agent_id)
+
+
+def _assign_agent_cpusets(
+    sessions: list[LoadedTraceSession],
+    agent_cpusets: list[str] | None,
+) -> None:
+    """Assign one explicit container cpuset to each loaded session."""
+    if not agent_cpusets:
+        return
+    if len(agent_cpusets) != len(sessions):
+        raise ValueError(
+            "--agent-cpuset must be passed exactly once per replay agent "
+            f"({len(agent_cpusets)} cpusets for {len(sessions)} agents)"
+        )
+    for idx, (session, cpuset) in enumerate(zip(sessions, agent_cpusets)):
+        normalized = cpuset.strip()
+        if not normalized:
+            raise ValueError(f"--agent-cpuset entry {idx} is empty")
+        session.cpuset_cpus = normalized
 
 
 def _resolve_docker_image(loaded: LoadedTraceSession) -> str | None:
@@ -983,6 +1012,7 @@ def _log_trace_metadata(
     network_mode: str = "host",
     cpu_limit: float | None = None,
     cpuset_cpus: str | None = None,
+    agent_cpusets: list[str] | None = None,
 ) -> None:
     scaffolds = {session.scaffold for session in sessions}
     source_models = [
@@ -1003,6 +1033,14 @@ def _log_trace_metadata(
         "network_mode": network_mode,
         "cpu_limit": cpu_limit,
         "cpuset_cpus": cpuset_cpus,
+        "agent_cpusets": agent_cpusets,
+        "session_cpusets": [
+            {
+                "agent_id": session.agent_id,
+                "cpuset_cpus": session.cpuset_cpus,
+            }
+            for session in sessions
+        ],
         "monitoring": monitoring_policy.to_dict(),
     }
     if source_trace is not None:
@@ -1959,6 +1997,7 @@ def _worker_run_cloud_model(
                 worker_input.docker_image_override,
             )
             loaded.agent_id = worker_input.agent_id
+            loaded.cpuset_cpus = worker_input.cpuset_cpus
             loaded_sessions.append(loaded)
         _validate_loaded_sessions(
             loaded_sessions,
@@ -2026,8 +2065,9 @@ def _worker_run_cloud_model(
                     }
                     if cpu_limit is not None:
                         prepare_kwargs["cpu_limit"] = cpu_limit
-                    if cpuset_cpus:
-                        prepare_kwargs["cpuset_cpus"] = cpuset_cpus
+                    session_cpuset = loaded.cpuset_cpus or cpuset_cpus
+                    if session_cpuset:
+                        prepare_kwargs["cpuset_cpus"] = session_cpuset
                     prepared = await _prepare_container_session(
                         loaded, **prepare_kwargs,
                     )
@@ -2327,6 +2367,7 @@ async def simulate(
     trace_assignment_seed: int | None = None,
     cpu_limit: float | None = None,
     cpuset_cpus: str | None = None,
+    agent_cpusets: list[str] | None = None,
     workers: int = 1,
     prep_concurrency: int = 0,
     tool_profiling: str = "off",
@@ -2358,6 +2399,14 @@ async def simulate(
         )
     if tool_profiling_tools is None:
         tool_profiling_tools = ["exec-pytest"]
+    if agent_cpusets and cpuset_cpus:
+        raise ValueError(
+            "agent_cpusets and cpuset_cpus are mutually exclusive; use one "
+            "shared cpuset for coarse placement or one cpuset per agent for "
+            "strict placement"
+        )
+    if agent_cpusets and container_executable is None:
+        raise ValueError("agent_cpusets require container_executable")
 
     if trace_manifest is not None:
         trace_inputs = _load_trace_manifest(
@@ -2372,7 +2421,7 @@ async def simulate(
             )
     else:
         assert source_trace is not None
-        trace_inputs = [(source_trace, task_source, None)]
+        trace_inputs = [(source_trace, task_source, None, None)]
 
     # Expand trace_inputs for N:M mapping (num_agents > 0).
     trace_inputs = _expand_trace_inputs(
@@ -2387,8 +2436,13 @@ async def simulate(
         flush=True,
     )
     loaded_sessions = [
-        _load_trace_session(source_path, task_path, docker_image_override=img)
-        for source_path, task_path, img in trace_inputs
+        _load_trace_session(
+            source_path,
+            task_path,
+            docker_image_override=img,
+            cpuset_cpus=cpuset,
+        )
+        for source_path, task_path, img, cpuset in trace_inputs
     ]
     print(
         f"  [load] {len(loaded_sessions)} sessions loaded, validating...",
@@ -2396,6 +2450,7 @@ async def simulate(
     )
     # Ensure unique agent_ids after possible N:M expansion.
     _ensure_unique_agent_ids(loaded_sessions)
+    _assign_agent_cpusets(loaded_sessions, agent_cpusets)
     _validate_loaded_sessions(
         loaded_sessions,
         mode=mode,
@@ -2485,8 +2540,9 @@ async def simulate(
             }
             if cpu_limit is not None:
                 prepare_kwargs["cpu_limit"] = cpu_limit
-            if cpuset_cpus:
-                prepare_kwargs["cpuset_cpus"] = cpuset_cpus
+            session_cpuset = loaded.cpuset_cpus or cpuset_cpus
+            if session_cpuset:
+                prepare_kwargs["cpuset_cpus"] = session_cpuset
             if shared_prep_semaphore is not None:
                 await asyncio.to_thread(shared_prep_semaphore.acquire)
             try:
@@ -2548,6 +2604,7 @@ async def simulate(
             monitoring_policy=monitoring_policy,
             cpu_limit=cpu_limit,
             cpuset_cpus=cpuset_cpus,
+            agent_cpusets=agent_cpusets,
         )
     ksys_session = (
         KsysSession.start(output_dir=output_path, log_dir=output_path)

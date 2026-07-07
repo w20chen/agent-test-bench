@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import uuid
@@ -17,6 +18,7 @@ from scripts.experiments.probe_llc_topology import (
     write_outputs,
 )
 from scripts.experiments.run_kunpeng_llc_replay import _build_command
+from scripts.experiments.run_kunpeng_llc_replay import run_replay
 
 
 def _write(path: Path, text: str) -> None:
@@ -63,7 +65,7 @@ def test_parse_cpu_list() -> None:
     assert format_cpu_list([0, 2, 4]) == "0,2,4"
 
 
-def test_build_same_and_round_robin_spread_placements() -> None:
+def test_build_llc_and_inferred_cluster_placements() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"
         _write(root / "online", "0-15\n")
@@ -75,14 +77,41 @@ def test_build_same_and_round_robin_spread_placements() -> None:
         topology = probe_topology(root)
         placements = build_placements(topology, agent_count=8)
 
-    assert placements["same_llc"].cpus == list(range(8))
-    assert placements["same_llc"].llc_ids == ["0-7"]
+    assert placements["compact_llc"].cpus == list(range(8))
+    assert [a.cpu for a in placements["compact_llc"].agent_assignments] == list(range(8))
+    assert placements["compact_llc"].llc_ids == ["0-7"]
     assert placements["spread_llc"].cpus == [0, 8, 9, 10, 11, 12, 13, 14]
-    assert len(set(placements["spread_llc"].llc_ids)) == 8
+    assert [a.cpuset_cpus for a in placements["spread_llc"].agent_assignments] == [
+        "0",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+    ]
+    assert placements["spread_clusters_same_llc"].cpus == [0, 4, 1, 5, 2, 6, 3, 7]
+    assert "compact_cluster" not in placements
     assert placements["os_default"].cpus is None
 
 
-def test_spread_balances_eight_agents_over_four_llcs() -> None:
+def test_cluster_compact_is_valid_for_four_agents() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-7\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+
+        topology = probe_topology(root)
+        placements = build_placements(topology, agent_count=4)
+
+    assert placements["compact_cluster"].cpus == [0, 1, 2, 3]
+    assert placements["compact_cluster"].groups[0].cluster_id == "0-7:cluster0"
+    assert placements["spread_clusters_same_llc"].cpus == [0, 4, 1, 5]
+
+
+def test_spread_across_four_llcs_round_robins_domains() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"
         _write(root / "online", "0-31\n")
@@ -90,12 +119,12 @@ def test_spread_balances_eight_agents_over_four_llcs() -> None:
             start = group * 8
             shared = f"{start}-{start + 7}"
             for cpu in range(start, start + 8):
-                _cpu(root, cpu, shared=shared)
+                _cpu(root, cpu, shared=shared, node_id=group)
 
         topology = probe_topology(root)
         placements = build_placements(topology, agent_count=8)
 
-    assert placements["same_llc"].cpus == list(range(8))
+    assert placements["compact_llc"].cpus == list(range(8))
     assert placements["spread_llc"].cpus == [0, 8, 16, 24, 1, 9, 17, 25]
     assert placements["spread_llc"].llc_ids == [
         "0-7",
@@ -109,16 +138,46 @@ def test_spread_balances_eight_agents_over_four_llcs() -> None:
     ]
 
 
-def test_spread_requires_at_least_two_llcs() -> None:
+@pytest.mark.parametrize("agent_count", [1, 2, 4, 8])
+def test_placements_have_exact_per_agent_assignments_for_supported_counts(
+    agent_count: int,
+) -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"
-        _write(root / "online", "0-7\n")
-        for cpu in range(8):
-            _cpu(root, cpu, shared="0-7")
+        _write(root / "online", "0-31\n")
+        for group in range(4):
+            start = group * 8
+            shared = f"{start}-{start + 7}"
+            for cpu in range(start, start + 8):
+                _cpu(root, cpu, shared=shared, node_id=group)
+
+        placements = build_placements(probe_topology(root), agent_count=agent_count)
+
+    assert placements["os_default"].cpus is None
+    for placement in placements.values():
+        assert len(placement.agent_assignments) == agent_count
+        assert [item.agent_index for item in placement.agent_assignments] == list(
+            range(agent_count)
+        )
+        if placement.name == "os_default":
+            assert all(item.cpuset_cpus is None for item in placement.agent_assignments)
+            continue
+        assert placement.cpus is not None
+        assert len(placement.cpus) == agent_count
+        assert [item.cpu for item in placement.agent_assignments] == placement.cpus
+        assert all(item.cpuset_cpus == str(item.cpu) for item in placement.agent_assignments)
+
+
+def test_invalid_when_no_domain_can_allocate_requested_agents() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-3\n")
+        for cpu in range(4):
+            _cpu(root, cpu, shared="0-3")
 
         topology = probe_topology(root)
 
-    with pytest.raises(RuntimeError, match="only one LLC group"):
+    with pytest.raises(RuntimeError, match="no valid placement"):
         build_placements(topology, agent_count=8)
 
 
@@ -139,7 +198,8 @@ def test_write_outputs() -> None:
 
         assert (out / "topology.txt").exists()
         placement_payload = json.loads((out / "placements.json").read_text())
-        assert placement_payload["same_llc"]["cpus"] == list(range(8))
+        assert placement_payload["compact_llc"]["cpus"] == list(range(8))
+        assert "cluster_id" in placement_payload["compact_llc"]["groups"][0]
 
 
 def test_replay_command_passes_docker_cpuset_for_placement() -> None:
@@ -156,7 +216,7 @@ def test_replay_command_passes_docker_cpuset_for_placement() -> None:
             source_trace=Path("trace.jsonl"),
             task_source=Path("tasks.json"),
             output_dir=Path("out"),
-            placement=placements["same_llc"],
+            placement=placements["compact_llc"],
             container="docker",
             num_agents=8,
             replay_speed=1.0,
@@ -169,7 +229,46 @@ def test_replay_command_passes_docker_cpuset_for_placement() -> None:
             extra_args=[],
         )
 
-    assert "--cpuset-cpus" in command
-    assert command[command.index("--cpuset-cpus") + 1] == "0,1,2,3,4,5,6,7"
+    assert "--cpuset-cpus" not in command
+    assert command.count("--agent-cpuset") == 8
+    idx = command.index("--agent-cpuset")
+    assert command[idx + 1] == "0"
     assert "--cpu-limit" in command
     assert command[command.index("--cpu-limit") + 1] == "1"
+
+
+def test_replay_dry_run_supports_single_agent_without_shared_cpuset() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-7\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+
+        records = run_replay(
+            argparse.Namespace(
+                source_trace=Path("trace.jsonl"),
+                task_source=Path("tasks.json"),
+                output_root=tmp_path / "runs",
+                sys_cpu_root=root,
+                container="docker",
+                placements="os_default,compact_llc",
+                num_agents=1,
+                cluster_size=4,
+                replay_speed=1.0,
+                network_mode="none",
+                command_timeout=600.0,
+                workers=1,
+                prep_concurrency=1,
+                resource_monitoring="on",
+                ksys_monitoring="off",
+                dry_run=True,
+                simulate_args=[],
+            )
+        )
+
+    by_placement = {record.placement: record for record in records}
+    assert set(by_placement) == {"os_default", "compact_llc"}
+    assert "--cpuset-cpus" not in by_placement["compact_llc"].command
+    assert by_placement["compact_llc"].command.count("--agent-cpuset") == 1
+    assert "--agent-cpuset" not in by_placement["os_default"].command
+    assert by_placement["compact_llc"].agent_assignments[0]["cpuset_cpus"] == "0"

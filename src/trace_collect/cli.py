@@ -605,6 +605,17 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-cpuset",
+        dest="agent_cpusets",
+        action="append",
+        default=None,
+        help=(
+            "Repeat once per replay agent to pass a distinct Docker/Podman "
+            "--cpuset-cpus=<list> to that agent's container. Use this for "
+            "strict placement experiments where agent i must run on CPU set i."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -923,6 +934,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "trace_assignment_seed": args.trace_assignment_seed,
         "cpu_limit": args.cpu_limit,
         "cpuset_cpus": args.cpuset_cpus,
+        "agent_cpusets": args.agent_cpusets,
         "workers": args.workers,
         "prep_concurrency": args.prep_concurrency,
         "tool_profiling": getattr(args, "tool_profiling", "off"),
@@ -949,6 +961,21 @@ def _run_simulate(args: argparse.Namespace) -> None:
         print(
             "ERROR: --cpuset-cpus is supported only with container replay "
             "(pass --container docker or --container podman).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.agent_cpusets and not args.container:
+        print(
+            "ERROR: --agent-cpuset is supported only with container replay "
+            "(pass --container docker or --container podman).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.agent_cpusets and args.cpuset_cpus:
+        print(
+            "ERROR: --agent-cpuset and --cpuset-cpus are mutually exclusive; "
+            "use per-agent cpusets for strict binding or one shared cpuset for "
+            "coarse placement.",
             file=sys.stderr,
         )
         sys.exit(2)

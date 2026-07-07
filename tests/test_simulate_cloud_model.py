@@ -178,7 +178,13 @@ def _patch_simulator_runtime(
     class _FakeAgent:
         async def stop(self): pass
 
-    async def fake_prepare_container(loaded, *, container_executable, network_mode="host"):
+    async def fake_prepare_container(
+        loaded,
+        *,
+        container_executable,
+        network_mode="host",
+        **_kwargs,
+    ):
         from trace_collect.simulator import PreparedContainer, PreparedTraceSession
         container = PreparedContainer(
             container_id="fake-cid",
@@ -276,6 +282,59 @@ def test_run_simulate_cloud_model_bypasses_llm_config(monkeypatch, tmp_path: Pat
     assert seen["source_trace"] == Path("trace.jsonl")
     assert seen["trace_manifest"] is None
     assert seen["container_executable"] is None
+
+
+def test_run_simulate_forwards_agent_cpusets(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_simulate(**kwargs):
+        seen.update(kwargs)
+        return tmp_path / "out.jsonl"
+
+    monkeypatch.setattr("trace_collect.simulator.simulate", fake_simulate)
+
+    args = parse_simulate_args(
+        [
+            "--mode",
+            "cloud_model",
+            "--source-trace",
+            "trace.jsonl",
+            "--container",
+            "docker",
+            "--agent-cpuset",
+            "0",
+            "--agent-cpuset",
+            "4",
+        ]
+    )
+
+    _run_simulate(args)
+
+    assert seen["agent_cpusets"] == ["0", "4"]
+
+
+def test_run_simulate_rejects_global_and_agent_cpusets(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    args = parse_simulate_args(
+        [
+            "--mode",
+            "cloud_model",
+            "--source-trace",
+            "trace.jsonl",
+            "--container",
+            "docker",
+            "--cpuset-cpus",
+            "0-3",
+            "--agent-cpuset",
+            "0",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        _run_simulate(args)
+
+    assert "mutually exclusive" in capsys.readouterr().err
 
 
 def test_run_simulate_rejects_metrics_url_in_cloud_model(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1034,7 +1093,13 @@ def test_cloud_model_manifest_with_docker_image_override(
     class _FakeAgent2:
         async def stop(self): pass
 
-    async def capture_prepare(loaded, *, container_executable, network_mode="host"):
+    async def capture_prepare(
+        loaded,
+        *,
+        container_executable,
+        network_mode="host",
+        **_kwargs,
+    ):
         from trace_collect.simulator import PreparedContainer, PreparedTraceSession, _resolve_docker_image
         img = _resolve_docker_image(loaded)
         prepared_images.append(img)
@@ -1067,6 +1132,82 @@ def test_cloud_model_manifest_with_docker_image_override(
     )
 
     assert prepared_images == ["custom/override:latest"]
+
+
+def test_cloud_model_applies_per_agent_cpusets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    task_source = tmp_path / "tasks.json"
+    _write_trace(trace_path, agent_id="task-a")
+    _write_tasks(task_source, "task-a")
+
+    seen_cpusets: list[str | None] = []
+
+    class _FakeAgent:
+        async def stop(self):
+            pass
+
+    async def capture_prepare(loaded, **kwargs):
+        from trace_collect.simulator import PreparedContainer, PreparedTraceSession
+
+        seen_cpusets.append(kwargs.get("cpuset_cpus"))
+        container = PreparedContainer(
+            container_id=f"fake-cid-{len(seen_cpusets)}",
+            container_executable=kwargs["container_executable"],
+            docker_image="fake/image:latest",
+            agent=_FakeAgent(),
+        )
+        return PreparedTraceSession(loaded=loaded, container=container)
+
+    monkeypatch.setattr("trace_collect.simulator._prepare_container_session", capture_prepare)
+
+    async def _fake_exec(*_args, **_kwargs):
+        return ("ok", 1.0, True)
+
+    monkeypatch.setattr("trace_collect.simulator._exec_tool", _fake_exec)
+    monkeypatch.setattr(
+        "trace_collect.simulator.create_async_openai_client",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no llm")),
+    )
+
+    asyncio.run(
+        simulate(
+            source_trace=trace_path,
+            task_source=task_source,
+            output_dir=tmp_path / "out",
+            mode="cloud_model",
+            container_executable="docker",
+            num_agents=2,
+            agent_cpusets=["0", "4"],
+            replay_speed=10.0,
+        )
+    )
+
+    assert seen_cpusets == ["0", "4"]
+
+
+def test_cloud_model_rejects_agent_cpuset_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    task_source = tmp_path / "tasks.json"
+    _write_trace(trace_path, agent_id="task-a")
+    _write_tasks(task_source, "task-a")
+
+    with pytest.raises(ValueError, match="exactly once per replay agent"):
+        asyncio.run(
+            simulate(
+                source_trace=trace_path,
+                task_source=task_source,
+                output_dir=tmp_path / "out",
+                mode="cloud_model",
+                container_executable="docker",
+                num_agents=2,
+                agent_cpusets=["0"],
+            )
+        )
 
 
 def test_cloud_model_rejects_task_without_docker_image(tmp_path: Path) -> None:
