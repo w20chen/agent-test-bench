@@ -155,14 +155,32 @@ def build_placements(
         key=lambda item: (min(item[1]), item[0]),
     )[0]
 
-    if len(by_llc) < agent_count:
+    if len(by_llc) < 2:
         raise RuntimeError(
-            f"only {len(by_llc)} LLC groups found; need {agent_count} for spread_llc"
+            "only one LLC group found; cannot build a cross-LLC spread placement"
         )
-    spread_pairs = [
-        (llc_id, cpus[0])
+
+    llc_groups = [
+        (llc_id, cpus)
         for llc_id, cpus in sorted(by_llc.items(), key=lambda item: min(item[1]))
-    ][:agent_count]
+    ]
+    spread_pairs: list[tuple[str, int]] = []
+    offset = 0
+    while len(spread_pairs) < agent_count:
+        made_progress = False
+        for llc_id, cpus in llc_groups:
+            if offset >= len(cpus):
+                continue
+            spread_pairs.append((llc_id, cpus[offset]))
+            made_progress = True
+            if len(spread_pairs) == agent_count:
+                break
+        if not made_progress:
+            raise RuntimeError(
+                f"only {len(spread_pairs)} CPUs are available across LLC groups; "
+                f"need {agent_count} for spread_llc"
+            )
+        offset += 1
     spread_cpus = [cpu for _, cpu in spread_pairs]
     spread_llcs = [llc_id for llc_id, _ in spread_pairs]
 
@@ -183,7 +201,10 @@ def build_placements(
             name="spread_llc",
             cpus=spread_cpus,
             llc_ids=spread_llcs,
-            description=f"{agent_count} allowed CPUs from distinct LLC groups.",
+            description=(
+                f"{agent_count} allowed CPUs distributed round-robin across "
+                f"{len(llc_groups)} LLC groups."
+            ),
         ),
     }
 

@@ -62,7 +62,7 @@ def test_parse_cpu_list() -> None:
     assert format_cpu_list([0, 2, 4]) == "0,2,4"
 
 
-def test_build_same_and_spread_placements() -> None:
+def test_build_same_and_round_robin_spread_placements() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"
         _write(root / "online", "0-15\n")
@@ -81,7 +81,34 @@ def test_build_same_and_spread_placements() -> None:
     assert placements["os_default"].cpus is None
 
 
-def test_spread_requires_distinct_llcs() -> None:
+def test_spread_balances_eight_agents_over_four_llcs() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-31\n")
+        for group in range(4):
+            start = group * 8
+            shared = f"{start}-{start + 7}"
+            for cpu in range(start, start + 8):
+                _cpu(root, cpu, shared=shared)
+
+        topology = probe_topology(root)
+        placements = build_placements(topology, agent_count=8)
+
+    assert placements["same_llc"].cpus == list(range(8))
+    assert placements["spread_llc"].cpus == [0, 8, 16, 24, 1, 9, 17, 25]
+    assert placements["spread_llc"].llc_ids == [
+        "0-7",
+        "8-15",
+        "16-23",
+        "24-31",
+        "0-7",
+        "8-15",
+        "16-23",
+        "24-31",
+    ]
+
+
+def test_spread_requires_at_least_two_llcs() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"
         _write(root / "online", "0-7\n")
@@ -90,7 +117,7 @@ def test_spread_requires_distinct_llcs() -> None:
 
         topology = probe_topology(root)
 
-    with pytest.raises(RuntimeError, match="need 8 for spread_llc"):
+    with pytest.raises(RuntimeError, match="only one LLC group"):
         build_placements(topology, agent_count=8)
 
 
