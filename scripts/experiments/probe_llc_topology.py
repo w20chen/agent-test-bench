@@ -369,6 +369,32 @@ def _inferred_clusters(
     return clusters
 
 
+def _interleave_clusters_by_domain(
+    domains: list[tuple[tuple[int | None, str], list[int]]],
+    clusters: list[tuple[tuple[int | None, str], str, list[int]]],
+) -> list[tuple[tuple[int | None, str], str, list[int]]]:
+    """Order clusters as domain0-cluster0, domain1-cluster0, ..."""
+    by_domain: dict[tuple[int | None, str], list[tuple[tuple[int | None, str], str, list[int]]]] = {
+        domain_key: [] for domain_key, _cpus in domains
+    }
+    for cluster in clusters:
+        by_domain.setdefault(cluster[0], []).append(cluster)
+
+    ordered: list[tuple[tuple[int | None, str], str, list[int]]] = []
+    offset = 0
+    while True:
+        made_progress = False
+        for domain_key, _cpus in domains:
+            domain_clusters = by_domain.get(domain_key, [])
+            if offset < len(domain_clusters):
+                ordered.append(domain_clusters[offset])
+                made_progress = True
+        if not made_progress:
+            break
+        offset += 1
+    return ordered
+
+
 def _physical_core_representatives(
     topology: list[CpuTopology],
 ) -> dict[tuple[int | None, str], list[int]]:
@@ -468,6 +494,34 @@ def build_placements(
         )
 
     clusters = _inferred_clusters(domains, cluster_size=cluster_size)
+    compact_same_llc_cluster_groups: list[tuple[tuple[int | None, str], str | None, list[int]]] = []
+    for domain_key, domain_cpus in domains:
+        domain_clusters = [
+            (key, cluster_id, cpus)
+            for key, cluster_id, cpus in clusters
+            if key == domain_key
+        ]
+        if len(domain_cpus) >= agent_count:
+            compact_same_llc_cluster_groups = domain_clusters
+            break
+    if compact_same_llc_cluster_groups:
+        compact_assignments: list[tuple[tuple[int | None, str], str | None, int]] = []
+        for domain_key, cluster_id, cpus in compact_same_llc_cluster_groups:
+            for cpu in cpus:
+                compact_assignments.append((domain_key, cluster_id, cpu))
+                if len(compact_assignments) == agent_count:
+                    break
+            if len(compact_assignments) == agent_count:
+                break
+        placements["compact_clusters_same_llc"] = _placement_from_assignments(
+            "compact_clusters_same_llc",
+            compact_assignments,
+            (
+                "Agents packed into the fewest inferred sub-LLC CPU clusters "
+                "inside one Linux LLC locality domain."
+            ),
+        )
+
     cluster_compact_candidates = [
         (domain_key, cluster_id, cpus)
         for domain_key, cluster_id, cpus in clusters
@@ -515,10 +569,11 @@ def build_placements(
             ),
         )
 
-    if agent_count >= 2 and len(clusters) >= 2:
+    interleaved_clusters = _interleave_clusters_by_domain(domains, clusters)
+    if agent_count >= 2 and len(interleaved_clusters) >= 2:
         placements["spread_clusters_all"] = _placement_from_assignments(
             "spread_clusters_all",
-            _round_robin_select(clusters, agent_count),
+            _round_robin_select(interleaved_clusters, agent_count),
             "Agents distributed round-robin across all inferred CPU clusters.",
         )
 

@@ -80,6 +80,11 @@ def test_build_llc_and_inferred_cluster_placements() -> None:
     assert placements["compact_llc"].cpus == list(range(8))
     assert [a.cpu for a in placements["compact_llc"].agent_assignments] == list(range(8))
     assert placements["compact_llc"].llc_ids == ["0-7"]
+    assert placements["compact_clusters_same_llc"].cpus == list(range(8))
+    assert [group.cluster_id for group in placements["compact_clusters_same_llc"].groups] == [
+        "0-7:cluster0",
+        "0-7:cluster1",
+    ]
     assert placements["spread_llc"].cpus == [0, 8, 9, 10, 11, 12, 13, 14]
     assert [a.cpuset_cpus for a in placements["spread_llc"].agent_assignments] == [
         "0",
@@ -123,6 +128,16 @@ def test_placements_avoid_smt_sibling_logical_cpus() -> None:
         placements_4 = build_placements(topology, agent_count=4)
 
     assert placements_8["compact_llc"].cpus == [0, 2, 4, 6, 8, 10, 12, 14]
+    assert placements_8["compact_clusters_same_llc"].cpus == [
+        0,
+        2,
+        4,
+        6,
+        8,
+        10,
+        12,
+        14,
+    ]
     assert placements_4["compact_cluster"].cpus == [0, 2, 4, 6]
     assert placements_8["spread_clusters_same_llc"].cpus == [0, 8, 2, 10, 4, 12, 6, 14]
 
@@ -142,6 +157,7 @@ def test_spread_across_four_llcs_round_robins_domains() -> None:
 
     assert placements["compact_llc"].cpus == list(range(8))
     assert placements["spread_llc"].cpus == [0, 8, 16, 24, 1, 9, 17, 25]
+    assert placements["spread_clusters_all"].cpus == [0, 8, 16, 24, 4, 12, 20, 28]
     assert placements["spread_llc"].llc_ids == [
         "0-7",
         "8-15",

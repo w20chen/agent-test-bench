@@ -1430,6 +1430,10 @@ async def _run_cloud_model_replay(
     replay_speed: float,
     command_timeout_s: float,
     warmup_skip_iterations: int,
+    network_mode: str = "host",
+    cpu_limit: float | None = None,
+    cpuset_cpus: str | None = None,
+    agent_cpusets: list[str] | None = None,
     serial: bool = False,
     arrival_offsets: list[float] | None = None,
     replay_zero_monotonic: float | None = None,
@@ -1448,6 +1452,10 @@ async def _run_cloud_model_replay(
                 replay_speed=replay_speed,
                 command_timeout_s=command_timeout_s,
                 warmup_skip_iterations=warmup_skip_iterations,
+                network_mode=network_mode,
+                cpu_limit=cpu_limit,
+                cpuset_cpus=cpuset_cpus,
+                agent_cpusets=agent_cpusets,
             )
     else:
         # return_exceptions=True prevents the cascade failure where one
@@ -1466,6 +1474,10 @@ async def _run_cloud_model_replay(
                     replay_speed=replay_speed,
                     command_timeout_s=command_timeout_s,
                     warmup_skip_iterations=warmup_skip_iterations,
+                    network_mode=network_mode,
+                    cpu_limit=cpu_limit,
+                    cpuset_cpus=cpuset_cpus,
+                    agent_cpusets=agent_cpusets,
                 )
                 for i in range(len(prepared_sessions))
             ],
@@ -1503,6 +1515,10 @@ async def _replay_cloud_model_session(
     replay_speed: float,
     command_timeout_s: float,
     warmup_skip_iterations: int,
+    network_mode: str = "host",
+    cpu_limit: float | None = None,
+    cpuset_cpus: str | None = None,
+    agent_cpusets: list[str] | None = None,
 ) -> None:
     loaded = prepared_session.loaded
     ctr = prepared_session.container
@@ -1536,6 +1552,7 @@ async def _replay_cloud_model_session(
             prepared_session.task_output_dir, "trace",
         )
         _log = _own_logger
+        effective_cpuset = loaded.cpuset_cpus or cpuset_cpus
         # Write per-agent metadata (equivalent to _log_trace_metadata
         # but scoped to this single session).
         _log.log_metadata(
@@ -1551,9 +1568,21 @@ async def _replay_cloud_model_session(
             replay_target="cloud_replay",
             instance_id=loaded.agent_id,
             source_trace=str(loaded.source_trace),
-            network_mode="host",
-            cpu_limit=None,
-            monitoring={},
+            network_mode=network_mode,
+            cpu_limit=cpu_limit,
+            cpuset_cpus=effective_cpuset,
+            agent_cpusets=agent_cpusets,
+            session_cpusets=[
+                {
+                    "agent_id": loaded.agent_id,
+                    "cpuset_cpus": effective_cpuset,
+                }
+            ],
+            monitoring=(
+                prepared_session.monitoring_policy.to_dict()
+                if prepared_session.monitoring_policy is not None
+                else {}
+            ),
         )
     else:
         raise RuntimeError(
@@ -2184,6 +2213,9 @@ def _worker_run_cloud_model(
                     replay_speed=replay_speed,
                     command_timeout_s=command_timeout_s,
                     warmup_skip_iterations=warmup_skip_iterations,
+                    network_mode=network_mode,
+                    cpu_limit=cpu_limit,
+                    cpuset_cpus=cpuset_cpus,
                     arrival_offsets=arrival_offsets,
                     replay_zero_monotonic=replay_zero,
                 )
@@ -2670,6 +2702,10 @@ async def simulate(
                         replay_speed=replay_speed,
                         command_timeout_s=command_timeout_s,
                         warmup_skip_iterations=warmup_skip_iterations,
+                        network_mode=network_mode,
+                        cpu_limit=cpu_limit,
+                        cpuset_cpus=cpuset_cpus,
+                        agent_cpusets=agent_cpusets,
                     )
                 finally:
                     await _teardown_one(prepared)
@@ -2802,6 +2838,10 @@ async def simulate(
                         replay_speed=replay_speed,
                         command_timeout_s=command_timeout_s,
                         warmup_skip_iterations=warmup_skip_iterations,
+                        network_mode=network_mode,
+                        cpu_limit=cpu_limit,
+                        cpuset_cpus=cpuset_cpus,
+                        agent_cpusets=agent_cpusets,
                         arrival_offsets=offsets,
                         replay_zero_monotonic=replay_zero,
                     )

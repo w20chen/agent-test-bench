@@ -96,6 +96,7 @@ Responsibilities:
   - `compact_llc`: N CPUs from one LLC sharing group when available.
   - `spread_llc`: N CPUs round-robin across LLC groups where possible.
   - `compact_cluster`: N CPUs from one inferred sub-LLC CPU cluster when available.
+  - `compact_clusters_same_llc`: N CPUs packed into the fewest inferred clusters inside one LLC.
   - `spread_clusters_same_llc`: N CPUs spread across inferred clusters inside one LLC when available.
   - `spread_clusters_all`: N CPUs spread across all inferred clusters when available.
   - `near_numa_spread` / `far_numa_spread`: N CPUs split across near/far NUMA domains when available.
@@ -268,7 +269,7 @@ Open question for user:
 
 ## Commands The Runner Should Produce
 
-Preferred replay compact-LLC run shape:
+Preferred replay compact-LLC run shape for this checked Kunpeng host:
 
 ```bash
 ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
@@ -284,13 +285,13 @@ ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
   --replay-speed 1 \
   --cpu-limit 1 \
   --agent-cpuset 0 \
-  --agent-cpuset 1 \
   --agent-cpuset 2 \
-  --agent-cpuset 3 \
   --agent-cpuset 4 \
-  --agent-cpuset 5 \
   --agent-cpuset 6 \
-  --agent-cpuset 7 \
+  --agent-cpuset 8 \
+  --agent-cpuset 10 \
+  --agent-cpuset 12 \
+  --agent-cpuset 14 \
   --resource-monitoring on \
   --pmu-monitoring off \
   --ksys-monitoring off
@@ -315,14 +316,16 @@ ARM_IMAGE_MODE=qemu PYTHONPATH=src:. python -m trace_collect.cli simulate \
   --agent-cpuset 80 \
   --agent-cpuset 160 \
   --agent-cpuset 240 \
-  --agent-cpuset 1 \
-  --agent-cpuset 81 \
-  --agent-cpuset 161 \
-  --agent-cpuset 241 \
+  --agent-cpuset 2 \
+  --agent-cpuset 82 \
+  --agent-cpuset 162 \
+  --agent-cpuset 242 \
   --resource-monitoring on \
   --pmu-monitoring off \
   --ksys-monitoring off
 ```
 
 The actual per-agent CPU sets must come from the topology probe's
-`agent_assignments`, not from hardcoded numbers.
+`agent_assignments`, not from hardcoded numbers. Adjacent logical CPUs are
+SMT siblings on the checked host, so do not copy any `0..7` style CPU list
+for one-agent-one-physical-core experiments.

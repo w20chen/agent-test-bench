@@ -1186,6 +1186,22 @@ def test_cloud_model_applies_per_agent_cpusets(
     )
 
     assert seen_cpusets == ["0", "4"]
+    metadata_records = [
+        _read_jsonl(path)[0]
+        for path in (tmp_path / "out").glob("*/attempt_1/trace.jsonl")
+    ]
+    assert sorted(
+        record["session_cpusets"][0]["cpuset_cpus"]
+        for record in metadata_records
+    ) == ["0", "4"]
+    assert {
+        record["network_mode"]
+        for record in metadata_records
+    } == {"host"}
+    assert {
+        record["cpu_limit"]
+        for record in metadata_records
+    } == {None}
 
 
 def test_cloud_model_rejects_agent_cpuset_count_mismatch(
@@ -1208,6 +1224,30 @@ def test_cloud_model_rejects_agent_cpuset_count_mismatch(
                 agent_cpusets=["0"],
             )
         )
+
+
+def test_worker_trace_input_preserves_per_agent_cpuset(tmp_path: Path) -> None:
+    from trace_collect.simulator import LoadedTraceSession, _worker_trace_input
+
+    session = LoadedTraceSession(
+        source_trace=tmp_path / "trace.jsonl",
+        task_source=tmp_path / "tasks.json",
+        agent_id="task-a",
+        scaffold="openclaw",
+        metadata=None,
+        summary=None,
+        task={},
+        actions=[],
+        iterations={},
+        docker_image_override="custom/image:latest",
+        cpuset_cpus="88",
+    )
+
+    worker_input = _worker_trace_input(session)
+
+    assert worker_input.agent_id == "task-a"
+    assert worker_input.docker_image_override == "custom/image:latest"
+    assert worker_input.cpuset_cpus == "88"
 
 
 def test_cloud_model_rejects_task_without_docker_image(tmp_path: Path) -> None:
