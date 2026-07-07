@@ -18,14 +18,17 @@ if str(REPO_ROOT) not in sys.path:
 
 # ---------------------------------------------------------------------------
 # Hardcoded experiment configurations.
-# Each entry: (experiment_name, list_of_cpuset_strings)
-# The number of agents is len(cpusets).
+# Each entry: (experiment_name, list_of_cpuset_strings, num_agents_override)
+# num_agents defaults to len(cpusets); set explicitly when they differ
+# (e.g. os_default needs 8 agents but passes no --agent-cpuset flags).
 # ---------------------------------------------------------------------------
-EXPERIMENTS: list[tuple[str, list[str]]] = [
-    ("1agent_cpu0", ["0"]),
-    ("2agent_cpu0_2", ["0", "2"]),
-    ("4agent_cpu0_2_4_6", ["0", "2", "4", "6"]),
-    ("8agent_cpu0_7", ["0", "1", "2", "3", "4", "5", "6", "7"]),
+EXPERIMENTS: list[tuple[str, list[str], int | None]] = [
+    ("1agent_cpu0",          ["0"],                            None),
+    ("2agent_cpu0_2",        ["0", "2"],                       None),
+    ("4agent_cpu0_2_4_6",    ["0", "2", "4", "6"],             None),
+    ("8agent_cpu0_7",        ["0", "1", "2", "3", "4", "5", "6", "7"], None),
+    ("8agent_phys_0_14",     ["0", "2", "4", "6", "8", "10", "12", "14"], None),
+    ("8agent_os_default",    [],                               8),
 ]
 
 
@@ -46,6 +49,7 @@ def build_command(
     task_source: Path,
     output_dir: Path,
     cpusets: list[str],
+    num_agents: int | None = None,
     container: str = "docker",
     network_mode: str = "none",
     replay_speed: float = 1.0,
@@ -56,6 +60,7 @@ def build_command(
     ksys_monitoring: str = "off",
     extra_args: list[str] | None = None,
 ) -> list[str]:
+    n_agents = num_agents if num_agents is not None else len(cpusets)
     cmd = [
         sys.executable,
         "-m", "trace_collect.cli", "simulate",
@@ -65,7 +70,7 @@ def build_command(
         "--mode", "cloud_model",
         "--container", container,
         "--network-mode", network_mode,
-        "--num-agents", str(len(cpusets)),
+        "--num-agents", str(n_agents),
         "--trace-assignment", "manifest",
         "--arrival-mode", "closed_loop",
         "--replay-speed", str(replay_speed),
@@ -126,7 +131,8 @@ def main() -> None:
 
     records: list[RunRecord] = []
 
-    for name, cpusets in EXPERIMENTS:
+    for name, cpusets, num_override in EXPERIMENTS:
+        n_agents = num_override if num_override is not None else len(cpusets)
         run_dir = output_root / name
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,6 +141,7 @@ def main() -> None:
             task_source=args.task_source,
             output_dir=run_dir,
             cpusets=cpusets,
+            num_agents=num_override,
             container=args.container,
             network_mode=args.network_mode,
             replay_speed=args.replay_speed,
@@ -146,7 +153,7 @@ def main() -> None:
 
         record = RunRecord(
             name=name,
-            num_agents=len(cpusets),
+            num_agents=n_agents,
             cpusets=cpusets,
             command=cmd,
             run_dir=str(run_dir),
@@ -160,7 +167,7 @@ def main() -> None:
         )
 
         print(f"\n{'='*60}")
-        print(f"[{name}]  agents={len(cpusets)}  cpusets={cpusets}")
+        print(f"[{name}]  agents={n_agents}  cpusets={cpusets}")
         print(f"[{name}]  {' '.join(cmd)}")
         print(f"{'='*60}\n", flush=True)
 
