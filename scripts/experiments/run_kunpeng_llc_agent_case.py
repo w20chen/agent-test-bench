@@ -47,7 +47,7 @@ def _repo_root() -> Path:
 def _simulate_base_command(
     *,
     run_dir: Path,
-    trace_manifest: Path,
+    source_trace: Path,
     task_source: Path,
     container: str,
     num_agents: int,
@@ -65,8 +65,8 @@ def _simulate_base_command(
         "simulate",
         "--mode",
         "cloud_model",
-        "--trace-manifest",
-        str(trace_manifest),
+        "--source-trace",
+        str(source_trace),
         "--task-source",
         str(task_source),
         "--container",
@@ -115,9 +115,9 @@ def run_experiment(args: argparse.Namespace) -> list[RunRecord]:
     if unknown:
         raise ValueError(f"unknown placement(s): {', '.join(unknown)}")
 
-    trace_manifest = args.trace_manifest.resolve()
-    if not trace_manifest.exists():
-        raise FileNotFoundError(f"trace manifest not found: {trace_manifest}")
+    source_trace = args.source_trace.resolve()
+    if not source_trace.exists():
+        raise FileNotFoundError(f"source trace not found: {source_trace}")
 
     env = os.environ.copy()
     env["ARM_IMAGE_MODE"] = "qemu"
@@ -129,7 +129,7 @@ def run_experiment(args: argparse.Namespace) -> list[RunRecord]:
         run_dir = output_root / name
         command = _simulate_base_command(
             run_dir=run_dir,
-            trace_manifest=trace_manifest,
+            source_trace=source_trace,
             task_source=args.task_source,
             container=args.container,
             num_agents=args.num_agents,
@@ -184,7 +184,7 @@ def run_experiment(args: argparse.Namespace) -> list[RunRecord]:
     (output_root / "experiment_manifest.json").write_text(
         json.dumps(
             {
-                "trace_manifest": str(trace_manifest),
+                "source_trace": str(source_trace),
                 "num_agents": args.num_agents,
                 "topology_dir": str(topology_dir),
                 "runs": [asdict(record) for record in records],
@@ -200,17 +200,17 @@ def run_experiment(args: argparse.Namespace) -> list[RunRecord]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Replay SWE-rebench traces under same-LLC and spread-LLC CPU "
+            "Replay a SWE-rebench trace under same-LLC and spread-LLC CPU "
             "placement using trace_collect.cli simulate --mode cloud_model "
-            "(no real LLM inference). Each placement runs all traces listed "
-            "in --trace-manifest concurrently via --num-agents."
+            "(no real LLM inference). Each placement runs --num-agents "
+            "concurrent replay agents from the same --source-trace."
         ),
     )
     parser.add_argument(
-        "--trace-manifest",
+        "--source-trace",
         type=Path,
         required=True,
-        help="JSON manifest listing replay traces (see configs/simulate/ for examples).",
+        help="Path to a SWE-rebench trace.jsonl file to replay.",
     )
     parser.add_argument(
         "--task-source",
