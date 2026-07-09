@@ -192,14 +192,16 @@ def _exec_command(cmd, timeout, cwd="/testbed"):
     original collect path and the replay path produce identical output.
     """
     env = {**os.environ, "PAGER": "cat", "MANPAGER": "cat", "LESS": "-R"}
-    # Strip PYTHONUSERBASE so that agent tool commands (pip install, pytest,
-    # etc.) do not discover stale packages left in the shared .pyuserbase/
-    # directory from previous runs.  The home directory is mounted from the
-    # host by start_task_container, so packages installed there by a prior
-    # agent's pip commands would persist and leak into subsequent containers.
-    # PYTHONUSERBASE is only needed during bootstrap (get-pip.py --user);
-    # agent tool execution must use the container's ephemeral site-packages.
-    env.pop("PYTHONUSERBASE", None)
+    # Keep replayed task commands isolated from the OpenClaw runtime deps.
+    # The replay agent itself needs PYTHONPATH for controller imports, but
+    # task commands (pip install, pytest, etc.) should see the repository
+    # environment plus an ephemeral in-container --user site only.
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONNOUSERSITE", None)
+    env["PYTHONUSERBASE"] = env.get(
+        "OPENCLAW_TASK_USERBASE",
+        "/tmp/openclaw-task-userbase",
+    )
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd,
                            capture_output=True, text=True, timeout=timeout, env=env)
@@ -507,6 +509,7 @@ class ContainerAgent:
         # can find packages installed by bootstrap_task_container_python.
         if self._pythonpath:
             cmd.extend(["-e", f"PYTHONPATH={self._pythonpath}"])
+        cmd.extend(["-e", "PYTHONNOUSERSITE=1"])
         cmd.extend([
             self._container_id, self._python_runtime, "-u", "-c", _REPLAY_AGENT_SCRIPT,
         ])

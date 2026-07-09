@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import platform
 import ssl
@@ -35,6 +36,18 @@ _SHARED_BOOTSTRAP_CACHE = Path.home() / ".cache" / "task-container-bootstrap"
 _GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 _GET_PIP_FETCH_ATTEMPTS = 3
 _GET_PIP_FETCH_BACKOFF_SECONDS = 1.0
+_BOOTSTRAP_CACHE_VERSION = 2
+_BOOTSTRAP_IMPORT_CHECKS = (
+    "openai",
+    "httpx",
+    "yaml",
+    "json_repair",
+    "loguru",
+    "pydantic",
+    "pydantic_core",
+    "socksio",
+    "tiktoken",
+)
 _ARCH_ALIASES = {
     "amd64": "amd64",
     "x86_64": "amd64",
@@ -201,6 +214,110 @@ def _list_bootstrap_packages(site_dir: Path) -> set[str]:
     return packages
 
 
+def _requirements_cache_key(requirements: tuple[str, ...]) -> str:
+    payload = json.dumps(list(requirements), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _bootstrap_site_dir_for(
+    *,
+    arch: str,
+    python_cache_tag: str | None,
+    requirements: tuple[str, ...],
+) -> Path:
+    tag = python_cache_tag or "unknown-python"
+    key = _requirements_cache_key(requirements)
+    return (
+        _SHARED_BOOTSTRAP_CACHE
+        / "pydeps"
+        / f"v{_BOOTSTRAP_CACHE_VERSION}-{arch}-{tag}-{key}"
+    )
+
+
+def _with_bootstrap_site_dir(
+    exec_config: TaskContainerExecConfig,
+    site_dir: Path,
+) -> TaskContainerExecConfig:
+    return TaskContainerExecConfig(
+        runtime=exec_config.runtime,
+        pythonpath=f"{site_dir}:{_DEFAULT_RUNTIME_PYTHONPATH}",
+        start_extra_args=exec_config.start_extra_args,
+        bootstrap=exec_config.bootstrap,
+        bootstrap_site_dir=site_dir,
+        image_platform=exec_config.image_platform,
+        python_cache_tag=exec_config.python_cache_tag,
+    )
+
+
+def _rebuild_bootstrap_site_dir(site_dir: Path) -> Path:
+    return site_dir.with_name(f"{site_dir.name}.rebuild-{os.getpid()}-{time.time_ns()}")
+
+
+def _requirement_name(requirement: str) -> str:
+    name = requirement.split(";", 1)[0].strip()
+    for sep in ("<", ">", "=", "!", "~", "["):
+        name = name.split(sep, 1)[0]
+    return name.strip().lower().replace("_", "-")
+
+
+def _bootstrap_import_checks(extra_requirements: tuple[str, ...]) -> tuple[str, ...]:
+    checks = list(_BOOTSTRAP_IMPORT_CHECKS)
+    if any(_requirement_name(req) == "mcp" for req in extra_requirements):
+        checks.append("mcp")
+    return tuple(dict.fromkeys(checks))
+
+
+def _bootstrap_import_check_script(import_checks: tuple[str, ...]) -> str:
+    return (
+        "import importlib\n"
+        f"mods = {list(import_checks)!r}\n"
+        "for mod in mods:\n"
+        "    importlib.import_module(mod)\n"
+    )
+
+
+def _bootstrap_cache_imports_ok(
+    *,
+    container_id: str,
+    exec_config: TaskContainerExecConfig,
+    import_checks: tuple[str, ...],
+    container_executable: str,
+    cwd: str,
+) -> bool:
+    """Return True when the cached runtime deps are importable in-container."""
+    result = subprocess.run(
+        [
+            container_executable,
+            "exec",
+            "-i",
+            "-w",
+            cwd,
+            "-e",
+            f"PYTHONPATH={exec_config.pythonpath}",
+            "-e",
+            "PYTHONNOUSERSITE=1",
+            container_id,
+            exec_config.runtime,
+            "-c",
+            _bootstrap_import_check_script(import_checks),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode == 0:
+        return True
+    details = _format_probe_failure_details(result)
+    print(
+        "[bootstrap] shared cache import check failed"
+        + (f": {details}" if details else ""),
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
 def _is_retryable_get_pip_error(exc: Exception) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
         return False
@@ -282,6 +399,7 @@ class TaskContainerExecConfig:
     bootstrap: bool = False
     bootstrap_site_dir: Path | None = None
     image_platform: str | None = None
+    python_cache_tag: str | None = None
 
 
 def _normalize_arch(raw: str | None) -> str | None:
@@ -452,7 +570,7 @@ set -eu
 for cand in "$@"; do
   if [ -x "$cand" ] || command -v "$cand" >/dev/null 2>&1; then
     if "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-      "$cand" -c 'import sys; print(sys.executable)'
+      "$cand" -c 'import sys; print(sys.executable); print(sys.implementation.cache_tag)'
       exit 0
     fi
   fi
@@ -485,11 +603,14 @@ exit 1
             "no Python >=3.11 interpreter found in container"
             + (f" ({details})" if details else "")
         )
-    runtime = result.stdout.strip()
+    output_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    runtime = output_lines[0] if output_lines else ""
     if not runtime:
         raise RuntimeError("task-container python probe failed: empty interpreter path")
+    python_cache_tag = output_lines[1] if len(output_lines) > 1 else None
     print(
-        f"[bootstrap] probing done: {runtime}",
+        f"[bootstrap] probing done: {runtime}"
+        + (f" ({python_cache_tag})" if python_cache_tag else ""),
         file=sys.stderr,
         flush=True,
     )
@@ -500,6 +621,7 @@ exit 1
         bootstrap=exec_config.bootstrap,
         bootstrap_site_dir=exec_config.bootstrap_site_dir,
         image_platform=exec_config.image_platform,
+        python_cache_tag=python_cache_tag,
     )
 
 
@@ -560,6 +682,8 @@ def exec_task_container_entrypoint(
         "PYTHONDONTWRITEBYTECODE=1",
         "-e",
         "PYTHONUNBUFFERED=1",
+        "-e",
+        "PYTHONNOUSERSITE=1",
         container_id,
         runtime,
         "-m",
@@ -787,17 +911,24 @@ def bootstrap_task_container_python(
     extra_requirements: tuple[str, ...] = (),
     container_executable: str,
     cwd: str = "/testbed",
-) -> None:
+) -> TaskContainerExecConfig:
     if not exec_config.bootstrap or exec_config.bootstrap_site_dir is None:
-        return
+        return exec_config
 
     arch = _bootstrap_arch(exec_config)
-    marker = exec_config.bootstrap_site_dir / ".bootstrap-ready.json"
     requirements = tuple(
         dict.fromkeys(OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS + extra_requirements)
     )
+    site_dir = _bootstrap_site_dir_for(
+        arch=arch,
+        python_cache_tag=exec_config.python_cache_tag,
+        requirements=requirements,
+    )
+    exec_config = _with_bootstrap_site_dir(exec_config, site_dir)
+    marker = site_dir / ".bootstrap-ready.json"
+    import_checks = _bootstrap_import_checks(extra_requirements)
 
-    userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
+    userbase = _SHARED_BOOTSTRAP_CACHE / ".bootstrap-userbase"
     # Resolve the userbase site-packages directory for contamination checks.
     # Python places --user packages under lib/pythonX.Y/site-packages/;
     # we probe for any lib/python*/site-packages/ subdirectory.
@@ -811,13 +942,19 @@ def bootstrap_task_container_python(
         arch=arch,
         site_dir=exec_config.bootstrap_site_dir,
         userbase_dir=userbase_site,
+    ) and _bootstrap_cache_imports_ok(
+        container_id=container_id,
+        exec_config=exec_config,
+        import_checks=import_checks,
+        container_executable=container_executable,
+        cwd=cwd,
     ):
         print(
             f"[bootstrap] shared cache hit ({arch}): {marker}",
             file=sys.stderr,
             flush=True,
         )
-        return
+        return exec_config
 
     # Serialise access to the shared bootstrap cache so concurrent
     # workers don't race on get-pip.py / pip install.
@@ -829,22 +966,31 @@ def bootstrap_task_container_python(
             arch=arch,
             site_dir=exec_config.bootstrap_site_dir,
             userbase_dir=userbase_site,
+        ) and _bootstrap_cache_imports_ok(
+            container_id=container_id,
+            exec_config=exec_config,
+            import_checks=import_checks,
+            container_executable=container_executable,
+            cwd=cwd,
         ):
             print(
                 f"[bootstrap] shared cache hit ({arch}, after lock): {marker}",
                 file=sys.stderr,
                 flush=True,
             )
-            return
+            return exec_config
 
-        if marker.exists():
+        if marker.exists() or exec_config.bootstrap_site_dir.exists():
             print(
-                f"[bootstrap] shared cache stale, rebuilding: {marker}",
+                f"[bootstrap] shared cache stale, building isolated replacement: {marker}",
                 file=sys.stderr,
                 flush=True,
             )
-            marker.unlink(missing_ok=True)
-            shutil.rmtree(exec_config.bootstrap_site_dir, ignore_errors=True)
+            exec_config = _with_bootstrap_site_dir(
+                exec_config,
+                _rebuild_bootstrap_site_dir(exec_config.bootstrap_site_dir),
+            )
+            marker = exec_config.bootstrap_site_dir / ".bootstrap-ready.json"
             # Also clean the userbase site-packages to purge any
             # agent-contaminated packages that leak via PYTHONUSERBASE.
             if userbase_site is not None and userbase_site.exists():
@@ -855,7 +1001,7 @@ def bootstrap_task_container_python(
                 )
                 shutil.rmtree(userbase_site, ignore_errors=True)
 
-        userbase = exec_config.bootstrap_site_dir.parent / ".pyuserbase"
+        userbase = _SHARED_BOOTSTRAP_CACHE / ".bootstrap-userbase"
         userbase.mkdir(parents=True, exist_ok=True)
         get_pip = userbase / "get-pip.py"
         if not get_pip.exists():
@@ -888,6 +1034,7 @@ site_dir = pathlib.Path({str(exec_config.bootstrap_site_dir)!r})
 marker = pathlib.Path({str(marker)!r})
 userbase = pathlib.Path({str(userbase)!r})
 requirements = {list(requirements)!r}
+import_checks = {list(import_checks)!r}
 arch = {arch!r}
 site_dir.mkdir(parents=True, exist_ok=True)
 userbase.mkdir(parents=True, exist_ok=True)
@@ -936,6 +1083,18 @@ subprocess.check_call(
 )
 _elapsed = _time.time() - _start
 _log(f"step 2/3: pip install done in {{_elapsed:.1f}}s")
+_log("step 2/3: verifying runtime imports ...")
+check_env = dict(env)
+check_env["PYTHONPATH"] = {exec_config.pythonpath!r}
+check_env["PYTHONNOUSERSITE"] = "1"
+subprocess.check_call(
+    [
+        sys.executable,
+        "-c",
+        { _bootstrap_import_check_script(import_checks)!r },
+    ],
+    env=check_env,
+)
 _log("step 3/3: writing marker (with package manifest) ...")
 # Collect the set of installed packages in pydeps/ for cache-contamination
 # detection.  Keep in sync with _list_bootstrap_packages (host-side).
@@ -975,7 +1134,7 @@ marker.write_text(
     }}),
     encoding="utf-8",
 )
-# Keep userbase intact so the agent can use pip at runtime.
+# Keep bootstrap userbase intact so future bootstraps can reuse pip.
 # get-pip.py is no longer needed; pip binary + lib are kept.
 _get_pip = userbase / "get-pip.py"
 if _get_pip.exists():
@@ -1005,3 +1164,4 @@ _log("bootstrap complete")
                 "task-container python bootstrap failed: "
                 f"{result.stderr.strip()}"
             )
+    return exec_config

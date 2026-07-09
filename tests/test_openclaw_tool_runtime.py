@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
-from trace_collect.openclaw_tools import execute_trace_tool
+from trace_collect.openclaw_tools import ContainerAgent, execute_trace_tool
 
 
 def _nested(tool_name: str, payload: dict) -> str:
@@ -187,3 +188,30 @@ def test_commands_sends_list() -> None:
     assert agent.requests[0]["args"]["commands"] == ["echo a", "echo b"]
     assert agent.requests[0]["args"]["timeout"] == 300.0
     assert agent.timeouts == [300.0]
+
+
+def test_container_agent_start_disables_user_site_for_controller(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_probe(self) -> str:
+        return "/usr/local/bin/python"
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(pid=123, returncode=None)
+
+    monkeypatch.setattr(ContainerAgent, "_probe_python", fake_probe)
+    monkeypatch.setattr(
+        "trace_collect.openclaw_tools.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    agent = ContainerAgent("cid-1", "docker", pythonpath="/deps:/repo/src:/repo")
+    asyncio.run(agent.start())
+
+    args = seen["args"]
+    assert isinstance(args, tuple)
+    assert "-e" in args
+    assert "PYTHONPATH=/deps:/repo/src:/repo" in args
+    assert "PYTHONNOUSERSITE=1" in args

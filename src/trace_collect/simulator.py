@@ -945,12 +945,14 @@ async def _prepare_container_session(
         container_executable=container_executable,
     )
     try:
-        await asyncio.to_thread(
+        bootstrapped_config = await asyncio.to_thread(
             bootstrap_task_container_python,
             container_id=container_id,
             exec_config=exec_config,
             container_executable=container_executable,
         )
+        if bootstrapped_config is not None:
+            exec_config = bootstrapped_config
     except Exception:
         await asyncio.to_thread(
             stop_task_container,
@@ -960,7 +962,7 @@ async def _prepare_container_session(
         raise
 
     agent = ContainerAgent(
-        container_id, container_executable, pythonpath=pythonpath,
+        container_id, container_executable, pythonpath=exec_config.pythonpath,
     )
     try:
         await agent.start()

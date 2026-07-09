@@ -652,6 +652,11 @@ def test_start_task_container_uses_runtime_specific_user_args(
     assert seen["cmd"][:3] == [container_executable, "run", "-d"]
     assert "-e" in seen["cmd"]
     assert f"HOME={os.environ.get('HOME', '/root')}" in seen["cmd"]
+    assert "OPENCLAW_TASK_USERBASE=/tmp/openclaw-task-userbase" in seen["cmd"]
+    assert not any(
+        isinstance(part, str) and part.startswith("PYTHONUSERBASE=")
+        for part in seen["cmd"]
+    )
     for arg in expected_user_args:
         assert arg in seen["cmd"]
     if container_executable == "docker":

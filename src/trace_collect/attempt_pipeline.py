@@ -218,16 +218,12 @@ def start_task_container(
     # regardless of host architecture.  Including host ~/.local/bin leaks
     # host-installed tools (python, pip, etc.) into the container on native
     # arches, producing different behaviour than ARM+QEMU where those host
-    # binaries cannot execute.  The bootstrap userbase bin/ is prepended
-    # so that pip (installed by bootstrap_task_container_python) and any
-    # other userbase tools are available during simulate replay.
-    container_path = "/usr/local/bin:/usr/bin:/bin"
-    bootstrap_userbase = (
-        f"{home_dir}/.cache/task-container-bootstrap/.pyuserbase"
-    )
-    container_path = f"{bootstrap_userbase}/bin:{container_path}"
+    # binaries cannot execute.  Task-level --user installs go to an ephemeral
+    # in-container userbase, not the shared OpenClaw bootstrap cache.
+    task_userbase = "/tmp/openclaw-task-userbase"
+    container_path = f"{task_userbase}/bin:/usr/local/bin:/usr/bin:/bin"
     qemu_env = [
-        "-e", f"PYTHONUSERBASE={bootstrap_userbase}",
+        "-e", f"OPENCLAW_TASK_USERBASE={task_userbase}",
         "-e", "PIP_BREAK_SYSTEM_PACKAGES=1",
     ]
     cmd = [
