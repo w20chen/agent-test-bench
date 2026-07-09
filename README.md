@@ -6,117 +6,83 @@
 Benchmark environment for studying agent scheduling and KV-cache management on
 multi-step LLM workloads. The repo ships three top-level capabilities:
 
-1. **Trace collect** — run agent scaffolds on benchmark tasks inside containers
-   and record canonical JSONL traces (`python -m trace_collect.cli`).
-2. **Trace simulate** — replay collected traces at scale (up to hundreds of
-   concurrent agents) to measure scheduling-sensitive timing under controlled
-   arrival patterns.  Uses `--workers` to distribute agents across independent
-   asyncio event loops for accurate timing at high concurrency, a
-   cross-process barrier (`multiprocessing.Barrier`) to synchronise the
-   transition from preparation to replay, and `--prep-concurrency` to
-   rate-limit system-wide container preparation during warm-up.
-   (`python -m trace_collect.cli simulate`).  See [Trace Collect](docs/trace-collect.md#simulate-trace-replay).
-3. **Gantt viewer demo** — an interactive FastAPI + Solid.js viewer under
-   `demo/gantt_viewer/` for inspecting traces as multi-lane Gantt charts with
-   resource overlays. (*This is deprecated. Use `src/trace_collect/html_viz.py` instead. See [HTML Visualization](docs/resource-measurement.md#9-html-visualization) for the detail.*)
+1. **Trace collect** - run agent scaffolds on benchmark tasks inside
+   containers and record canonical JSONL traces (`python -m trace_collect.cli`).
+2. **Trace simulate** - replay collected traces at scale to measure
+   scheduling-sensitive timing under controlled arrival patterns. Uses
+   `--workers` to distribute agents across independent asyncio event loops, a
+   cross-process barrier to synchronize replay start, and `--prep-concurrency`
+   to rate-limit container preparation.
+   See [Trace Collect](docs/trace-collect.md#simulate-trace-replay).
+3. **HTML trace visualization** - inspect traces with
+   `src/trace_collect/html_viz.py`. The older FastAPI + Solid.js Gantt viewer
+   remains under `demo/gantt_viewer/`, but is deprecated.
 
 `AGENTS.md` and `CLAUDE.md` define research-integrity and process rules.
-
----
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Environment Variables (.env)](#environment-variables-env)
-- [Repository Layout](#repository-layout)
-- [Entry Points](#entry-points)
-- [Running Benchmarks](#running-benchmarks)
-- [Documentation](#documentation)
-- [Supported Benchmarks](#supported-benchmarks)
-
----
 
 ## Quick Start
 
 ```bash
 conda activate ML
 make test    # run pytest
-make lint    # ruff
+make lint    # run ruff
 ```
 
-On a fresh server, run `bash scripts/setup/bootstrap.sh` once — it installs
-miniconda, creates env ML, and installs all deps.
+On a fresh server, run `bash scripts/setup/bootstrap.sh` once. It installs
+Miniconda, creates the `ML` environment, and installs project dependencies.
 
----
-
-## Environment Variables (.env)
+## Environment Variables
 
 The project uses `python-dotenv` to load environment variables from a `.env`
-file at startup.  This file is **never committed** (it is in `.gitignore`).
-Copy the template and edit it with your keys:
+file at startup. This file is never committed. Copy the template and edit it:
 
 ```bash
 cp .env.example .env
-# edit .env — fill in DEEPSEEK_API_KEY, TAVILY_API_KEY, etc.
+# edit .env with DEEPSEEK_API_KEY, TAVILY_API_KEY, etc.
 ```
 
-**Precedence:** shell environment variables always take priority over `.env`.
-If you `export DEEPSEEK_API_KEY=...` in your shell, the `.env` value is
-ignored.  `.env` acts as a **fallback** for keys you haven't explicitly set.
+Shell environment variables take priority over `.env`. The `.env` file acts as
+a fallback for keys that are not explicitly exported.
 
-The template includes placeholders for:
-- `DEEPSEEK_API_KEY` — DeepSeek API key (used by `--provider deepseek`)
-- `TAVILY_API_KEY` — Tavily search API key (used by the web search tool)
-- `MODEL_PATH`, `VLLM_*`, `CONTINUUM_*`, `THUNDERAGENT_*` — serving stack configuration
-
-Without a `.env` file or shell exports, you must pass credentials inline:
+Without a `.env` file or shell exports, pass credentials inline:
 
 ```bash
 DEEPSEEK_API_KEY=sk-... PYTHONPATH=src python -m trace_collect.cli ...
 ```
 
-*Note that other LLM providers (e.g., openrouter, dashscope) and web search providers (e.g., brave, duckduckgo) are also supported.*
-
----
+Other LLM providers such as OpenRouter and DashScope, and web search providers
+such as Brave and DuckDuckGo, are also supported.
 
 ## Repository Layout
 
-The codebase is organised around a few top-level directories. Here is how
-they map to the capabilities described above:
-
 ```text
 agent-sched-bench/
-├── configs/            # benchmark / system / trace_collect / sweep YAMLs
-├── demo/gantt_viewer/  # FastAPI backend + Solid.js frontend
-├── docs/               # detailed manual (you are reading the index)
-├── scripts/            # setup, download, smoke, and runner shells
-├── src/
-│   ├── agents/         # scaffolds + benchmark plugins
-│   ├── harness/        # runner, samplers, metrics, trace logger
-│   ├── llm_call/       # provider registry + OpenAI-compatible client
-│   └── trace_collect/  # CLI: collect / simulate / import / inspect / gantt-serve
-└── tests/
+|-- configs/            # benchmark, system, trace_collect, and sweep YAMLs
+|-- demo/gantt_viewer/  # deprecated FastAPI + Solid.js viewer
+|-- docs/               # documentation and current plans
+|-- scripts/            # setup, smoke, experiment, and analysis utilities
+|-- src/
+|   |-- agents/         # scaffolds and benchmark plugins
+|   |-- harness/        # runner, samplers, metrics, trace logger
+|   |-- llm_call/       # provider registry and OpenAI-compatible client
+|   |-- serving/        # serving launchers, KV policies, sparse attention
+|   `-- trace_collect/  # collect, simulate, import, inspect, visualization
+`-- tests/
 ```
 
----
+For a detailed map of `scripts/`, see [Script Inventory](docs/scripts.md).
 
 ## Entry Points
 
-If you are new to the project, the quickest way to get oriented is to work
-through the three entry points below — from passive inspection to full
-benchmark runs:
-
-Three progressively deeper ways to interact with this repo:
-
-1. **Inspect cases** — browse benchmark tasks without running an agent.
+1. **Inspect benchmark cases** without running an agent:
 
    ```bash
    python scripts/inspect_swebench.py --benchmark swe-bench-verified list
    ```
 
-   → [Case Inspection](docs/case-inspection.md)
+   See [Case Inspection](docs/case-inspection.md).
 
-2. **Run an agent interactively** — send a one-shot prompt to OpenClaw:
+2. **Run an agent interactively** with OpenClaw:
 
    ```bash
    PYTHONPATH=src python -m agents.openclaw \
@@ -124,10 +90,9 @@ Three progressively deeper ways to interact with this repo:
        --provider deepseek --model deepseek-chat --workspace ./workspace
    ```
 
-   → [Getting Started](docs/getting-started.md#end-to-end-walkthrough-arm-server)
+   See [Getting Started](docs/getting-started.md#end-to-end-walkthrough-arm-server).
 
-3. **Run a full benchmark** — execute the agent on many tasks with container
-   orchestration and trace collection:
+3. **Run a benchmark** with container orchestration and trace collection:
 
    ```bash
    PYTHONPATH=src python -m trace_collect.cli \
@@ -136,10 +101,9 @@ Three progressively deeper ways to interact with this repo:
        --mcp-config none --sample 2
    ```
 
-   → [Trace Collect](docs/trace-collect.md)
+   See [Trace Collect](docs/trace-collect.md).
 
-4. **Replay collected traces at scale** — simulate hundreds of concurrent
-   agents with controlled arrival patterns:
+4. **Replay collected traces at scale**:
 
    ```bash
    PYTHONPATH=src python -m trace_collect.cli simulate \
@@ -149,19 +113,15 @@ Three progressively deeper ways to interact with this repo:
        --arrival-mode poisson --arrival-rate-per-s 0.5
    ```
 
-   → [Simulate Trace Replay](docs/trace-collect.md#simulate-trace-replay)
-
----
+   See [Simulate Trace Replay](docs/trace-collect.md#simulate-trace-replay).
 
 ## Running Benchmarks
 
-All benchmarks use the same collection entry point. Replace the provider, model,
-and credentials. OpenClaw requires `--mcp-config`; pass `none` to acknowledge
-running without MCP. Traces land under the benchmark's `trace_root` (normally
-`traces/<benchmark>/`), grouped by model and timestamp.
+All benchmarks use the same collection entry point. Replace the provider,
+model, benchmark slug, and credentials as needed. OpenClaw requires
+`--mcp-config`; pass `none` to explicitly run without MCP.
 
 ```bash
-# Template — replace benchmark, provider, model
 PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek --model deepseek-chat \
     --benchmark <slug> --scaffold openclaw \
@@ -169,50 +129,33 @@ PYTHONPATH=src python -m trace_collect.cli \
     --sample 1
 ```
 
-Each benchmark has its own setup requirements (data download, repo cloning,
-image pulling). See [Benchmarks](docs/benchmarks.md) for per-benchmark setup
-commands, invocation examples, and runtime notes for SWE-Bench Verified,
-SWE-rebench, Terminal-Bench, Deep Research Bench, BrowseComp, and BFCL.
+Traces land under the benchmark's `trace_root`, normally `traces/<benchmark>/`,
+grouped by model and timestamp.
 
-For task selection (`--sample`, `--instance-ids`), concurrency, resuming,
-monitoring controls (`--resource-monitoring`, `--pmu-monitoring`,
-`--ksys-monitoring`), and per-tool profiling (`--tool-profiling`), see
-[Trace Collect](docs/trace-collect.md).
+Each benchmark has its own setup requirements. See
+[Benchmarks](docs/benchmarks.md) for SWE-Bench Verified, SWE-rebench,
+Terminal-Bench, Deep Research Bench, BrowseComp, and BFCL.
 
-For **simulate mode** (trace replay at scale), see the [Simulate
-section](docs/trace-collect.md#simulate-trace-replay) for flags like
-`--workers`, `--prep-concurrency`, and `--arrival-mode`.
-
----
+For task selection, concurrency, resuming, monitoring controls, and per-tool
+profiling, see [Trace Collect](docs/trace-collect.md). For simulate mode, see
+the [simulate section](docs/trace-collect.md#simulate-trace-replay).
 
 ## Documentation
 
-Each entry point above links to a dedicated page that goes into depth. The
-full set of documentation pages is listed below — pick the one that matches
-your current task:
-
-Detailed documentation lives under `docs/`:
-
 | Document | What it covers |
-|----------|---------------|
-| [Getting Started](docs/getting-started.md) | Dev environment, ARM server walkthrough, QEMU setup, troubleshooting |
+|---|---|
+| [Getting Started](docs/getting-started.md) | Dev environment, ARM walkthrough, QEMU setup, troubleshooting |
 | [Trace Collect](docs/trace-collect.md) | CLI reference, concurrent execution, recording internals, ksys metrics |
 | [Case Inspection](docs/case-inspection.md) | Browsing SWE-bench tasks without running an agent |
 | [Benchmarks](docs/benchmarks.md) | Registered benchmarks, BFCL, plugin architecture |
 | [Resource Measurement](docs/resource-measurement.md) | CPU/memory/disk/network/PMU sampling, per-tool profiler |
 | [VTune Profiling](docs/vtune-profiling.md) | Per-tool VTune setup, architecture, and output format |
-
----
+| [Script Inventory](docs/scripts.md) | Purpose and stability of scripts under `scripts/` |
 
 ## Supported Benchmarks
 
-The following benchmarks are currently registered. Each benchmark has a
-corresponding YAML config and Python plugin — see the [Benchmarks
-documentation](docs/benchmarks.md) for full details including scoring
-methodology and runtime requirements.
-
 | Slug | Type | Runtime | Scaffolds |
-|------|------|---------|-----------|
+|---|---|---|---|
 | `swe-bench-verified` | SWE patch | Docker | openclaw |
 | `swe-rebench` | SWE patch | Docker | openclaw |
 | `terminal-bench` | Terminal task | Docker | openclaw |
@@ -223,4 +166,4 @@ methodology and runtime requirements.
 | `bfcl-memory` | Function calling | Host | openclaw |
 | `bfcl-web-search` | Function calling | Host | openclaw |
 
-Full details → [Benchmarks](docs/benchmarks.md)
+Full details are in [Benchmarks](docs/benchmarks.md).

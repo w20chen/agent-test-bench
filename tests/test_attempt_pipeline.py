@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from harness.container_runtime import container_run_user_args  # noqa: E402
 from harness.container_image_prep import clear_image_cache  # noqa: E402
 from harness.disk_preflight import DiskSpaceError  # noqa: E402
 from trace_collect.attempt_pipeline import (  # noqa: E402
@@ -626,7 +627,7 @@ def test_run_attempt_passes_container_executable_to_fixed_image(
 @pytest.mark.parametrize(
     ("container_executable", "expected_user_args"),
     [
-        ("docker", ["--user", f"{os.getuid()}:{os.getgid()}"]),
+        ("docker", container_run_user_args("docker")),
         ("podman", ["--userns=keep-id"]),
     ],
 )

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("modal", reason="Modal follow-up tests require modal")
+
 from scripts.modal_workspace.agent_attention_modal_followup import (
     OUTPUT_PARENT,
     OUTPUT_PREFIX,

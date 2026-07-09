@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import platform
@@ -19,6 +18,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from agents.openclaw.runtime_deps import OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on non-POSIX hosts.
+    fcntl = None  # type: ignore[assignment]
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -741,6 +745,11 @@ def _bootstrap_lock() -> Iterator[None]:
     from simulate ``--workers``) from racing on ``get-pip.py`` and corrupting
     the shared ``.pyuserbase`` directory.
     """
+    if fcntl is None:
+        raise RuntimeError(
+            "task-container bootstrap locking requires POSIX fcntl; "
+            "run bootstrap-enabled task containers on Linux."
+        )
     lock_dir = _SHARED_BOOTSTRAP_CACHE
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".bootstrap.lock"

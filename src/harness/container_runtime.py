@@ -9,6 +9,8 @@ def container_run_user_args(container_executable: str) -> list[str]:
     """Return runtime-specific user mapping args for ``run`` commands."""
     if container_executable == "podman":
         return ["--userns=keep-id"]
+    if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
+        return []
     return ["--user", f"{os.getuid()}:{os.getgid()}"]
 
 

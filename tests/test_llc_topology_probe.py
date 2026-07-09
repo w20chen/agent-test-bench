@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ from scripts.experiments.probe_llc_topology import (
 )
 from scripts.experiments.run_kunpeng_llc_replay import _build_command
 from scripts.experiments.run_kunpeng_llc_replay import run_replay
+from scripts.experiments.run_kunpeng_llc_scaling import parse_agent_counts
+from scripts.experiments.run_kunpeng_llc_scaling import run_scaling
 
 
 def _write(path: Path, text: str) -> None:
@@ -304,3 +307,136 @@ def test_replay_dry_run_supports_single_agent_without_shared_cpuset() -> None:
     assert by_placement["compact_llc"].command.count("--agent-cpuset") == 1
     assert "--agent-cpuset" not in by_placement["os_default"].command
     assert by_placement["compact_llc"].agent_assignments[0]["cpuset_cpus"] == "0"
+
+
+def test_parse_agent_counts_deduplicates_and_rejects_invalid() -> None:
+    assert parse_agent_counts("1,2,2,4,8") == [1, 2, 4, 8]
+    with pytest.raises(ValueError, match="positive"):
+        parse_agent_counts("1,0")
+    with pytest.raises(ValueError, match="at least one"):
+        parse_agent_counts(",")
+
+
+def test_scaling_dry_run_uses_topology_derived_agent_cpusets() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "20-35\n")
+        for cpu in range(20, 36):
+            _cpu(root, cpu, shared="20-35", core_id=(cpu - 20) // 2)
+
+        records = run_scaling(
+            argparse.Namespace(
+                source_trace=Path("trace.jsonl"),
+                task_source=Path("tasks.json"),
+                output_root=tmp_path / "scaling",
+                sys_cpu_root=root,
+                agent_counts="1,2,4,8",
+                placements="compact_llc",
+                cluster_size=4,
+                container="docker",
+                replay_speed=1.0,
+                network_mode="none",
+                command_timeout=600.0,
+                workers=1,
+                prep_concurrency=1,
+                resource_monitoring="on",
+                ksys_monitoring="off",
+                dry_run=True,
+                simulate_args=[],
+            )
+        )
+
+    by_count = {record.agent_count: record for record in records}
+    assert set(by_count) == {1, 2, 4, 8}
+    assert by_count[1].cpus == [20]
+    assert by_count[2].cpus == [20, 22]
+    assert by_count[4].cpus == [20, 22, 24, 26]
+    assert by_count[8].cpus == [20, 22, 24, 26, 28, 30, 32, 34]
+    for count, record in by_count.items():
+        assert record.command.count("--agent-cpuset") == count
+        assert record.command[record.command.index("--num-agents") + 1] == str(count)
+        assert record.skipped is True
+    assert "0" not in [assignment["cpuset_cpus"] for assignment in by_count[8].agent_assignments]
+
+
+def test_scaling_requested_unavailable_placement_fails_clearly() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-3\n")
+        for cpu in range(4):
+            _cpu(root, cpu, shared="0-3")
+
+        with pytest.raises(ValueError, match="unavailable for 1 agents"):
+            run_scaling(
+                argparse.Namespace(
+                    source_trace=Path("trace.jsonl"),
+                    task_source=Path("tasks.json"),
+                    output_root=tmp_path / "scaling",
+                    sys_cpu_root=root,
+                    agent_counts="1",
+                    placements="spread_llc",
+                    cluster_size=4,
+                    container="docker",
+                    replay_speed=1.0,
+                    network_mode="none",
+                    command_timeout=600.0,
+                    workers=1,
+                    prep_concurrency=1,
+                    resource_monitoring="on",
+                    ksys_monitoring="off",
+                    dry_run=True,
+                    simulate_args=[],
+                )
+            )
+
+
+def test_scaling_non_dry_run_writes_partial_manifest_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-3\n")
+        for cpu in range(4):
+            _cpu(root, cpu, shared="0-3")
+        source_trace = tmp_path / "trace.jsonl"
+        task_source = tmp_path / "tasks.json"
+        source_trace.write_text("", encoding="utf-8")
+        task_source.write_text("[]\n", encoding="utf-8")
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 7)
+
+        monkeypatch.setattr(
+            "scripts.experiments.run_kunpeng_llc_scaling.subprocess.run",
+            fake_run,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_scaling(
+                argparse.Namespace(
+                    source_trace=source_trace,
+                    task_source=task_source,
+                    output_root=tmp_path / "scaling",
+                    sys_cpu_root=root,
+                    agent_counts="1",
+                    placements="compact_llc",
+                    cluster_size=4,
+                    container="docker",
+                    replay_speed=1.0,
+                    network_mode="none",
+                    command_timeout=600.0,
+                    workers=1,
+                    prep_concurrency=1,
+                    resource_monitoring="on",
+                    ksys_monitoring="off",
+                    dry_run=False,
+                    simulate_args=[],
+                )
+            )
+
+        assert exc_info.value.code == 7
+        manifests = list((tmp_path / "scaling").glob("*/experiment_manifest.json"))
+        assert len(manifests) == 1
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        assert manifest["runs"][0]["returncode"] == 7
+        assert manifest["runs"][0]["skipped"] is False
