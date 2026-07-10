@@ -146,11 +146,13 @@ the [simulate section](docs/trace-collect.md#simulate-trace-replay).
 |---|---|
 | [Getting Started](docs/getting-started.md) | Dev environment, ARM walkthrough, QEMU setup, troubleshooting |
 | [Trace Collect](docs/trace-collect.md) | CLI reference, concurrent execution, recording internals, ksys metrics |
+| [Task Container Environment](docs/task-container-environment.md) | Container startup, OpenClaw bootstrap, pip shims, and benchmark boundaries |
 | [Case Inspection](docs/case-inspection.md) | Browsing SWE-bench tasks without running an agent |
 | [Benchmarks](docs/benchmarks.md) | Registered benchmarks, BFCL, plugin architecture |
 | [Resource Measurement](docs/resource-measurement.md) | CPU/memory/disk/network/PMU sampling, per-tool profiler |
 | [VTune Profiling](docs/vtune-profiling.md) | Per-tool VTune setup, architecture, and output format |
 | [Script Inventory](docs/scripts.md) | Purpose and stability of scripts under `scripts/` |
+| [Kunpeng LLC Experiments](docs/kunpeng-llc-experiments.md) | LLC-related experiments on Kunpeng |
 
 ## Supported Benchmarks
 
