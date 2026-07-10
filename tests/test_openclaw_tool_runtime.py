@@ -4,7 +4,11 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from trace_collect.openclaw_tools import ContainerAgent, execute_trace_tool
+from trace_collect.openclaw_tools import (
+    ContainerAgent,
+    _REPLAY_AGENT_SCRIPT,
+    execute_trace_tool,
+)
 
 
 def _nested(tool_name: str, payload: dict) -> str:
@@ -215,3 +219,50 @@ def test_container_agent_start_disables_user_site_for_controller(monkeypatch) ->
     assert "-e" in args
     assert "PYTHONPATH=/deps:/repo/src:/repo" in args
     assert "PYTHONNOUSERSITE=1" in args
+
+
+def test_replay_exec_env_prepends_task_userbase_bin() -> None:
+    assert 'task_bin = os.path.join(env["PYTHONUSERBASE"], "bin")' in _REPLAY_AGENT_SCRIPT
+    assert 'env["PATH"] = task_bin + os.pathsep + env.get("PATH", "")' in _REPLAY_AGENT_SCRIPT
+
+
+def test_replay_exec_env_isolates_runtime_and_prepends_task_bin(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+    script_globals: dict[str, object] = {}
+    exec(_REPLAY_AGENT_SCRIPT.split("signal.signal", 1)[0], script_globals)
+
+    def fake_run(*args, **kwargs):
+        seen["env"] = kwargs["env"]
+
+        return SimpleNamespace(
+            stdout="ok\n",
+            stderr="",
+            returncode=0,
+        )
+
+    subprocess_module = script_globals["subprocess"]
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+    os_module = script_globals["os"]
+    monkeypatch.setitem(os_module.environ, "PYTHONPATH", "/runtime/pydeps:/repo/src")
+    monkeypatch.setitem(os_module.environ, "PYTHONNOUSERSITE", "1")
+    monkeypatch.setitem(
+        os_module.environ,
+        "OPENCLAW_TASK_USERBASE",
+        "/tmp/openclaw-task-userbase",
+    )
+    monkeypatch.setitem(os_module.environ, "PATH", "/usr/local/bin:/usr/bin")
+
+    exec_command = script_globals["_exec_command"]
+    output, rc, timed_out = exec_command("echo ok", 10)
+
+    assert output == "ok"
+    assert rc == 0
+    assert timed_out is False
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert "PYTHONPATH" not in env
+    assert "PYTHONNOUSERSITE" not in env
+    assert env["PYTHONUSERBASE"] == "/tmp/openclaw-task-userbase"
+    task_bin = os_module.path.join("/tmp/openclaw-task-userbase", "bin")
+    assert env["PATH"].startswith(task_bin)
+    assert env["PATH"].count(task_bin) == 1

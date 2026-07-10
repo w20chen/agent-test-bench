@@ -202,6 +202,10 @@ def _exec_command(cmd, timeout, cwd="/testbed"):
         "OPENCLAW_TASK_USERBASE",
         "/tmp/openclaw-task-userbase",
     )
+    task_bin = os.path.join(env["PYTHONUSERBASE"], "bin")
+    path_entries = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    if task_bin not in path_entries:
+        env["PATH"] = task_bin + os.pathsep + env.get("PATH", "")
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd,
                            capture_output=True, text=True, timeout=timeout, env=env)

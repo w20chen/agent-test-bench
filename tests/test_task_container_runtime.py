@@ -19,6 +19,7 @@ from trace_collect.runtime.task_container import (
     _bootstrap_site_dir_for,
     bootstrap_task_container_python,
     current_container_python_runtime,
+    ensure_task_container_tool_shims,
     preflight_task_container_runtime,
     project_mount_args,
     resolve_task_container_exec_config,
@@ -33,6 +34,13 @@ def _disable_bootstrap_lock(monkeypatch) -> None:
         yield
 
     monkeypatch.setattr("trace_collect.runtime.task_container._bootstrap_lock", fake_lock)
+
+
+def _disable_task_tool_shims(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container.ensure_task_container_tool_shims",
+        lambda **_kwargs: None,
+    )
 
 
 def test_project_mount_args_include_attempt_dir_and_repo(
@@ -211,6 +219,7 @@ def test_bootstrap_task_container_python_uses_resolved_runtime(
         tmp_path / "bootstrap",
     )
     _disable_bootstrap_lock(monkeypatch)
+    _disable_task_tool_shims(monkeypatch)
     exec_config = TaskContainerExecConfig(
         runtime="/opt/conda/envs/ML/bin/python",
         pythonpath=f"{tmp_path}/pydeps:/repo/src:/repo",
@@ -289,6 +298,7 @@ def test_bootstrap_task_container_python_retries_transient_get_pip_failures(
         tmp_path / "bootstrap",
     )
     _disable_bootstrap_lock(monkeypatch)
+    _disable_task_tool_shims(monkeypatch)
     exec_config = TaskContainerExecConfig(
         runtime="/usr/bin/python3",
         pythonpath=f"{tmp_path}/pydeps:/repo/src:/repo",
@@ -361,6 +371,7 @@ def test_bootstrap_task_container_python_does_not_retry_http_error(
         tmp_path / "bootstrap",
     )
     _disable_bootstrap_lock(monkeypatch)
+    _disable_task_tool_shims(monkeypatch)
     exec_config = TaskContainerExecConfig(
         runtime="/usr/bin/python3",
         pythonpath=f"{tmp_path}/pydeps:/repo/src:/repo",
@@ -411,6 +422,7 @@ def test_bootstrap_task_container_python_rebuilds_when_marker_requirements_chang
         tmp_path / "bootstrap",
     )
     _disable_bootstrap_lock(monkeypatch)
+    _disable_task_tool_shims(monkeypatch)
     requirements = OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS
     final_site = _bootstrap_site_dir_for(
         arch="amd64",
@@ -529,6 +541,7 @@ def test_bootstrap_task_container_python_rebuilds_when_import_check_fails(
         tmp_path / "bootstrap",
     )
     _disable_bootstrap_lock(monkeypatch)
+    _disable_task_tool_shims(monkeypatch)
     final_site = _bootstrap_site_dir_for(
         arch="amd64",
         python_cache_tag="cpython-312",
@@ -607,6 +620,189 @@ def test_bootstrap_task_container_python_rebuilds_when_import_check_fails(
     assert resolved.bootstrap_site_dir.name.startswith(f"{final_site.name}.rebuild-")
     assert stale_file.exists()
     assert len(seen["runs"]) == 3
+
+
+def test_ensure_task_container_tool_shims_only_adds_pip_aliases(monkeypatch) -> None:
+    exec_config = TaskContainerExecConfig(
+        runtime="/usr/local/bin/python",
+        pythonpath="/deps:/repo/src:/repo",
+        start_extra_args=(),
+        bootstrap=True,
+        bootstrap_site_dir=Path("/tmp/pydeps"),
+        image_platform="linux/amd64",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("trace_collect.runtime.task_container.subprocess.run", fake_run)
+
+    ensure_task_container_tool_shims(
+        container_id="cid-1",
+        exec_config=exec_config,
+        container_executable="docker",
+    )
+
+    cmd = seen["cmd"]
+    assert isinstance(cmd, list)
+    assert "-e" in cmd
+    assert "OPENCLAW_TASK_USERBASE=/tmp/openclaw-task-userbase" in cmd
+    assert cmd[-3:] == ["/usr/local/bin/python", "-c", cmd[-1]]
+    script = str(cmd[-1])
+    assert "pip" in script
+    assert "pip3" in script
+    assert 'exec /usr/local/bin/python -m pip "$@"' in script
+    assert '"pytest"' not in script
+    assert '"python"' not in script
+    assert '"python3"' not in script
+
+
+def test_bootstrap_task_container_python_installs_shims_on_cache_hit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container._SHARED_BOOTSTRAP_CACHE",
+        tmp_path / "bootstrap",
+    )
+    requirements = OPENCLAW_CONTAINER_RUNTIME_REQUIREMENTS
+    final_site = _bootstrap_site_dir_for(
+        arch="amd64",
+        python_cache_tag="cpython-312",
+        requirements=requirements,
+    )
+    final_site.mkdir(parents=True, exist_ok=True)
+    marker = final_site / ".bootstrap-ready.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "requirements": list(requirements),
+                "arch": "amd64",
+                "packages": [],
+                "userbase_packages": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    exec_config = TaskContainerExecConfig(
+        runtime="/usr/local/bin/python",
+        pythonpath="/old:/repo/src:/repo",
+        start_extra_args=(),
+        bootstrap=True,
+        bootstrap_site_dir=tmp_path / "placeholder",
+        image_platform="linux/amd64",
+        python_cache_tag="cpython-312",
+    )
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container._bootstrap_cache_imports_ok",
+        lambda **_kwargs: True,
+    )
+
+    def fake_shims(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container.ensure_task_container_tool_shims",
+        fake_shims,
+    )
+
+    resolved = bootstrap_task_container_python(
+        container_id="cid-1",
+        exec_config=exec_config,
+        container_executable="docker",
+    )
+
+    assert resolved.bootstrap_site_dir == final_site
+    assert seen["container_id"] == "cid-1"
+    assert seen["container_executable"] == "docker"
+    shim_config = seen["exec_config"]
+    assert isinstance(shim_config, TaskContainerExecConfig)
+    assert shim_config.runtime == "/usr/local/bin/python"
+
+
+def test_bootstrap_task_container_python_installs_shims_after_fresh_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container._SHARED_BOOTSTRAP_CACHE",
+        tmp_path / "bootstrap",
+    )
+    _disable_bootstrap_lock(monkeypatch)
+    exec_config = TaskContainerExecConfig(
+        runtime="/usr/local/bin/python",
+        pythonpath=f"{tmp_path}/pydeps:/repo/src:/repo",
+        start_extra_args=(),
+        bootstrap=True,
+        bootstrap_site_dir=tmp_path / "pydeps",
+        image_platform="linux/amd64",
+        python_cache_tag="cpython-312",
+    )
+    seen: dict[str, object] = {"runs": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b"print('ok')\n"
+
+    def fake_urlopen(url: str, timeout: int):
+        del url, timeout
+        return FakeResponse()
+
+    def fake_run(*args, **kwargs):
+        seen["runs"] = int(seen["runs"]) + 1
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    def fake_shims(**kwargs):
+        seen["shim_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container.urllib.request.urlopen",
+        fake_urlopen,
+    )
+    monkeypatch.setattr("trace_collect.runtime.task_container.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "trace_collect.runtime.task_container.ensure_task_container_tool_shims",
+        fake_shims,
+    )
+
+    resolved = bootstrap_task_container_python(
+        container_id="cid-1",
+        exec_config=exec_config,
+        container_executable="docker",
+    )
+
+    assert int(seen["runs"]) == 1
+    shim_kwargs = seen["shim_kwargs"]
+    assert isinstance(shim_kwargs, dict)
+    assert shim_kwargs["container_id"] == "cid-1"
+    assert shim_kwargs["container_executable"] == "docker"
+    shim_config = shim_kwargs["exec_config"]
+    assert isinstance(shim_config, TaskContainerExecConfig)
+    assert shim_config.runtime == "/usr/local/bin/python"
+    assert resolved.bootstrap_site_dir is not None
+    assert str(resolved.bootstrap_site_dir) in resolved.pythonpath
 
 
 def test_preflight_task_container_runtime_reads_runtime_proof(

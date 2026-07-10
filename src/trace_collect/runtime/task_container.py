@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import platform
+import shlex
 import ssl
 import subprocess
 import shutil
@@ -31,6 +32,7 @@ RUNTIME_ROOTNAME = "_task_container_runtime"
 _REDACTED_SECRET = "***REDACTED***"
 _DEFAULT_RUNTIME_PYTHONPATH = f"{REPO_ROOT / 'src'}:{REPO_ROOT}"
 _CONTAINER_SYSTEM_PYTHON = "/usr/bin/python3"
+_TASK_TOOL_USERBASE = "/tmp/openclaw-task-userbase"
 _DEFAULT_PIP_INDEX_URL = "https://pypi.org/simple"
 _SHARED_BOOTSTRAP_CACHE = Path.home() / ".cache" / "task-container-bootstrap"
 _GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
@@ -625,6 +627,71 @@ exit 1
     )
 
 
+def ensure_task_container_tool_shims(
+    *,
+    container_id: str,
+    exec_config: TaskContainerExecConfig,
+    container_executable: str,
+    cwd: str = "/testbed",
+    task_userbase: str = _TASK_TOOL_USERBASE,
+) -> None:
+    """Install task-local pip command shims for the resolved container Python.
+
+    The agent often tries bare ``pip`` or ``pip3`` before it discovers
+    ``python -m pip``.  Keep those entries task-local so they point at the
+    resolved in-container Python without exposing the shared bootstrap
+    pip/userbase on PATH.  Do not provide pytest or Python shims here: the
+    benchmark image defines the available Python commands, and project test
+    dependencies should still be installed by the agent or project tooling.
+    """
+
+    runtime = exec_config.runtime
+    quoted_runtime = shlex.quote(runtime)
+    shims = {
+        "pip": f"#!/bin/sh\nexec {quoted_runtime} -m pip \"$@\"\n",
+        "pip3": f"#!/bin/sh\nexec {quoted_runtime} -m pip \"$@\"\n",
+    }
+    script = f"""
+import os
+import pathlib
+import stat
+
+bin_dir = pathlib.Path(os.environ.get("OPENCLAW_TASK_USERBASE", {task_userbase!r})) / "bin"
+bin_dir.mkdir(parents=True, exist_ok=True)
+shims = {shims!r}
+for name, content in shims.items():
+    path = bin_dir / name
+    path.write_text(content, encoding="utf-8")
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+"""
+    result = subprocess.run(
+        [
+            container_executable,
+            "exec",
+            "-i",
+            "-w",
+            cwd,
+            "-e",
+            f"OPENCLAW_TASK_USERBASE={task_userbase}",
+            container_id,
+            runtime,
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        details = _format_probe_failure_details(result)
+        raise RuntimeError(
+            "task-container tool shim setup failed"
+            + (f": {details}" if details else "")
+        )
+
+
 def write_task_container_request(
     *,
     attempt_dir: Path,
@@ -954,6 +1021,12 @@ def bootstrap_task_container_python(
             file=sys.stderr,
             flush=True,
         )
+        ensure_task_container_tool_shims(
+            container_id=container_id,
+            exec_config=exec_config,
+            container_executable=container_executable,
+            cwd=cwd,
+        )
         return exec_config
 
     # Serialise access to the shared bootstrap cache so concurrent
@@ -977,6 +1050,12 @@ def bootstrap_task_container_python(
                 f"[bootstrap] shared cache hit ({arch}, after lock): {marker}",
                 file=sys.stderr,
                 flush=True,
+            )
+            ensure_task_container_tool_shims(
+                container_id=container_id,
+                exec_config=exec_config,
+                container_executable=container_executable,
+                cwd=cwd,
             )
             return exec_config
 
@@ -1164,4 +1243,10 @@ _log("bootstrap complete")
                 "task-container python bootstrap failed: "
                 f"{result.stderr.strip()}"
             )
+    ensure_task_container_tool_shims(
+        container_id=container_id,
+        exec_config=exec_config,
+        container_executable=container_executable,
+        cwd=cwd,
+    )
     return exec_config
