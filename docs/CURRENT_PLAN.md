@@ -1,4 +1,71 @@
-# Current Plan: Kunpeng LLC Slice Validation Scripts
+# Current Plan: Backward-Compatible Exec Classification
+
+## Goal
+
+Improve single-winner `exec-*` classification for previously unseen terminal
+tools without changing the trace schema or breaking existing known-command
+classification.
+
+## Guardrails
+
+- Keep the single `tool_name = exec-<winner>` representation.
+- Preserve every existing known-command classification and priority unless a
+  failing regression test demonstrates that it is incorrect.
+- Preserve preclassified `exec-*` names; repeated classification must be
+  idempotent.
+- Derive unknown labels only from the executable position, never from arbitrary
+  arguments.
+- Normalize unknown executables to a safe basename and strict lowercase slug;
+  otherwise retain plain `exec`.
+- Do not add benchmark-specific commands or tune priorities using held-out
+  benchmark outcomes.
+- Do not introduce a new dependency without explicit approval.
+
+## Implementation Phases
+
+1. Add regression tests for legacy behavior, safe unknown executable labels,
+   invalid tokens, command chains/pipelines, and idempotence.
+2. Make the smallest classifier changes needed to satisfy those tests, while
+   retaining the existing public functions and trace schema.
+3. Run the focused classifier tests and relevant trace logger/import/rewrite
+   tests.
+4. Pass the mandatory independent review gate; fix all critical, major, and
+   minor findings and re-run verification.
+5. Replace/remove the experimental v2 file only if explicitly in scope and
+   safe after review; otherwise leave it untracked for the user to compare.
+
+## Checkpoint
+
+- Phase 1 complete: added compatibility, open-world executable, malformed
+  input, compound-command, and idempotence tests.
+- Phase 2 complete: implemented conservative command-position parsing, safe
+  unknown executable slugs, general database/data-analysis categories, and
+  preservation of existing `exec-*` names.
+- Phase 3 complete:
+  - `python -m py_compile src/trace_collect/exec_classifier.py tests/test_exec_classifier.py`
+    passed.
+  - Final focused classifier suite passed: 172 tests.
+  - Trace logger, Claude Code import, and attempt pipeline integration suite
+    passed: 43 tests, with 1 existing skip.
+- Phase 4 complete: independent review and all re-review iterations are clean.
+- Phase 5 complete: the untracked experimental `exec_classifier_v2.py` was
+  deliberately left untouched for the user; it is not imported by the code.
+
+## Independent Review Gate
+
+- Initial review found wrapper/`xargs` operand parsing, `command -v/-V`, and
+  shell-control keyword issues; all were fixed with regression tests.
+- Re-review found missing documented wrapper aliases and incorrect GNU `xargs`
+  optional-argument boundaries; all were fixed and tested across bare,
+  attached, equals, and whitespace-separated forms.
+- Final independent re-review found no critical, major, or minor issues.
+- Research-integrity review found no benchmark-specific tuning, oracle
+  leakage, or unexplained dataset coupling.
+- Final `git diff --check` passed with line-ending warnings only.
+
+---
+
+# Archived Plan: Kunpeng LLC Slice Validation Scripts
 
 ## Goal
 

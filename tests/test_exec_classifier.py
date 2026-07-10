@@ -121,8 +121,8 @@ from trace_collect.exec_classifier import (
         ("echo pytest results: all good", "exec-echo"),
         ('echo "done"', "exec-echo"),
         # ── Unrecognised commands stay as exec ────────────────────────
-        ("my_custom_tool --flag", "exec"),
-        ("/usr/local/bin/custom-script arg1", "exec"),
+        ("my_custom_tool --flag", "exec-my_custom_tool"),
+        ("/usr/local/bin/custom-script arg1", "exec-custom-script"),
         # ── env-var assignments ───────────────────────────────────────
         ("VAR=val grep pattern file", "exec-grep"),
         ("FOO=bar BAZ=qux python3 -m pytest", "exec-pytest"),
@@ -131,6 +131,174 @@ from trace_collect.exec_classifier import (
 def test_classify_exec_tool_name(command: str, expected: str) -> None:
     result = classify_exec_tool_name("exec", {"command": command})
     assert result == expected, f"Command: {command!r}"
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("Rscript analysis.R", "exec-r"),
+        ("spark-submit job.py", "exec-spark"),
+        ("jupyter nbconvert report.ipynb", "exec-jupyter"),
+        ("sqlite3 results.db", "exec-sqlite3"),
+        ("duckdb results.db", "exec-duckdb"),
+        ("psql research", "exec-psql"),
+        ("sha256sum artifact.tar", "exec-checksum"),
+        ("base64 dataset.bin", "exec-base64"),
+    ],
+)
+def test_general_workload_commands(command: str, expected: str) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == expected
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("./custom-checker --flag", "exec-custom-checker"),
+        ("/opt/acme/bin/analyze_data input", "exec-analyze_data"),
+        ("CustomTool run", "exec-customtool"),
+    ],
+)
+def test_unknown_executable_is_safely_normalised(
+    command: str,
+    expected: str,
+) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "$TOOL --flag",
+        "(custom-tool)",
+        "/",
+        "x" * 65,
+        "'unterminated",
+    ],
+)
+def test_unsafe_or_ambiguous_executable_stays_exec(command: str) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == "exec"
+
+
+def test_unknown_command_arguments_are_not_treated_as_executables() -> None:
+    assert (
+        classify_exec_tool_name("exec", {"command": "custom --format file"})
+        == "exec-custom"
+    )
+
+
+def test_known_primary_action_beats_unknown_low_priority_command() -> None:
+    assert (
+        classify_exec_tool_name("exec", {"command": "custom_setup && psql research"})
+        == "exec-psql"
+    )
+
+
+def test_existing_exec_classification_is_idempotent() -> None:
+    assert (
+        classify_exec_tool_name("exec-grep", {"command": "python script.py"})
+        == "exec-grep"
+    )
+
+
+def test_command_builtin_query_does_not_execute_operand() -> None:
+    assert (
+        classify_exec_tool_name("exec", {"command": "command -v custom-tool"})
+        == "exec"
+    )
+
+
+@pytest.mark.parametrize("option", ["", "-p ", "-- "])
+def test_command_builtin_execution_forms_are_unwrapped(option: str) -> None:
+    assert (
+        classify_exec_tool_name("exec", {"command": f"command {option}custom-tool"})
+        == "exec-custom-tool"
+    )
+
+
+def test_xargs_python_module_uses_module_category() -> None:
+    assert (
+        classify_exec_tool_name("exec", {"command": "xargs python3 -m pytest"})
+        == "exec-pytest"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sudo -u root grep pattern file",
+        "sudo --user root grep pattern file",
+        "sudo --user=root grep pattern file",
+        "sudo -i grep pattern file",
+        "sudo -s grep pattern file",
+        "sudo --login grep pattern file",
+        "sudo --shell grep pattern file",
+        "chroot /mnt grep pattern file",
+        "stdbuf -o L grep pattern file",
+        "timeout -k 5 120 grep pattern file",
+        "timeout -v 120 grep pattern file",
+        "nice -10 grep pattern file",
+        "flock /tmp/research.lock grep pattern file",
+    ],
+)
+def test_wrapper_option_operands_are_not_commands(command: str) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == "exec-grep"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs -n 1 grep",
+        "xargs -n1 grep",
+        "xargs -a inputs.txt grep",
+        "xargs --arg-file=inputs.txt grep",
+        "xargs -I {} grep",
+        "xargs --max-procs 4 grep",
+        "xargs -e grep",
+        "xargs -i grep",
+        "xargs -l grep",
+        "xargs -eEND grep",
+        "xargs -i{} grep",
+        "xargs -l1 grep",
+        "xargs --eof grep",
+        "xargs --replace grep",
+        "xargs --max-lines grep",
+        "xargs --eof=END grep",
+        "xargs --replace={} grep",
+        "xargs --max-lines=1 grep",
+    ],
+)
+def test_xargs_option_operands_are_not_commands(command: str) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == "exec-grep"
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("xargs -e END grep", "exec-end"),
+        ("xargs -i {} grep", "exec"),
+        ("xargs -l 1 grep", "exec-1"),
+        ("xargs --eof END grep", "exec-end"),
+        ("xargs --replace {} grep", "exec"),
+        ("xargs --max-lines 1 grep", "exec-1"),
+    ],
+)
+def test_xargs_optional_alias_values_must_be_attached(
+    command: str,
+    expected: str,
+) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if grep pattern file; then echo found; fi",
+        "for item in a b; do echo $item; done",
+        "while grep pattern file; do sleep 1; done",
+    ],
+)
+def test_shell_control_flow_is_classified_conservatively(command: str) -> None:
+    assert classify_exec_tool_name("exec", {"command": command}) == "exec"
 
 
 # ── Pass-through (non-exec tool names) ─────────────────────────────────

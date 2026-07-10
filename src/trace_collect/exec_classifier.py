@@ -2,16 +2,16 @@
 
 When an agent runs ``exec`` with a shell command like ``grep -r foo .``,
 this module extracts the base command (``grep``) and produces a
-categorised tool name such as ``exec-grep``.  Unmatched commands stay as
-plain ``exec`` so the trace retains the original label rather than
-losing information.
+categorised tool name such as ``exec-grep``.  Safely normalised unknown
+executables keep their identity (for example ``custom_check`` becomes
+``exec-custom_check``); ambiguous inputs stay as plain ``exec``.
 
 Strategy
 --------
-1. Parse the first whitespace-delimited token from the command string.
-2. Strip common prefixes (env-var assignments, ``sudo``, path prefixes).
-3. Look up the token in a static mapping of known commands.
-4. Return ``exec-<category>`` on match, ``"exec"`` otherwise.
+1. Split shell segments while respecting quotes.
+2. Parse the executable position and strip wrappers and path prefixes.
+3. Look up known commands and select one winner with stable priorities.
+4. Return a known category or a strictly validated executable basename.
 
 Adding a new command
 --------------------
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from typing import Any
 
 # Map base-command → category slug.
@@ -76,6 +77,8 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
     "diff": "diff",
     "patch": "diff",
     "xargs": "xargs",
+    # Encoding / decoding
+    "base64": "base64",
     # Shell builtins / scripting
     "echo": "echo",
     "printf": "echo",
@@ -97,6 +100,16 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
     "python3.11": "python",
     "python3.10": "python",
     "python3.9": "python",
+    # R ecosystem
+    "R": "r",
+    "Rscript": "r",
+    # JVM / distributed data tools
+    "scala": "scala",
+    "scalac": "scala",
+    "sbt": "sbt",
+    "spark-submit": "spark",
+    "spark-shell": "spark",
+    "pyspark": "spark",
     # Node / JS
     "node": "node",
     "npm": "npm",
@@ -108,6 +121,8 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
     # Network
     "curl": "curl",
     "wget": "curl",
+    # Notebook / interactive
+    "jupyter": "jupyter",
     # Package managers
     "apt": "apt",
     "apt-get": "apt",
@@ -142,12 +157,27 @@ _COMMAND_CATEGORY_MAP: dict[str, str] = {
     "g++": "gcc",
     "clang": "gcc",
     "clang++": "gcc",
+    # Database
+    "sqlite3": "sqlite3",
+    "duckdb": "duckdb",
+    "psql": "psql",
+    "mysql": "mysql",
+    "mariadb": "mariadb",
+    "mongosh": "mongosh",
+    "redis-cli": "redis-cli",
     # Archive
     "tar": "tar",
     "gzip": "tar",
     "gunzip": "tar",
     "zip": "tar",
     "unzip": "tar",
+    # Inspection / checksums
+    "xxd": "xxd",
+    "md5sum": "checksum",
+    "sha1sum": "checksum",
+    "sha256sum": "checksum",
+    "sha512sum": "checksum",
+    "file": "file",
     # Misc
     "true": "true",
     "false": "true",
@@ -210,6 +240,22 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "wget": 3,
     "su": 3,
     "sudo": 3,
+    "R": 3,
+    "Rscript": 3,
+    "scala": 3,
+    "scalac": 3,
+    "sbt": 3,
+    "spark-submit": 4,
+    "spark-shell": 4,
+    "pyspark": 4,
+    "jupyter": 3,
+    "sqlite3": 3,
+    "duckdb": 3,
+    "psql": 3,
+    "mysql": 3,
+    "mariadb": 3,
+    "mongosh": 3,
+    "redis-cli": 3,
     # Tier 2 — real work (search, transform, file ops, system)
     "grep": 2,
     "egrep": 2,
@@ -250,6 +296,13 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "whereis": 2,
     "man": 2,
     "watch": 2,
+    "xxd": 2,
+    "md5sum": 2,
+    "sha1sum": 2,
+    "sha256sum": 2,
+    "sha512sum": 2,
+    "file": 2,
+    "base64": 2,
     # Tier 1 — output post-processing / navigation / trivial / setup
     "xargs": 1,  # plumbing — the command it runs is the real action
     "head": 1,
@@ -289,23 +342,227 @@ _COMMAND_PRIORITY: dict[str, int] = {
     "info": 1,
 }
 
-# Regex to strip leading env-var assignments (VAR=val VAR2=val2 ...).
-_ENV_ASSIGN_RE = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S+)\s*)+")
+# Unknown executables must become bounded identifiers, not raw shell tokens.
+_SAFE_EXECUTABLE_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
+_MAX_EXECUTABLE_SLUG_LENGTH = 64
+_ENV_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
+_SHELL_RESERVED_WORDS = frozenset({
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do",
+    "done", "case", "esac", "in", "function", "select", "coproc",
+})
 
-# Regex to strip leading `sudo` / `nice` / `nohup` / etc.
-# Also captures ``timeout <duration>`` (e.g. ``timeout 120``) as a single
-# preamble unit so the duration argument doesn't become the "command" token.
-_PREAMBLE_RE = re.compile(
-    r"^\s*(?:sudo|nice|nohup|ionice|chroot|flock|stdbuf|timeout(?:\s+\d+[smhd]?)?)\s+"
-)
+# Wrapper syntax is parsed conservatively. Unknown options leave the wrapper as
+# the classified executable rather than treating an option operand as a tool.
+_WRAPPER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({
+        "-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h",
+        "--host", "-p", "--prompt", "-R", "--chroot", "-r", "--role",
+        "-t", "--type", "-u", "--user",
+    }),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
+    "chroot": frozenset({"--userspec", "--groups"}),
+    "flock": frozenset({"-w", "--wait", "-E", "--conflict-exit-code"}),
+    "stdbuf": frozenset({
+        "-i", "--input", "-o", "--output", "-e", "--error",
+    }),
+    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+}
+_WRAPPER_FLAG_OPTIONS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({
+        "-A", "-b", "-E", "-H", "-i", "--login", "-K", "-k", "-n",
+        "-P", "-S", "-s", "--shell",
+    }),
+    "nice": frozenset(),
+    "nohup": frozenset(),
+    "ionice": frozenset({"-t", "--ignore"}),
+    "chroot": frozenset({"--skip-chdir"}),
+    "flock": frozenset({
+        "-s", "--shared", "-x", "--exclusive", "-u", "--unlock", "-n",
+        "--nonblock", "-o", "--close", "-F", "--no-fork", "--verbose",
+    }),
+    "stdbuf": frozenset(),
+    "timeout": frozenset({"--preserve-status", "--foreground", "-v", "--verbose"}),
+}
+_WRAPPER_NON_EXECUTING_OPTIONS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-e", "--edit", "-l", "--list", "-V", "--version", "-v", "--validate"}),
+    "nice": frozenset({"--help", "--version"}),
+    "nohup": frozenset({"--help", "--version"}),
+    "ionice": frozenset({"-p", "--pid", "-P", "--pgid", "-u", "--uid", "--help", "--version"}),
+    "chroot": frozenset({"--help", "--version"}),
+    "flock": frozenset({"-c", "--command", "--help", "-V", "--version"}),
+    "stdbuf": frozenset({"--help", "--version"}),
+    "timeout": frozenset({"--help", "--version"}),
+}
+_WRAPPER_POSITIONAL_OPERANDS: dict[str, int] = {
+    "chroot": 1,
+    "flock": 1,
+    "timeout": 1,
+}
 
-# After stripping a preamble, the next token(s) may be preamble arguments
-# (flags like ``-k``, ``--preserve-status``, or numeric values).  Strip
-# them so we can reach the real command.
-_PREAMBLE_ARG_RE = re.compile(r"^(?:\s*(?:-\w+|--[\w-]+|\d+[smhd]?))+\s*")
+_XARGS_VALUE_OPTIONS = frozenset({
+    "-a", "--arg-file", "-E", "-I", "-L", "-n", "--max-args", "-P",
+    "--max-procs", "-s",
+    "--max-chars", "-d", "--delimiter",
+})
+_XARGS_FLAG_OPTIONS = frozenset({
+    "-0", "--null", "-o", "--open-tty", "-p", "--interactive", "-r",
+    "--no-run-if-empty", "-t", "--verbose", "-x", "--exit",
+})
+_XARGS_OPTIONAL_ATTACHED_OPTIONS = frozenset({"-e", "-i", "-l"})
+_XARGS_OPTIONAL_EQUALS_OPTIONS = frozenset({
+    "--eof", "--replace", "--max-lines",
+})
+_XARGS_NON_EXECUTING_OPTIONS = frozenset({"--help", "--version"})
 
-# Common path prefix to strip, e.g. /usr/bin/grep → grep
-_PATH_PREFIX_RE = re.compile(r"^/(?:usr/)?(?:local/)?(?:s?)bin/")
+
+def _executable_basename(token: str) -> str:
+    """Return a POSIX executable basename without accessing the filesystem."""
+    return token.rsplit("/", 1)[-1]
+
+
+def _safe_unknown_category(token: str) -> str | None:
+    """Return a bounded category slug for an unknown executable token."""
+    basename = _executable_basename(token).lower()
+    if basename in _SHELL_RESERVED_WORDS:
+        return None
+    if not basename or len(basename) > _MAX_EXECUTABLE_SLUG_LENGTH:
+        return None
+    if _SAFE_EXECUTABLE_RE.fullmatch(basename) is None:
+        return None
+    return basename
+
+
+def _consume_options(
+    parts: list[str],
+    start: int,
+    *,
+    value_options: frozenset[str],
+    flag_options: frozenset[str],
+    non_executing_options: frozenset[str],
+    optional_attached_options: frozenset[str] = frozenset(),
+    optional_equals_options: frozenset[str] = frozenset(),
+) -> tuple[int, bool] | None:
+    """Consume a supported option prefix and report non-executing modes."""
+    idx = start
+    non_executing = False
+    short_value_options = {option for option in value_options if len(option) == 2}
+    short_flag_options = {option for option in flag_options if len(option) == 2}
+
+    while idx < len(parts):
+        option = parts[idx]
+        if option == "--":
+            return idx + 1, non_executing
+        if option == "-" or not option.startswith("-"):
+            return idx, non_executing
+
+        option_name = option.split("=", 1)[0]
+        if option_name in non_executing_options:
+            non_executing = True
+            idx += 1
+            continue
+        if option in optional_attached_options or any(
+            option.startswith(prefix) and len(option) > len(prefix)
+            for prefix in optional_attached_options
+        ):
+            idx += 1
+            continue
+        if option in optional_equals_options or any(
+            option.startswith(f"{prefix}=") for prefix in optional_equals_options
+        ):
+            idx += 1
+            continue
+        if option_name in value_options:
+            if "=" in option:
+                idx += 1
+                continue
+            if len(option_name) == 2 and len(option) > 2:
+                idx += 1
+                continue
+            if idx + 1 >= len(parts):
+                return None
+            idx += 2
+            continue
+        if option in flag_options:
+            idx += 1
+            continue
+        if len(option) > 2 and option.startswith("-") and not option.startswith("--"):
+            if any(option.startswith(prefix) for prefix in short_value_options):
+                idx += 1
+                continue
+            if all(f"-{char}" in short_flag_options for char in option[1:]):
+                idx += 1
+                continue
+        return None
+
+    return idx, non_executing
+
+
+def _skip_assignments(parts: list[str], start: int) -> int:
+    """Skip shell assignment words that precede an executable."""
+    idx = start
+    while idx < len(parts) and _ENV_ASSIGN_TOKEN_RE.fullmatch(parts[idx]):
+        idx += 1
+    return idx
+
+
+def _unwrap_command_wrappers(parts: list[str], start: int) -> int:
+    """Return the command index after supported wrappers, conservatively."""
+    idx = _skip_assignments(parts, start)
+    while idx < len(parts):
+        wrapper_idx = idx
+        wrapper = _executable_basename(parts[idx])
+        if wrapper not in _WRAPPER_VALUE_OPTIONS:
+            return idx
+
+        option_start = idx + 1
+        if (
+            wrapper == "nice"
+            and option_start < len(parts)
+            and re.fullmatch(r"-\d+", parts[option_start]) is not None
+        ):
+            option_start += 1
+
+        consumed = _consume_options(
+            parts,
+            option_start,
+            value_options=_WRAPPER_VALUE_OPTIONS[wrapper],
+            flag_options=_WRAPPER_FLAG_OPTIONS[wrapper],
+            non_executing_options=_WRAPPER_NON_EXECUTING_OPTIONS[wrapper],
+        )
+        if consumed is None:
+            return wrapper_idx
+        idx, non_executing = consumed
+        if non_executing:
+            return wrapper_idx
+
+        positional_count = _WRAPPER_POSITIONAL_OPERANDS.get(wrapper, 0)
+        if idx + positional_count >= len(parts):
+            return wrapper_idx
+        idx += positional_count
+        idx = _skip_assignments(parts, idx)
+
+    return idx
+
+
+def _xargs_command_index(parts: list[str], start: int) -> int | None:
+    """Return the xargs command index, or ``None`` when it is ambiguous."""
+    consumed = _consume_options(
+        parts,
+        start,
+        value_options=_XARGS_VALUE_OPTIONS,
+        flag_options=_XARGS_FLAG_OPTIONS,
+        non_executing_options=_XARGS_NON_EXECUTING_OPTIONS,
+        optional_attached_options=_XARGS_OPTIONAL_ATTACHED_OPTIONS,
+        optional_equals_options=_XARGS_OPTIONAL_EQUALS_OPTIONS,
+    )
+    if consumed is None:
+        return None
+    idx, non_executing = consumed
+    if non_executing or idx >= len(parts):
+        return None
+    return idx
 
 
 def _tokenize_segment(segment: str) -> str:
@@ -314,90 +571,69 @@ def _tokenize_segment(segment: str) -> str:
     A segment is one piece of a command chain (between ``&&``, ``;``, ``|``).
     Returns the normalised command token, or ``""`` if none found.
 
-    The function scans tokens left-to-right, skipping preamble arguments
-    (numbers, flags) until it finds a recognised command.  This handles
-    cases like ``timeout 120 python3 -m pytest`` where ``120`` is a
-    preamble argument, not the real command.
+    The executable is taken from command position rather than by scanning
+    arbitrary arguments for familiar command names. A narrow recovery for
+    malformed navigation prefixes preserves legacy trace behaviour.
     """
     seg = segment.strip()
     if not seg:
         return ""
 
-    # Strip env-var assignments
-    seg = _ENV_ASSIGN_RE.sub("", seg).strip()
-
-    # Strip preamble (sudo, nice, timeout, ...)
-    seg = _PREAMBLE_RE.sub("", seg).strip()
-
-    # Strip preamble arguments (flags, numeric durations)
-    seg = _PREAMBLE_ARG_RE.sub("", seg).strip()
-
-    if not seg:
+    try:
+        parts = shlex.split(seg, posix=True)
+    except ValueError:
+        return ""
+    if not parts:
         return ""
 
-    parts = seg.split()
-
-    # ── Scan for the best command token ──────────────────────────────
-    # Strategy: find the *first* recognised command token (standard
-    # shell semantics — the first word is the command, rest are args).
-    # However, when the first recognised token is a low-priority
-    # navigational / setup command (``cd``, ``pwd``, ``ls``, …) and a
-    # clearly higher-priority *action* command appears later, prefer
-    # the action.  This handles malformed segments like
-    # ``cd /x 88 timeout 120 python3 -m pytest`` where ``cd`` leaked
-    # into the same segment without a ``&&`` separator.
     _NAVIGATION_TOKENS = frozenset({
         "cd", "pushd", "popd", "pwd", "ls", "dir",
     })
-    token = ""
-    token_idx = -1
-    first_token = ""
-    first_idx = -1
-    first_prio = -1
-    best_action_token = ""
-    best_action_idx = -1
-    best_action_prio = -1
+    token_idx = _unwrap_command_wrappers(parts, 0)
+    if token_idx >= len(parts):
+        return ""
+    token = _executable_basename(parts[token_idx])
 
-    for idx, raw_tok in enumerate(parts):
-        stripped = _PATH_PREFIX_RE.sub("", raw_tok)
-        # ``command`` builtin: ``command grep`` → use the next token
-        if stripped == "command" and idx + 1 < len(parts):
-            stripped = _PATH_PREFIX_RE.sub("", parts[idx + 1])
-            prio = _COMMAND_PRIORITY.get(stripped, -1)
-            if first_token == "" and prio >= 0:
-                first_token, first_idx, first_prio = stripped, idx + 1, prio
-            if prio > best_action_prio:
-                best_action_token, best_action_idx, best_action_prio = stripped, idx + 1, prio
-            continue
-        prio = _COMMAND_PRIORITY.get(stripped, -1)
-        if prio < 0:
-            continue  # not a recognised command
-        if first_token == "":
-            first_token, first_idx, first_prio = stripped, idx, prio
-        if prio > best_action_prio:
-            best_action_token, best_action_idx, best_action_prio = stripped, idx, prio
+    # ``command -v/-V`` queries a name without executing it. Only execution
+    # forms (``command NAME``, ``command -p NAME``, ``command -- NAME``) unwrap.
+    if token == "command" and len(parts) > 1:
+        token_idx += 1
+        while token_idx < len(parts) and parts[token_idx].startswith("-"):
+            option = parts[token_idx]
+            if "v" in option[1:] or "V" in option[1:]:
+                return "exec"
+            if option not in {"-p", "--"}:
+                return "command"
+            token_idx += 1
+        if token_idx == len(parts):
+            return "command"
+        token = _executable_basename(parts[token_idx])
 
-    if first_token == "":
-        # Fall back to first token even if unrecognised
-        token = _PATH_PREFIX_RE.sub("", parts[0])
-        token_idx = 0
-    elif first_token in _NAVIGATION_TOKENS and best_action_prio >= 3:
-        # Navigation followed by a real action — prefer the action.
-        token = best_action_token
-        token_idx = best_action_idx
-    else:
-        # Standard case: first recognised command wins.
-        token = first_token
-        token_idx = first_idx
+    # Preserve the existing recovery for malformed navigation-prefixed traces,
+    # while avoiding argument scans for ordinary and unknown executables.
+    if token in _NAVIGATION_TOKENS:
+        best_action_token = ""
+        best_action_idx = -1
+        best_action_priority = -1
+        for idx, raw_token in enumerate(parts[token_idx + 1:], token_idx + 1):
+            candidate = _executable_basename(raw_token)
+            priority = _COMMAND_PRIORITY.get(candidate, -1)
+            if priority > best_action_priority:
+                best_action_token = candidate
+                best_action_idx = idx
+                best_action_priority = priority
+        if best_action_priority >= 3:
+            token = best_action_token
+            token_idx = best_action_idx
 
-    # ``xargs`` is plumbing — look through to what it runs
+    # ``xargs`` is plumbing; look through to what it runs.
     if token == "xargs" and token_idx >= 0:
-        for p in parts[token_idx + 1:]:
-            if not p.startswith("-"):
-                token = p
-                break
+        command_idx = _xargs_command_index(parts, token_idx + 1)
+        if command_idx is not None:
+            token_idx = command_idx
+            token = _executable_basename(parts[token_idx])
 
-    # ``python -m <module>`` — redirect to the module name so that
+    # ``python -m <module>`` redirects to a known module category so that
     # ``python -m pytest`` is classified as exec-pytest, not exec-python.
     _PYTHON_INTERPS = frozenset({
         "python", "python3", "python3.9", "python3.10", "python3.11", "python3.12",
@@ -491,8 +727,9 @@ def classify_exec_tool_name(
                    containing a ``"command"`` key.
 
     Returns:
-        A classified tool name like ``"exec-grep"``, or ``tool_name``
-        unchanged if the call is not an exec or the command is unrecognised.
+        A classified tool name like ``"exec-grep"``. Safely normalised
+        unknown executables retain their basename; ambiguous commands remain
+        unchanged.
     """
     if tool_name != "exec":
         return tool_name
@@ -520,9 +757,13 @@ def classify_exec_tool_name(
         return tool_name  # Can't classify without a command
 
     base = _extract_base_command(command)
+    if base == "exec":
+        return tool_name
     category = _COMMAND_CATEGORY_MAP.get(base)
     if category is None:
-        return tool_name  # Unrecognised → keep as plain "exec"
+        category = _safe_unknown_category(base)
+    if category is None:
+        return tool_name
 
     return f"exec-{category}"
 
