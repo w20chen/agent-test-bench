@@ -205,7 +205,7 @@ collector writes two task-local shims:
 /tmp/openclaw-task-userbase/bin/pip3
 ```
 
-Each shim executes:
+Each shim executes the resolved Python's `pip` module:
 
 ```sh
 <resolved-container-python> -m pip "$@"
@@ -220,7 +220,10 @@ This is intentionally narrow:
 - It does not expose the shared OpenClaw bootstrap pip on `PATH`.
 
 If the selected Python cannot run `-m pip`, then `pip` and `pip3` still fail.
-That failure reflects the task image's actual Python capability.
+That failure reflects the task image's actual Python capability. If later
+project dependency installation changes the task-local Python import path in a
+way that breaks pip itself, that remains a task-solving environment issue for
+the agent to diagnose rather than a runtime-managed dependency repair.
 
 ## Phase 7: Preflight and Agent Execution
 
