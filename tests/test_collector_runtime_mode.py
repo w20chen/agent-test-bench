@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future
 from pathlib import Path
+import subprocess
 import threading
 from types import SimpleNamespace
 
@@ -13,7 +14,10 @@ import pytest
 from trace_collect.attempt_pipeline import AttemptResult
 from trace_collect.collector import (
     _cleanup_task_images,
+    _container_ids_for_attempt,
     _ensure_task_source_ready,
+    _low_disk_locations,
+    _remove_containers_for_attempt,
     _run_scaffold_tasks,
     _select_tasks,
 )
@@ -516,6 +520,174 @@ def test_cleanup_task_images_keeps_next_source_image(monkeypatch) -> None:
     assert pruned == ["pruned"]
 
 
+def test_cleanup_task_images_force_cleanup_ignores_keep_images_threshold(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    removed: list[str] = []
+
+    monkeypatch.setenv("KEEP_IMAGES_ABOVE_GB", "1")
+    monkeypatch.setattr("trace_collect.collector._free_disk_gb", lambda path: 10.0)
+    monkeypatch.setattr(
+        "trace_collect.collector.remove_image",
+        lambda image, *, container_executable: removed.append(image) or True,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.drop_cached_fixed_image",
+        lambda source_image: None,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.prune_dangling_images",
+        lambda *, container_executable: None,
+    )
+
+    _cleanup_task_images(
+        instance_id="task-a",
+        source_image="source-image",
+        fixed_image="fixed-image",
+        keep_source_image=None,
+        container_executable="docker",
+        run_dir=tmp_path,
+        force_cleanup=True,
+    )
+
+    assert removed == ["fixed-image", "source-image"]
+
+
+@pytest.mark.parametrize("container_executable", ["docker", "podman"])
+def test_container_ids_for_attempt_filters_by_image_and_labels(
+    monkeypatch,
+    container_executable: str,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="abc123\n\n def456 \n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("trace_collect.collector.subprocess.run", fake_run)
+
+    ids = _container_ids_for_attempt(
+        image="fixed-image",
+        container_executable=container_executable,
+        labels={
+            "trace_collect.attempt": "1",
+            "trace_collect.instance_id": "task-a",
+        },
+    )
+
+    assert calls == [
+        [
+            container_executable,
+            "ps",
+            "-a",
+            "--filter",
+            "ancestor=fixed-image",
+            "--filter",
+            "label=trace_collect.attempt=1",
+            "--filter",
+            "label=trace_collect.instance_id=task-a",
+            "--format",
+            "{{.ID}}",
+        ]
+    ]
+    assert ids == ["abc123", "def456"]
+
+
+def test_remove_containers_for_attempt_skips_without_labels(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="abc\n", stderr="")
+
+    monkeypatch.setattr("trace_collect.collector.subprocess.run", fake_run)
+
+    removed = _remove_containers_for_attempt(
+        instance_id="task-a",
+        image="fixed-image",
+        container_executable="docker",
+        labels=None,
+    )
+
+    assert removed is False
+    assert calls == []
+
+
+def test_remove_containers_for_attempt_skips_empty_container_list(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("trace_collect.collector.subprocess.run", fake_run)
+
+    removed = _remove_containers_for_attempt(
+        instance_id="task-a",
+        image="fixed-image",
+        container_executable="docker",
+        labels={"trace_collect.attempt_dir": "/runs/task-a/attempt_1"},
+    )
+
+    assert removed is False
+    assert len(calls) == 1
+    assert calls[0][:3] == ["docker", "ps", "-a"]
+    assert "label=trace_collect.attempt_dir=/runs/task-a/attempt_1" in calls[0]
+
+
+def test_remove_containers_for_attempt_removes_labeled_ids(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-a"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="abc\ndef\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("trace_collect.collector.subprocess.run", fake_run)
+
+    removed = _remove_containers_for_attempt(
+        instance_id="task-a",
+        image="fixed-image",
+        container_executable="docker",
+        labels={"trace_collect.attempt_dir": "/runs/task-a/attempt_1"},
+    )
+
+    assert removed is True
+    assert calls[-1] == ["docker", "rm", "-f", "abc", "def"]
+
+
+def test_low_disk_locations_includes_container_storage_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    docker_root = tmp_path / "docker-root"
+    docker_root.mkdir()
+
+    monkeypatch.setattr(
+        "trace_collect.collector._container_storage_root",
+        lambda container_executable: docker_root,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector._free_disk_gb",
+        lambda path: 100.0 if path == tmp_path else 2.0,
+    )
+
+    low = _low_disk_locations(
+        run_dir=tmp_path,
+        container_executable="docker",
+        min_free_disk_gb=30.0,
+    )
+
+    assert low == [("container_storage", docker_root, 2.0)]
+
+
 def test_ensure_task_source_ready_falls_back_after_prefetch_failure(
     monkeypatch,
 ) -> None:
@@ -733,6 +905,108 @@ def test_run_scaffold_tasks_reuses_source_image_for_consecutive_tasks(
     )
     assert events.index(("remove_image", "fixed-task-a")) < events.index(
         ("run_end", "task-b")
+    )
+
+
+def test_run_scaffold_tasks_low_disk_does_not_keep_next_source_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    trace_path = tmp_path / "trace-source" / "trace.jsonl"
+    _write_trace(trace_path)
+    benchmark = SimpleNamespace(
+        config=SimpleNamespace(
+            slug="swe-rebench",
+            harness_split="filtered",
+            trace_root=tmp_path / "traces",
+            default_prompt_template="cc_aligned",
+        ),
+        runtime_mode_for=lambda scaffold: "task_container_agent",
+        image_name_for=lambda task: task.get("image_name"),
+    )
+    events: list[tuple[str, str]] = []
+
+    async def fake_run_attempt(
+        ctx,
+        *,
+        inner,
+        min_free_disk_gb,
+        container_executable,
+        **monitoring_kwargs,
+    ):
+        ctx.fixed_image = f"fixed-{ctx.instance_id}"
+        events.append(("run_end", ctx.instance_id))
+        return AttemptResult(
+            success=True,
+            exit_status="ok",
+            trace_path=trace_path,
+            model_patch=f"diff --git a/{ctx.instance_id} b/{ctx.instance_id}",
+        )
+
+    monkeypatch.setattr(
+        "trace_collect.collector.ensure_source_image",
+        lambda source_image, *, container_executable: events.append(
+            ("ensure_source", source_image)
+        ),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.run_attempt",
+        fake_run_attempt,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.remove_image",
+        lambda image, *, container_executable: (
+            events.append(("remove_image", image)) or True
+        ),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector._remove_containers_for_attempt",
+        lambda *, instance_id, image, container_executable, labels: (
+            events.append(("remove_containers", image))
+            or events.append(("container_label", labels["trace_collect.instance_id"]))
+            or True
+        ),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.drop_cached_fixed_image",
+        lambda source_image: events.append(("drop_cache", source_image)),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.prune_dangling_images",
+        lambda *, container_executable: events.append(("prune", "done")),
+    )
+    monkeypatch.setattr("trace_collect.collector._free_disk_gb", lambda path: 0.0)
+
+    asyncio.run(
+        _run_scaffold_tasks(
+            benchmark=benchmark,
+            tasks=[
+                {"instance_id": "task-a", "image_name": "shared-image"},
+                {"instance_id": "task-b", "image_name": "shared-image"},
+            ],
+            run_dir=tmp_path / "run",
+            model="qwen-plus-latest",
+            scaffold="openclaw",
+            container_executable="docker",
+            prompt_template=None,
+            min_free_disk_gb=30.0,
+            inner_factory=lambda task: lambda ctx: None,
+        )
+    )
+
+    assert [
+        event
+        for event in events
+        if event == ("remove_image", "docker.io/library/shared-image")
+    ] == [
+        ("remove_image", "docker.io/library/shared-image"),
+        ("remove_image", "docker.io/library/shared-image"),
+    ]
+    assert ("remove_containers", "fixed-task-a") in events
+    assert ("container_label", "task-a") in events
+    assert ("remove_containers", "docker.io/library/shared-image") not in events
+    assert events.index(("remove_image", "docker.io/library/shared-image")) < (
+        events.index(("run_end", "task-b"))
     )
 
 

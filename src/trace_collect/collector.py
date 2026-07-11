@@ -377,13 +377,16 @@ def _cleanup_task_images(
     keep_source_image: str | None,
     container_executable: str | None,
     run_dir: Path | None = None,
+    remove_containers: bool = False,
+    force_cleanup: bool = False,
+    container_labels: dict[str, str] | None = None,
 ) -> None:
     """Best-effort cleanup that keeps only the current/next-image budget.
 
     On ARM hosts the base image is shared across all tasks and is never
     removed.  Only per-task fixed derivative images are cleaned up.
 
-    Set env ``KEEP_IMAGES_ABOVE_GB`` (e.g. ``30``) to skip image removal
+    Set env ``KEEP_IMAGES_ABOVE_GB`` (e.g. ``100``) to skip image removal
     when free disk exceeds the threshold.  Default: always clean up.
     """
     if not source_image and not fixed_image:
@@ -397,7 +400,7 @@ def _cleanup_task_images(
         source_image = None
 
     keep_gb_str = os.environ.get("KEEP_IMAGES_ABOVE_GB", "")
-    if keep_gb_str and run_dir is not None:
+    if keep_gb_str and run_dir is not None and not force_cleanup:
         try:
             keep_gb = float(keep_gb_str)
             free_gb = shutil.disk_usage(run_dir).free / (1024**3)
@@ -415,6 +418,13 @@ def _cleanup_task_images(
     removed_any = False
     try:
         if fixed_image and fixed_image != source_image:
+            if remove_containers:
+                _remove_containers_for_attempt(
+                    instance_id=instance_id,
+                    image=fixed_image,
+                    container_executable=container_executable,
+                    labels=container_labels,
+                )
             removed_fixed = remove_image(
                 fixed_image,
                 container_executable=container_executable,
@@ -468,6 +478,128 @@ def _cleanup_task_images(
         logger.warning("cleanup %s prune failed: %s", instance_id, exc)
 
 
+def _container_ids_for_attempt(
+    *,
+    image: str,
+    container_executable: str,
+    labels: dict[str, str],
+) -> list[str]:
+    filters = ["ancestor=" + image]
+    filters.extend(f"label={key}={value}" for key, value in sorted(labels.items()))
+    cmd = [container_executable, "ps", "-a"]
+    for filter_expr in filters:
+        cmd.extend(["--filter", filter_expr])
+    cmd.extend(["--format", "{{.ID}}"])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to list containers for image {image}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _remove_containers_for_attempt(
+    *,
+    instance_id: str,
+    image: str,
+    container_executable: str,
+    labels: dict[str, str] | None,
+) -> bool:
+    if not labels:
+        logger.warning(
+            "cleanup %s skipped residual container removal for image %s: "
+            "attempt labels unavailable",
+            instance_id,
+            image,
+        )
+        return False
+    container_ids = _container_ids_for_attempt(
+        image=image,
+        container_executable=container_executable,
+        labels=labels,
+    )
+    if not container_ids:
+        return False
+    result = subprocess.run(
+        [container_executable, "rm", "-f", *container_ids],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to remove containers for image {image}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    logger.warning(
+        "cleanup %s removed %d residual container(s) for image %s",
+        instance_id,
+        len(container_ids),
+        image,
+    )
+    return True
+
+
+def _free_disk_gb(path: Path) -> float | None:
+    try:
+        return shutil.disk_usage(path).free / (1024**3)
+    except OSError:
+        return None
+
+
+def _container_storage_root(container_executable: str | None) -> Path | None:
+    if container_executable is None:
+        return None
+    try:
+        result = subprocess.run(
+            [container_executable, "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    root = result.stdout.strip()
+    if not root or root == "<no value>":
+        return None
+    return Path(root)
+
+
+def _low_disk_locations(
+    *,
+    run_dir: Path,
+    container_executable: str | None,
+    min_free_disk_gb: float,
+) -> list[tuple[str, Path, float]]:
+    locations: list[tuple[str, Path]] = [("run_dir", run_dir)]
+    container_root = _container_storage_root(container_executable)
+    if container_root is not None:
+        locations.append(("container_storage", container_root))
+
+    low: list[tuple[str, Path, float]] = []
+    seen: set[str] = set()
+    for label, path in locations:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        free_gb = _free_disk_gb(path)
+        if free_gb is not None and free_gb < min_free_disk_gb:
+            low.append((label, path, free_gb))
+    return low
+
+
 async def _run_scaffold_tasks(
     *,
     benchmark: "Benchmark",
@@ -478,7 +610,7 @@ async def _run_scaffold_tasks(
     container_executable: str | None,
     prompt_template: str | None,
     min_free_disk_gb: float,
-    monitoring_policy: MonitoringPolicy,
+    monitoring_policy: MonitoringPolicy | None = None,
     concurrency: int = 1,
     inner_factory,
     recording_provider: Any | None = None,
@@ -490,6 +622,17 @@ async def _run_scaffold_tasks(
     CPU/memory/I/O sampling, but PMU and host memory bandwidth are always off.
     Ksys, when enabled, runs once for the entire concurrent batch.
     """
+    if monitoring_policy is None:
+        monitoring_policy = MonitoringPolicy(
+            resource_requested="off",
+            pmu_requested="off",
+            ksys_requested="off",
+            resource_enabled=False,
+            pmu_enabled=False,
+            memory_bandwidth_enabled=False,
+            ksys_enabled=False,
+            concurrent=concurrency > 1,
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
     completed = load_completed_ids(run_dir)
     if completed:
@@ -580,7 +723,7 @@ async def _run_scaffold_tasks(
                 arm_repo=task.get("repo"),
                 arm_base_commit=task.get("base_commit"),
                 arm_install_config=task.get("install_config"),
-                arm_repos_root=benchmark.config.repos_root,
+                arm_repos_root=getattr(benchmark.config, "repos_root", None),
             )
 
             _inner = inner_factory(task)
@@ -650,7 +793,11 @@ async def _run_scaffold_tasks(
                             arm_repo=task.get("repo"),
                             arm_base_commit=task.get("base_commit"),
                             arm_install_config=task.get("install_config"),
-                            arm_repos_root=benchmark.config.repos_root,
+                            arm_repos_root=getattr(
+                                benchmark.config,
+                                "repos_root",
+                                None,
+                            ),
                         )
                         concurrent_inner = inner_factory(task)
                         concurrent_kwargs: dict[str, Any] = {
@@ -878,13 +1025,34 @@ async def _run_scaffold_tasks(
                         time.monotonic() - t0,
                     )
             finally:
+                low_disk_locations = _low_disk_locations(
+                    run_dir=run_dir,
+                    container_executable=container_executable,
+                    min_free_disk_gb=min_free_disk_gb,
+                )
+                cleanup_low_disk = bool(low_disk_locations)
+                if cleanup_low_disk:
+                    details = "; ".join(
+                        f"{label}={path} free={free_gb:.2f}GB"
+                        for label, path, free_gb in low_disk_locations
+                    )
+                    logger.warning(
+                        "cleanup %s running in low-disk mode: %s "
+                        "< %.2f GB threshold; not keeping next source image",
+                        instance_id,
+                        details,
+                        min_free_disk_gb,
+                    )
                 _cleanup_task_images(
                     instance_id=instance_id,
                     source_image=source_image,
                     fixed_image=_cleanup_ctx.fixed_image,
-                    keep_source_image=next_source_image,
+                    keep_source_image=None if cleanup_low_disk else next_source_image,
                     container_executable=container_executable,
                     run_dir=run_dir,
+                    remove_containers=cleanup_low_disk,
+                    force_cleanup=cleanup_low_disk,
+                    container_labels=_cleanup_ctx.container_labels(),
                 )
 
     # ── stop ksys after all tasks complete ─────────────────────────
@@ -1299,6 +1467,7 @@ async def _run_openclaw_in_task_container(
         fixed_image,
         executable=container_executable,
         extra_args=start_extra_args,
+        labels=ctx.container_labels(),
     )
     ctx.mark_container_ready(container_id)
 

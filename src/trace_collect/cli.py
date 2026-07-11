@@ -188,7 +188,10 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--min-free-disk-gb",
         type=float,
         default=30.0,
-        help="Abort per-task run if free disk falls below this threshold (GB).",
+        help=(
+            "Abort per-task run if free disk falls below this threshold (GB); "
+            "low-disk cleanup removes task images more aggressively."
+        ),
     )
     parser.add_argument(
         "--run-id",

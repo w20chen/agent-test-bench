@@ -75,7 +75,7 @@ sudo tee /etc/docker/daemon.json <<'EOF'
 EOF
 sudo systemctl restart docker
 
-export KEEP_IMAGES_ABOVE_GB=30
+export KEEP_IMAGES_ABOVE_GB=100
 
 sudo sysctl -w kernel.perf_event_paranoid=-1
 

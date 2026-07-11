@@ -690,6 +690,29 @@ def test_start_task_container_passes_through_network_env_when_present() -> None:
         assert f"{name}={value}" in cmd
 
 
+def test_start_task_container_adds_attempt_labels() -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="cid-1\n", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        start_task_container(
+            "docker.io/swerebench/example:latest",
+            executable="docker",
+            labels={
+                "trace_collect.instance_id": "task-a",
+                "trace_collect.attempt": "1",
+            },
+        )
+
+    cmd = seen["cmd"]
+    assert "--label" in cmd
+    assert "trace_collect.attempt=1" in cmd
+    assert "trace_collect.instance_id=task-a" in cmd
+
+
 def test_start_task_container_skips_empty_network_env() -> None:
     seen: dict[str, object] = {}
 

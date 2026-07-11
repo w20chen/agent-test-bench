@@ -146,6 +146,15 @@ class AttemptContext:
         """Stable string like ``attempt_1`` (matches the manifest field)."""
         return f"attempt_{self.attempt}"
 
+    def container_labels(self) -> dict[str, str]:
+        """Labels that scope task containers to this exact attempt."""
+        return {
+            "trace_collect.run_dir": str(self.run_dir.resolve()),
+            "trace_collect.attempt_dir": str(self.attempt_dir.resolve()),
+            "trace_collect.instance_id": self.instance_id,
+            "trace_collect.attempt": str(self.attempt),
+        }
+
     def _delta_s(self, start: datetime | None, end: datetime | None) -> float:
         """Seconds between two optional datetimes; returns 0.0 if either is None."""
         if start is None or end is None:
@@ -208,6 +217,7 @@ def start_task_container(
     executable: str,
     extra_args: list[str] | None = None,
     network_mode: str = "host",
+    labels: dict[str, str] | None = None,
 ) -> str:
     """Launch the task container and return its id."""
     import os
@@ -241,6 +251,8 @@ def start_task_container(
         "-e",
         f"PATH={container_path}",
     ]
+    for key, value in sorted((labels or {}).items()):
+        cmd.extend(["--label", f"{key}={value}"])
     cmd.extend(qemu_env)
     for env_name in _TASK_CONTAINER_ENV_PASSTHROUGH:
         value = os.environ.get(env_name)
