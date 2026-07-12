@@ -144,7 +144,33 @@ def test_bootstrap_checks_real_venv_creation() -> None:
     assert "python3 -m venv --help" not in command
     assert 'python3 -m venv "$probe_root/venv"' in command
     assert '"$probe_root/venv/bin/python" -m pip --version' in command
+    assert "python3 -m pip --version" not in command
     assert "python3 python3-pip python3-venv" in command
+
+
+def test_agent_no_proxy_skips_proxy_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in TerminalBenchOpenClawAgent._ENV_PASSTHROUGH:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TASK_CONTAINER_NO_PROXY", "1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
+    monkeypatch.setenv("PIP_TRUSTED_HOST", "pypi.tuna.tsinghua.edu.cn")
+    agent = StubAgent(
+        model_name="nvidia/nemotron-3-super-120b-a12b:free",
+        provider_name="openrouter",
+        api_base="https://openrouter.ai/api/v1",
+        api_key="test-key",
+        env_key="OPENROUTER_API_KEY",
+        max_iterations=25,
+    )
+
+    env = agent._env
+
+    assert "HTTPS_PROXY" not in env
+    assert env["PIP_INDEX_URL"] == "https://pypi.tuna.tsinghua.edu.cn/simple"
+    assert env["PIP_TRUSTED_HOST"] == "pypi.tuna.tsinghua.edu.cn"
 
 
 def test_agent_reads_api_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +230,10 @@ def test_perform_task_cleans_tmux_session_on_agent_timeout(
 
         def capture_pane(self, capture_entire=False):
             calls.append(("capture_pane", capture_entire))
-            return "pane output"
+            return (
+                "root# bash /installed-agent/tmp.sh || echo 'INSTALL_FAIL_STATUS'\n"
+                "Successfully installed agent-sched-bench\n"
+            )
 
     def fake_run(cmd, **kwargs):
         calls.append(("subprocess.run", cmd, kwargs))
@@ -225,9 +254,19 @@ def test_perform_task_cleans_tmux_session_on_agent_timeout(
     assert (tmp_path / "openclaw-timeout.marker").read_text(encoding="utf-8") == (
         "timeout\n"
     )
-    assert (tmp_path / "openclaw-timeout-pane.txt").read_text(
-        encoding="utf-8"
-    ) == "pane output"
+    assert "Successfully installed agent-sched-bench" in (
+        tmp_path / "openclaw-timeout-pane.txt"
+    ).read_text(encoding="utf-8")
+    assert any(
+        call[0] == "send_keys"
+        and call[1] == [". /installed-agent/setup-env.sh", "Enter"]
+        for call in calls
+    )
+    assert any(
+        call[0] == "send_keys"
+        and call[1][0].startswith("bash /installed-agent/")
+        for call in calls
+    )
     assert any(call[0] == "send_keys" and call[1] == ["C-c"] for call in calls)
     cleanup_commands = [
         call[1]
@@ -240,6 +279,58 @@ def test_perform_task_cleans_tmux_session_on_agent_timeout(
         "pkill -TERM -f '/installed-agent/venv/bin/openclaw'"
         in (cleanup_commands[-1][2])
     )
+
+
+def test_perform_task_detects_install_failure_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = StubAgent(
+        model_name="local-model",
+        provider_name="openai",
+        api_base="http://127.0.0.1:8000/v1",
+        api_key="dummy",
+        env_key="OPENAI_API_KEY",
+        max_iterations=25,
+    )
+    calls: list[object] = []
+
+    class FakeContainer:
+        id = "container-id"
+
+        def exec_run(self, cmd, user=None):
+            calls.append(("exec_run", cmd, user))
+            return SimpleNamespace(exit_code=0, output=b"")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.container = FakeContainer()
+
+        def copy_to_container(self, paths, container_dir=None):
+            calls.append(("copy_to_container", paths, container_dir))
+
+        def send_keys(self, keys, **kwargs):
+            calls.append(("send_keys", keys, kwargs))
+
+        def send_command(self, command):
+            calls.append(("send_command", command))
+
+        def capture_pane(self, capture_entire=False):
+            calls.append(("capture_pane", capture_entire))
+            return "install output\nINSTALL_FAIL_STATUS\n"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(("subprocess.run", cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "agents.terminal_bench.openclaw_agent.subprocess.run",
+        fake_run,
+    )
+
+    result = agent.perform_task("solve it", FakeSession())
+
+    assert result.failure_mode == FailureMode.AGENT_INSTALLATION_FAILED
+    assert not any(call[0] == "send_command" for call in calls)
 
 
 def test_perform_task_cleans_tmux_session_on_bootstrap_timeout(
@@ -297,7 +388,7 @@ def test_perform_task_cleans_tmux_session_on_bootstrap_timeout(
     assert not any(call[0] == "copy_to_container" for call in calls)
     assert not any(
         call[0] == "send_keys"
-        and call[1] == ["source /installed-agent/setup-env.sh", "Enter"]
+        and call[1] == [". /installed-agent/setup-env.sh", "Enter"]
         for call in calls
     )
     cleanup_commands = [
