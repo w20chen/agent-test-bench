@@ -390,6 +390,107 @@ def test_scaling_requested_unavailable_placement_fails_clearly() -> None:
             )
 
 
+def test_scaling_validates_all_counts_before_launching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-7\n")
+        for cpu in range(8):
+            _cpu(root, cpu, shared="0-7")
+        source_trace = tmp_path / "trace.jsonl"
+        task_source = tmp_path / "tasks.json"
+        source_trace.write_text("", encoding="utf-8")
+        task_source.write_text("[]\n", encoding="utf-8")
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("subprocess.run must not be called")
+
+        monkeypatch.setattr(
+            "scripts.experiments.run_kunpeng_llc_scaling.subprocess.run",
+            fail_if_called,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            run_scaling(
+                argparse.Namespace(
+                    source_trace=source_trace,
+                    task_source=task_source,
+                    output_root=tmp_path / "scaling",
+                    sys_cpu_root=root,
+                    agent_counts="1,2",
+                    placements="compact_clusters_same_llc,spread_clusters_same_llc",
+                    cluster_size=4,
+                    container="docker",
+                    replay_speed=1.0,
+                    network_mode="none",
+                    command_timeout=600.0,
+                    workers=1,
+                    prep_concurrency=1,
+                    resource_monitoring="on",
+                    ksys_monitoring="off",
+                    dry_run=False,
+                    simulate_args=[],
+                )
+            )
+
+    message = str(exc_info.value)
+    assert "not available for all agent counts" in message
+    assert "unavailable for 1 agents: spread_clusters_same_llc" in message
+    assert "Available placements for 1 agents" in message
+    assert not (tmp_path / "scaling").exists()
+
+
+def test_scaling_validates_impossible_counts_before_launching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-3\n")
+        for cpu in range(4):
+            _cpu(root, cpu, shared="0-3")
+        source_trace = tmp_path / "trace.jsonl"
+        task_source = tmp_path / "tasks.json"
+        source_trace.write_text("", encoding="utf-8")
+        task_source.write_text("[]\n", encoding="utf-8")
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("subprocess.run must not be called")
+
+        monkeypatch.setattr(
+            "scripts.experiments.run_kunpeng_llc_scaling.subprocess.run",
+            fail_if_called,
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            run_scaling(
+                argparse.Namespace(
+                    source_trace=source_trace,
+                    task_source=task_source,
+                    output_root=tmp_path / "scaling",
+                    sys_cpu_root=root,
+                    agent_counts="8",
+                    placements="compact_llc",
+                    cluster_size=4,
+                    container="docker",
+                    replay_speed=1.0,
+                    network_mode="none",
+                    command_timeout=600.0,
+                    workers=1,
+                    prep_concurrency=1,
+                    resource_monitoring="on",
+                    ksys_monitoring="off",
+                    dry_run=False,
+                    simulate_args=[],
+                )
+            )
+
+    message = str(exc_info.value)
+    assert "not available for all agent counts" in message
+    assert "No placement plan for 8 agents" in message
+    assert not (tmp_path / "scaling").exists()
+
+
 def test_scaling_non_dry_run_writes_partial_manifest_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

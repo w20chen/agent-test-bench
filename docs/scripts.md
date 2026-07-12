@@ -77,7 +77,7 @@ replay workflow.
 | `probe_kunpeng_llc_slices.py` | Supported | Validate inferred Kunpeng sub-LLC cluster sizes with real pointer-chase interference measurements. |
 | `run_kunpeng_llc_replay.py` | Supported | Run replay-based Kunpeng LLC placement experiments with per-agent cpusets. |
 | `run_kunpeng_llc_scaling.py` | Supported | Run topology-derived 1/2/4/8 scaling replay matrix. |
-| `run_kunpeng_llc_agent_case.py` | Supported | Convenience live-agent placement runner; less preferred than replay because it can call live APIs. |
+| `run_kunpeng_llc_agent_case.py` | Supported | Compatibility replay runner that wraps the outer simulate process with `taskset`; prefer `run_kunpeng_llc_replay.py` or `run_kunpeng_llc_scaling.py` for per-agent container cpusets. |
 | `analyze_llc_replay_results.py` | Supported | Analyze LLC replay experiment outputs. |
 | `summarize_llc_placement_runs.py` | Supported | Summarize placement runs into JSON/CSV/README artifacts. |
 | `run_with_perf_stat.sh` | Supported | Wrap placement runs with system-level `perf stat`. |

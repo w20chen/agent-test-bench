@@ -142,17 +142,52 @@ Use `scripts/experiments/run_kunpeng_llc_scaling.py` for the topology-derived
 1/2/4/8 agent-count matrix. It replaces the older hardcoded scaling runner and
 keeps CPU ids derived from sysfs.
 
-Example:
+Example for a placement set that is valid for 1/2/4/8 agents:
 
 ```bash
 python scripts/experiments/run_kunpeng_llc_scaling.py \
   --source-trace traces/source.jsonl \
   --task-source data/swe-rebench/tasks.json \
   --agent-counts 1,2,4,8 \
-  --placements compact_cluster,spread_clusters_same_llc \
+  --placements compact_clusters_same_llc \
   --cluster-size 4 \
   --dry-run
 ```
+
+Placement availability depends on `--agent-count` and the probed topology.
+`spread_clusters_same_llc` needs at least two agents and at least two inferred
+clusters inside one Linux LLC domain, so it is not valid for `--agent-counts 1`.
+`compact_cluster` only exists when one inferred cluster has enough CPUs for the
+requested count; with `--cluster-size 4`, it is normally valid for 1/2/4 agents
+but not for 8. The scaling runner validates every requested count before
+launching any replay command and reports the available placements when a
+requested placement is unavailable.
+
+Run mixed placement matrices in separate invocations when the placement set is
+not valid for every count:
+
+```bash
+python scripts/experiments/run_kunpeng_llc_scaling.py \
+  --source-trace traces/source.jsonl \
+  --task-source data/swe-rebench/tasks.json \
+  --agent-counts 1 \
+  --placements compact_clusters_same_llc \
+  --cluster-size 4
+
+python scripts/experiments/run_kunpeng_llc_scaling.py \
+  --source-trace traces/source.jsonl \
+  --task-source data/swe-rebench/tasks.json \
+  --agent-counts 2,4,8 \
+  --placements compact_clusters_same_llc,spread_clusters_same_llc \
+  --cluster-size 4
+```
+
+For replay-only LLC pressure experiments, use `--replay-speed` to reduce
+cloud-model `asyncio.sleep` time. This changes only replayed LLM waits; it does
+not speed up real tool execution inside containers. Use `--prep-concurrency 1`
+when warming or debugging the task-container bootstrap cache, because multiple
+fresh containers can otherwise rebuild the shared Python runtime cache in
+parallel.
 
 `scripts/experiments/run_scaling_hardcoded.py` is legacy analysis support. It
 requires `--allow-hardcoded-placement` and should not be used for new results.

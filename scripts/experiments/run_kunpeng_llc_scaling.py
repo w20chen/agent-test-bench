@@ -23,6 +23,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.experiments.probe_llc_topology import (  # noqa: E402
+    CpuTopology,
+    Placement,
     build_placements,
     probe_topology,
     write_outputs,
@@ -88,7 +90,7 @@ def parse_agent_counts(value: str) -> list[int]:
 
 
 def _select_placements(
-    available: dict[str, object],
+    available: dict[str, Placement],
     requested: str,
     *,
     agent_count: int,
@@ -105,6 +107,50 @@ def _select_placements(
     return selected
 
 
+def _resolve_scaling_plan(
+    topology: list[CpuTopology],
+    *,
+    agent_counts: list[int],
+    requested_placements: str,
+    sys_cpu_root: Path,
+    cluster_size: int,
+) -> dict[int, tuple[dict[str, Placement], list[str]]]:
+    """Build placements for all counts and fail before launching any replay."""
+    plan: dict[int, tuple[dict[str, Placement], list[str]]] = {}
+    unavailable: list[str] = []
+    for agent_count in agent_counts:
+        try:
+            placements = build_placements(
+                topology,
+                agent_count=agent_count,
+                sys_cpu_root=sys_cpu_root,
+                cluster_size=cluster_size,
+            )
+        except RuntimeError as exc:
+            unavailable.append(f"{exc} No placement plan for {agent_count} agents.")
+            continue
+        try:
+            selected_names = _select_placements(
+                placements,
+                requested_placements,
+                agent_count=agent_count,
+            )
+        except ValueError as exc:
+            available = ", ".join(placements)
+            unavailable.append(
+                f"{exc} Available placements for {agent_count} agents: {available}."
+            )
+            continue
+        plan[agent_count] = (placements, selected_names)
+
+    if unavailable:
+        raise ValueError(
+            "requested placement set is not available for all agent counts:\n"
+            + "\n".join(f"- {item}" for item in unavailable)
+        )
+    return plan
+
+
 def run_scaling(args: argparse.Namespace) -> list[ScalingRunRecord]:
     """Run or dry-run topology-derived scaling placements."""
     agent_counts = parse_agent_counts(args.agent_counts)
@@ -117,6 +163,13 @@ def run_scaling(args: argparse.Namespace) -> list[ScalingRunRecord]:
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_root = args.output_root / timestamp
     topology = probe_topology(args.sys_cpu_root)
+    plan = _resolve_scaling_plan(
+        topology,
+        agent_counts=agent_counts,
+        requested_placements=args.placements,
+        sys_cpu_root=args.sys_cpu_root,
+        cluster_size=args.cluster_size,
+    )
 
     env = os.environ.copy()
     env["ARM_IMAGE_MODE"] = "qemu"
@@ -127,22 +180,12 @@ def run_scaling(args: argparse.Namespace) -> list[ScalingRunRecord]:
 
     records: list[ScalingRunRecord] = []
     for agent_count in agent_counts:
-        placements = build_placements(
-            topology,
-            agent_count=agent_count,
-            sys_cpu_root=args.sys_cpu_root,
-            cluster_size=args.cluster_size,
-        )
+        placements, selected_names = plan[agent_count]
         count_root = output_root / f"n{agent_count}"
         write_outputs(
             output_dir=count_root / "topology",
             topology=topology,
             placements=placements,
-        )
-        selected_names = _select_placements(
-            placements,
-            args.placements,
-            agent_count=agent_count,
         )
         for placement_name in selected_names:
             placement = placements[placement_name]
