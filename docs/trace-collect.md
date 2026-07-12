@@ -574,6 +574,12 @@ Each entry supports:
 - `docker_image` (optional): override the Docker image for this trace
 - `task_source` (optional): override the tasks JSON file for this trace
 
+When `--task-source` is omitted, simulate reads the trace metadata
+`benchmark` field and selects the canonical local task cache, for example
+`data/swe-rebench/tasks.json` or `data/swebench_verified/tasks.json`. Pass
+`--task-source` only when replaying against a custom or non-canonical tasks
+file.
+
 ### Simulate CLI Flags
 
 | Flag | Required | Default | Notes |
@@ -581,7 +587,7 @@ Each entry supports:
 | `--mode` | no | `local_model` | `local_model` or `cloud_model` |
 | `--container` | container traces | — | `docker` or `podman` |
 | `--network-mode` | no | `host` | Container network mode |
-| `--task-source` | no | `data/swe-rebench/tasks.json` | Path to tasks JSON |
+| `--task-source` | no | auto from trace metadata | Optional tasks JSON override |
 | `--output-dir` | no | `traces/simulate` | Output directory |
 | `--command-timeout` | no | `600.0` | Seconds per tool command |
 | `--replay-speed` | no | `1.0` | Wall-clock acceleration (cloud_model only) |

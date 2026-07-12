@@ -125,7 +125,6 @@ Example:
 ```bash
 python scripts/experiments/run_kunpeng_llc_replay.py \
   --source-trace traces/source.jsonl \
-  --task-source data/swe-rebench/tasks.json \
   --num-agents 8 \
   --placements compact_cluster,spread_clusters_same_llc \
   --cluster-size 4 \
@@ -147,7 +146,6 @@ Example for a placement set that is valid for 1/2/4/8 agents:
 ```bash
 python scripts/experiments/run_kunpeng_llc_scaling.py \
   --source-trace traces/source.jsonl \
-  --task-source data/swe-rebench/tasks.json \
   --agent-counts 1,2,4,8 \
   --placements compact_clusters_same_llc \
   --cluster-size 4 \
@@ -169,18 +167,22 @@ not valid for every count:
 ```bash
 python scripts/experiments/run_kunpeng_llc_scaling.py \
   --source-trace traces/source.jsonl \
-  --task-source data/swe-rebench/tasks.json \
   --agent-counts 1 \
   --placements compact_clusters_same_llc \
   --cluster-size 4
 
 python scripts/experiments/run_kunpeng_llc_scaling.py \
   --source-trace traces/source.jsonl \
-  --task-source data/swe-rebench/tasks.json \
   --agent-counts 2,4,8 \
   --placements compact_clusters_same_llc,spread_clusters_same_llc \
   --cluster-size 4
 ```
+
+By default, replay and scaling leave `--task-source` unset and let
+`trace_collect.cli simulate` choose the canonical local tasks cache from the
+trace metadata, such as `data/swe-rebench/tasks.json` or
+`data/swebench_verified/tasks.json`. Pass `--task-source` only for a custom
+task cache or for traces whose metadata lacks a benchmark slug.
 
 For replay-only LLC pressure experiments, use `--replay-speed` to reduce
 cloud-model `asyncio.sleep` time. This changes only replayed LLM waits; it does

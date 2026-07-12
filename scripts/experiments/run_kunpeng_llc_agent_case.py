@@ -49,7 +49,7 @@ def _simulate_base_command(
     *,
     run_dir: Path,
     source_trace: Path,
-    task_source: Path,
+    task_source: Path | None,
     container: str,
     num_agents: int,
     ksys_monitoring: str,
@@ -59,7 +59,7 @@ def _simulate_base_command(
     extra_simulate_args: list[str],
 ) -> list[str]:
     """Build the ``trace_collect.cli simulate`` command for cloud_model replay."""
-    return [
+    command = [
         sys.executable,
         "-m",
         "trace_collect.cli",
@@ -68,8 +68,6 @@ def _simulate_base_command(
         "cloud_model",
         "--source-trace",
         str(source_trace),
-        "--task-source",
-        str(task_source),
         "--container",
         container,
         "--num-agents",
@@ -90,6 +88,12 @@ def _simulate_base_command(
         network_mode,
         *extra_simulate_args,
     ]
+    if task_source is not None:
+        command[command.index("--container"):command.index("--container")] = [
+            "--task-source",
+            str(task_source),
+        ]
+    return command
 
 
 def _with_taskset(command: list[str], placement: Placement) -> list[str]:
@@ -226,8 +230,11 @@ def main() -> None:
     parser.add_argument(
         "--task-source",
         type=Path,
-        default=Path("data/swe-rebench/tasks.json"),
-        help="Path to tasks JSON file (used to resolve per-task metadata).",
+        default=None,
+        help=(
+            "Optional tasks JSON override. When omitted, simulate chooses the "
+            "canonical task source from trace benchmark metadata."
+        ),
     )
     parser.add_argument(
         "--output-root",

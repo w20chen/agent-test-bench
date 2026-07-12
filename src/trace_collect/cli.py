@@ -416,7 +416,8 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Directory containing trace files. All **/trace.jsonl files under "
-            "this directory will be replayed (one task_source for all)."
+            "this directory will be replayed. When --task-source is omitted, "
+            "each trace resolves its task source from its own benchmark metadata."
         ),
     )
     source_group.add_argument(
@@ -440,8 +441,11 @@ def parse_simulate_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--task-source",
-        default="data/swe-rebench/tasks.json",
-        help="Path to tasks JSON file.",
+        default=None,
+        help=(
+            "Path to tasks JSON file. When omitted, simulate selects the "
+            "canonical tasks JSON from the source trace benchmark metadata."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -916,7 +920,7 @@ def _run_simulate(args: argparse.Namespace) -> None:
         "source_trace": Path(args.source_trace) if args.source_trace else None,
         "source_dir": Path(args.source_dir) if args.source_dir else None,
         "trace_manifest": Path(args.trace_manifest) if args.trace_manifest else None,
-        "task_source": Path(args.task_source),
+        "task_source": Path(args.task_source) if args.task_source else None,
         "output_dir": _resolve_simulate_output_dir(args),
         "mode": args.mode,
         "container_executable": args.container,

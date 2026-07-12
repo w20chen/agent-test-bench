@@ -40,7 +40,7 @@ class ReplayRunRecord:
 def _build_command(
     *,
     source_trace: Path,
-    task_source: Path,
+    task_source: Path | None,
     output_dir: Path,
     placement: Placement,
     container: str,
@@ -61,8 +61,6 @@ def _build_command(
         "simulate",
         "--source-trace",
         str(source_trace),
-        "--task-source",
-        str(task_source),
         "--output-dir",
         str(output_dir),
         "--mode",
@@ -95,6 +93,11 @@ def _build_command(
         str(prep_concurrency),
         *extra_args,
     ]
+    if task_source is not None:
+        command[command.index("--output-dir"):command.index("--output-dir")] = [
+            "--task-source",
+            str(task_source),
+        ]
     if placement.cpus is not None:
         cpusets = [assignment.cpuset_cpus for assignment in placement.agent_assignments]
         if len(cpusets) != num_agents or any(cpuset is None for cpuset in cpusets):
@@ -203,7 +206,7 @@ def run_replay(args: argparse.Namespace) -> list[ReplayRunRecord]:
         json.dumps(
             {
                 "source_trace": str(args.source_trace),
-                "task_source": str(args.task_source),
+                "task_source": str(args.task_source) if args.task_source else "auto",
                 "num_agents": args.num_agents,
                 "replay_speed": args.replay_speed,
                 "cluster_size": args.cluster_size,
@@ -229,7 +232,11 @@ def main() -> None:
     parser.add_argument(
         "--task-source",
         type=Path,
-        default=Path("data/swe-rebench/tasks.json"),
+        default=None,
+        help=(
+            "Optional tasks JSON override. When omitted, simulate chooses the "
+            "canonical task source from trace benchmark metadata."
+        ),
     )
     parser.add_argument(
         "--output-root",

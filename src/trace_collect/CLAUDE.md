@@ -239,7 +239,7 @@ python -m trace_collect.cli simulate \
 | `--source-trace` | one of | — | Mutually exclusive with `--trace-manifest` |
 | `--trace-manifest` | one of | — | JSON array of `{source_trace, task_source?, docker_image?}` |
 | `--mode` | no | `local_model` | `local_model` or `cloud_model` |
-| `--task-source` | no | `data/swe-rebench/tasks.json` | Path to tasks JSON |
+| `--task-source` | no | auto from trace metadata | Optional tasks JSON override |
 | `--output-dir` | no | `traces/simulate` | Output directory |
 | `--container` | no | `docker` | `docker` or `podman` |
 | `--network-mode` | no | `host` | Container network mode |

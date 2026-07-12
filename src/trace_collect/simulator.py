@@ -129,6 +129,7 @@ class LoadedTraceSession:
     iterations: dict[int, dict[str, Any]]
     docker_image_override: str | None = None
     cpuset_cpus: str | None = None
+    task_source_auto: bool = False
 
 
 @dataclass(slots=True)
@@ -167,6 +168,7 @@ class WorkerTraceInput:
     docker_image_override: str | None
     agent_id: str
     cpuset_cpus: str | None = None
+    task_source_auto: bool = False
 
 
 def _resolve_prep_concurrency(requested: int, num_sessions: int) -> int:
@@ -187,6 +189,7 @@ def _worker_trace_input(session: LoadedTraceSession) -> WorkerTraceInput:
         docker_image_override=session.docker_image_override,
         agent_id=session.agent_id,
         cpuset_cpus=session.cpuset_cpus,
+        task_source_auto=session.task_source_auto,
     )
 
 
@@ -400,44 +403,61 @@ _BENCHMARK_TASK_SOURCES: dict[str, str] = {
 
 def _resolve_task_source(
     metadata: dict[str, Any] | None,
-    task_source: Path,
+    task_source: Path | None,
     source_trace: Path,
 ) -> Path:
     """Resolve the canonical task-source path for *source_trace*.
 
-    When *task_source* is the CLI default (or otherwise unreachable) the
-    trace metadata's ``benchmark`` field is used to select the
-    benchmark-appropriate tasks file.  Falls back to the original
-    *task_source* when no metadata is available.
+    When *task_source* is omitted, the trace metadata's ``benchmark`` field is
+    used to select the benchmark-appropriate tasks file. Explicit task-source
+    paths are preserved for reproducible overrides.
     """
-    if task_source.exists():
+    if task_source is not None and task_source.exists():
         return task_source
 
     benchmark = (metadata or {}).get("benchmark", "")
     if not benchmark:
+        if task_source is not None:
+            return task_source
+        raise SimulateError(
+            f"{source_trace}: cannot auto-detect task source because trace "
+            "metadata has no benchmark. Pass --task-source explicitly."
+        )
+    if task_source is not None:
         return task_source
 
     mapped = _BENCHMARK_TASK_SOURCES.get(benchmark)
-    if mapped:
-        candidate = Path(mapped)
-        if candidate.exists():
-            logger.info(
-                "%s: auto-detected task_source %s (benchmark=%s)",
-                source_trace.name,
-                candidate,
-                benchmark,
-            )
-            return candidate
-        # For host-mode benchmarks the tasks file may not exist yet;
-        # the caller will synthesise a minimal task record.
+    if mapped is None:
+        raise SimulateError(
+            f"{source_trace}: no canonical task source is registered for "
+            f"benchmark={benchmark!r}. Pass --task-source explicitly."
+        )
+
+    candidate = Path(mapped)
+    if candidate.exists():
+        logger.info(
+            "%s: auto-detected task_source %s (benchmark=%s)",
+            source_trace.name,
+            candidate,
+            benchmark,
+        )
+        return candidate
+
+    execution_env = (metadata or {}).get("execution_environment", "")
+    if execution_env == "host":
         logger.warning(
             "%s: benchmark=%s but %s not found; will synthesise task from metadata",
             source_trace.name,
             benchmark,
             candidate,
         )
+        return candidate
 
-    return task_source
+    raise SimulateError(
+        f"{source_trace}: canonical task source {candidate} for "
+        f"benchmark={benchmark!r} does not exist. Prepare the task cache or "
+        "pass --task-source explicitly."
+    )
 
 
 # Cache: task_source Path → {instance_id: task_dict}.  Avoids re-reading
@@ -462,6 +482,8 @@ def _find_or_synthesize_task(
     task_source: Path,
     agent_id: str,
     metadata: dict[str, Any] | None,
+    *,
+    allow_synthesis: bool,
 ) -> dict[str, Any]:
     """Return the task record for *agent_id*, synthesising one when needed.
 
@@ -475,7 +497,7 @@ def _find_or_synthesize_task(
 
     benchmark = (metadata or {}).get("benchmark", "")
     execution_env = (metadata or {}).get("execution_environment", "")
-    if benchmark and execution_env == "host":
+    if allow_synthesis and benchmark and execution_env == "host":
         logger.info(
             "Synthesising task record for %s (benchmark=%s, host mode)",
             agent_id,
@@ -581,14 +603,22 @@ def _coerce_timestamp(
 
 def _load_trace_session(
     source_trace: Path,
-    task_source: Path,
+    task_source: Path | None,
     docker_image_override: str | None = None,
     cpuset_cpus: str | None = None,
+    task_source_auto: bool | None = None,
 ) -> LoadedTraceSession:
     agent_id, metadata, actions, summary = _parse_trace_session_file(source_trace)
     scaffold = metadata.get("scaffold", "unknown") if metadata else "unknown"
+    if task_source_auto is None:
+        task_source_auto = task_source is None
     resolved_source = _resolve_task_source(metadata, task_source, source_trace)
-    task = _find_or_synthesize_task(resolved_source, agent_id, metadata)
+    task = _find_or_synthesize_task(
+        resolved_source,
+        agent_id,
+        metadata,
+        allow_synthesis=task_source_auto,
+    )
     return LoadedTraceSession(
         source_trace=source_trace,
         task_source=resolved_source,
@@ -601,14 +631,15 @@ def _load_trace_session(
         iterations=_group_actions_by_iteration(actions),
         docker_image_override=docker_image_override,
         cpuset_cpus=cpuset_cpus,
+        task_source_auto=task_source_auto,
     )
 
 
 def _load_trace_manifest(
     trace_manifest: Path,
     *,
-    default_task_source: Path,
-) -> list[tuple[Path, Path, str | None, str | None]]:
+    default_task_source: Path | None,
+) -> list[tuple[Path, Path | None, str | None, str | None]]:
     try:
         raw = json.loads(trace_manifest.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -617,7 +648,7 @@ def _load_trace_manifest(
         raise SimulateError("trace manifest must be a non-empty JSON array")
 
     base_dir = trace_manifest.parent
-    entries: list[tuple[Path, Path, str | None, str | None]] = []
+    entries: list[tuple[Path, Path | None, str | None, str | None]] = []
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise SimulateError(
@@ -637,7 +668,7 @@ def _load_trace_manifest(
         task_path = Path(task_value) if task_value else default_task_source
         if not source_path.is_absolute():
             source_path = (base_dir / source_path).resolve()
-        if task_value and not task_path.is_absolute():
+        if task_value and task_path is not None and not task_path.is_absolute():
             task_path = (base_dir / task_path).resolve()
         entries.append((source_path, task_path, docker_image, cpuset))
     return entries
@@ -645,8 +676,8 @@ def _load_trace_manifest(
 
 def _discover_traces(
     source_dir: Path,
-    default_task_source: Path,
-) -> list[tuple[Path, Path, str | None, str | None]]:
+    default_task_source: Path | None,
+) -> list[tuple[Path, Path | None, str | None, str | None]]:
     """Discover all ``trace.jsonl`` files under *source_dir*.
 
     Each discovered trace is paired with the default task source and no
@@ -657,12 +688,12 @@ def _discover_traces(
 
 
 def _expand_trace_inputs(
-    trace_inputs: list[tuple[Path, Path, str | None, str | None]],
+    trace_inputs: list[tuple[Path, Path | None, str | None, str | None]],
     *,
     num_agents: int = 0,
     trace_assignment: str = "manifest",
     trace_assignment_seed: int | None = None,
-) -> list[tuple[Path, Path, str | None, str | None]]:
+) -> list[tuple[Path, Path | None, str | None, str | None]]:
     """Expand *trace_inputs* for N:M trace-to-agent mapping.
 
     When *num_agents* ≤ 0, returns *trace_inputs* unchanged (1:1 mapping).
@@ -2026,6 +2057,7 @@ def _worker_run_cloud_model(
                 Path(worker_input.source_trace),
                 Path(worker_input.task_source),
                 worker_input.docker_image_override,
+                task_source_auto=worker_input.task_source_auto,
             )
             loaded.agent_id = worker_input.agent_id
             loaded.cpuset_cpus = worker_input.cpuset_cpus
@@ -2373,7 +2405,7 @@ async def simulate(
     source_trace: Path | None = None,
     source_dir: Path | None = None,
     trace_manifest: Path | None = None,
-    task_source: Path,
+    task_source: Path | None = None,
     output_dir: Path,
     mode: str = "local_model",
     serial: bool = False,
@@ -2445,10 +2477,13 @@ async def simulate(
     if trace_manifest is not None:
         trace_inputs = _load_trace_manifest(
             trace_manifest,
-            default_task_source=task_source.resolve(),
+            default_task_source=task_source.resolve() if task_source else None,
         )
     elif source_dir is not None:
-        trace_inputs = _discover_traces(source_dir, task_source.resolve())
+        trace_inputs = _discover_traces(
+            source_dir,
+            task_source.resolve() if task_source else None,
+        )
         if not trace_inputs:
             raise ValueError(
                 f"No trace.jsonl files found under {source_dir}"

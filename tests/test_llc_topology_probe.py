@@ -272,6 +272,34 @@ def test_replay_command_passes_docker_cpuset_for_placement() -> None:
     assert command[command.index("--cpu-limit") + 1] == "1"
 
 
+def test_replay_command_omits_task_source_in_auto_mode() -> None:
+    with _temp_dir() as tmp_path:
+        root = tmp_path / "cpu"
+        _write(root / "online", "0-3\n")
+        for cpu in range(4):
+            _cpu(root, cpu, shared="0-3")
+        placements = build_placements(probe_topology(root), agent_count=1)
+
+        command = _build_command(
+            source_trace=Path("trace.jsonl"),
+            task_source=None,
+            output_dir=Path("out"),
+            placement=placements["compact_llc"],
+            container="docker",
+            num_agents=1,
+            replay_speed=1.0,
+            network_mode="none",
+            command_timeout_s=600.0,
+            workers=1,
+            prep_concurrency=1,
+            resource_monitoring="on",
+            ksys_monitoring="off",
+            extra_args=[],
+        )
+
+    assert "--task-source" not in command
+
+
 def test_replay_dry_run_supports_single_agent_without_shared_cpuset() -> None:
     with _temp_dir() as tmp_path:
         root = tmp_path / "cpu"

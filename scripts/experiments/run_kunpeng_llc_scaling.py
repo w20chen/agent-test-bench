@@ -58,7 +58,7 @@ def _write_manifest(
         json.dumps(
             {
                 "source_trace": str(args.source_trace),
-                "task_source": str(args.task_source),
+                "task_source": str(args.task_source) if args.task_source else "auto",
                 "agent_counts": agent_counts,
                 "placements": args.placements,
                 "replay_speed": args.replay_speed,
@@ -157,7 +157,7 @@ def run_scaling(args: argparse.Namespace) -> list[ScalingRunRecord]:
     if not args.dry_run:
         if not args.source_trace.exists():
             raise FileNotFoundError(f"--source-trace does not exist: {args.source_trace}")
-        if not args.task_source.exists():
+        if args.task_source is not None and not args.task_source.exists():
             raise FileNotFoundError(f"--task-source does not exist: {args.task_source}")
 
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -283,7 +283,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task-source",
         type=Path,
-        default=Path("data/swe-rebench/tasks.json"),
+        default=None,
+        help=(
+            "Optional tasks JSON override. When omitted, simulate chooses the "
+            "canonical task source from trace benchmark metadata."
+        ),
     )
     parser.add_argument(
         "--output-root",

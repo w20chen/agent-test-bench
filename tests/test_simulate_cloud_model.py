@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from trace_collect.cli import _run_simulate, parse_simulate_args
-from trace_collect.simulator import simulate
+from trace_collect.simulator import _find_or_synthesize_task, _resolve_task_source, simulate
 
 
 class _FakeStream:
@@ -52,21 +52,23 @@ def _write_trace(
     tool_end: float = 100.45,
     tool_name: str = "write_file",
     execution_environment: str = "container",
+    benchmark: str | None = None,
 ) -> None:
+    metadata = {
+        "type": "trace_metadata",
+        "trace_format_version": 5,
+        "scaffold": scaffold,
+        "instance_id": agent_id,
+        "model": "claude-haiku",
+        "mode": "collect",
+        "execution_environment": execution_environment,
+    }
+    if benchmark is not None:
+        metadata["benchmark"] = benchmark
     path.write_text(
         "\n".join(
             [
-                json.dumps(
-                    {
-                        "type": "trace_metadata",
-                        "trace_format_version": 5,
-                        "scaffold": scaffold,
-                        "instance_id": agent_id,
-                        "model": "claude-haiku",
-                        "mode": "collect",
-                        "execution_environment": execution_environment,
-                    }
-                ),
+                json.dumps(metadata),
                 json.dumps(
                     {
                         "type": "action",
@@ -1241,6 +1243,7 @@ def test_worker_trace_input_preserves_per_agent_cpuset(tmp_path: Path) -> None:
         iterations={},
         docker_image_override="custom/image:latest",
         cpuset_cpus="88",
+        task_source_auto=True,
     )
 
     worker_input = _worker_trace_input(session)
@@ -1248,6 +1251,36 @@ def test_worker_trace_input_preserves_per_agent_cpuset(tmp_path: Path) -> None:
     assert worker_input.agent_id == "task-a"
     assert worker_input.docker_image_override == "custom/image:latest"
     assert worker_input.cpuset_cpus == "88"
+    assert worker_input.task_source_auto is True
+
+
+def test_worker_reload_preserves_auto_host_task_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trace_collect.simulator import _load_trace_session, _worker_trace_input
+
+    trace_path = tmp_path / "trace.jsonl"
+    _write_trace(
+        trace_path,
+        agent_id="host-task",
+        scaffold="tongyi-deepresearch",
+        execution_environment="host",
+        benchmark="deep-research-bench",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    loaded = _load_trace_session(trace_path, None)
+    worker_input = _worker_trace_input(loaded)
+    reloaded = _load_trace_session(
+        Path(worker_input.source_trace),
+        Path(worker_input.task_source),
+        worker_input.docker_image_override,
+        task_source_auto=worker_input.task_source_auto,
+    )
+
+    assert reloaded.task["instance_id"] == "host-task"
+    assert reloaded.task_source_auto is True
 
 
 def test_cloud_model_rejects_task_without_docker_image(tmp_path: Path) -> None:
@@ -1269,6 +1302,137 @@ def test_cloud_model_rejects_task_without_docker_image(tmp_path: Path) -> None:
                 mode="cloud_model",
             )
         )
+
+
+def test_auto_task_source_uses_trace_benchmark_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verified = tmp_path / "data" / "swebench_verified" / "tasks.json"
+    rebench = tmp_path / "data" / "swe-rebench" / "tasks.json"
+    verified.parent.mkdir(parents=True)
+    rebench.parent.mkdir(parents=True)
+    _write_tasks(verified, "verified-task")
+    _write_tasks(rebench, "rebench-task")
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_task_source(
+        {"benchmark": "swe-bench-verified"},
+        None,
+        tmp_path / "trace.jsonl",
+    )
+
+    assert resolved == Path("data/swebench_verified/tasks.json")
+
+
+def test_explicit_task_source_overrides_trace_benchmark_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    explicit = tmp_path / "custom-tasks.json"
+    verified = tmp_path / "data" / "swebench_verified" / "tasks.json"
+    verified.parent.mkdir(parents=True)
+    _write_tasks(explicit, "explicit-task")
+    _write_tasks(verified, "verified-task")
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_task_source(
+        {"benchmark": "swe-bench-verified"},
+        explicit,
+        tmp_path / "trace.jsonl",
+    )
+
+    assert resolved == explicit
+
+
+def test_auto_task_source_rejects_missing_benchmark(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="metadata has no benchmark"):
+        _resolve_task_source(None, None, tmp_path / "trace.jsonl")
+
+
+def test_auto_task_source_rejects_unknown_benchmark(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="no canonical task source"):
+        _resolve_task_source(
+            {"benchmark": "unknown-benchmark"},
+            None,
+            tmp_path / "trace.jsonl",
+        )
+
+
+def test_auto_task_source_rejects_missing_container_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(Exception, match="canonical task source .* does not exist"):
+        _resolve_task_source(
+            {
+                "benchmark": "swe-bench-verified",
+                "execution_environment": "container",
+            },
+            None,
+            tmp_path / "trace.jsonl",
+        )
+
+
+def test_auto_task_source_allows_missing_host_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_task_source(
+        {
+            "benchmark": "deep-research-bench",
+            "execution_environment": "host",
+        },
+        None,
+        tmp_path / "trace.jsonl",
+    )
+
+    assert resolved == Path("data/deep-research-bench/tasks.json")
+
+
+def test_explicit_missing_host_task_source_is_not_synthesized(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="cannot synthesise"):
+        _find_or_synthesize_task(
+            tmp_path / "missing-tasks.json",
+            "host-task",
+            {
+                "benchmark": "deep-research-bench",
+                "execution_environment": "host",
+            },
+            allow_synthesis=False,
+        )
+
+
+def test_trace_manifest_distinguishes_auto_and_explicit_task_source(
+    tmp_path: Path,
+) -> None:
+    from trace_collect.simulator import _load_trace_manifest
+
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {"source_trace": "../trace-a.jsonl"},
+                {
+                    "source_trace": "../trace-b.jsonl",
+                    "task_source": "../custom-tasks.json",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    entries = _load_trace_manifest(manifest, default_task_source=None)
+
+    assert entries[0][1] is None
+    assert entries[1][1] == (tmp_path / "custom-tasks.json").resolve()
 
 
 def test_cloud_model_manifest_keeps_default_task_source_cwd_semantics(
