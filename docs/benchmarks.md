@@ -115,6 +115,22 @@ chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
 docker compose version  # verify
 ```
 
+Build up proxy for your server, if necessary. For example,
+```bash
+ssh -N -R 7897:127.0.0.1:7897 weitian@202.120.39.13
+```
+
+```bash
+# Check network
+curl -x http://127.0.0.1:7897 https://ghcr.io/v2/ -I
+curl -x http://127.0.0.1:7897 https://huggingface.co -I
+
+export HTTP_PROXY=http://127.0.0.1:7897
+export HTTPS_PROXY=http://127.0.0.1:7897
+export http_proxy=$HTTP_PROXY
+export https_proxy=$HTTPS_PROXY
+```
+
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek --model deepseek-chat \
