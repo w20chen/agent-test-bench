@@ -22,6 +22,7 @@ tmp/
 results/
 traces/
 output/
+analysis_outputs/
 .claude/
 
 # Generated visualization artifacts
@@ -33,3 +34,7 @@ models/
 .trae/
 .kilo/
 .sisyphus/data/swe-rebench/tasks.json
+
+.pytest-tmp-sim/
+.pytest-tmp-sim-focused/
+.tmp-tests/
