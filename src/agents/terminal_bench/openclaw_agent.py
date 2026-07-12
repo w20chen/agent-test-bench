@@ -123,7 +123,10 @@ class TerminalBenchOpenClawAgent(AbstractInstalledAgent):
         }
         if self._llm_timeout_sec is not None:
             env["OPENCLAW_LLM_TIMEOUT_S"] = str(self._llm_timeout_sec)
+        skip_proxy = os.environ.get("TASK_CONTAINER_NO_PROXY") == "1"
         for key in self._ENV_PASSTHROUGH:
+            if skip_proxy and key.lower().endswith("proxy"):
+                continue
             value = os.environ.get(key)
             if value:
                 env[key] = value
@@ -277,8 +280,7 @@ class TerminalBenchOpenClawAgent(AbstractInstalledAgent):
             "trap cleanup_probe EXIT\n"
             "venv_ready() {\n"
             '  rm -rf "$probe_root/venv"\n'
-            "  python3 -m pip --version >/dev/null 2>&1 && "
-            'python3 -m venv "$probe_root/venv" >/dev/null 2>&1 && '
+            '  python3 -m venv "$probe_root/venv" >/dev/null 2>&1 && '
             '"$probe_root/venv/bin/python" -m pip --version >/dev/null 2>&1\n'
             "}\n"
             "if ! venv_ready; then\n"
@@ -514,6 +516,12 @@ class TerminalBenchOpenClawAgent(AbstractInstalledAgent):
                 user="root",
             )
             if bootstrap.exit_code != 0:
+                if logging_dir is not None:
+                    logging_dir.mkdir(parents=True, exist_ok=True)
+                    (logging_dir / "openclaw-bootstrap.log").write_text(
+                        bootstrap.output.decode("utf-8", errors="replace"),
+                        encoding="utf-8",
+                    )
                 return AgentResult(failure_mode=FailureMode.AGENT_INSTALLATION_FAILED)
 
             install_script = self._install_agent_script_path
@@ -548,14 +556,14 @@ class TerminalBenchOpenClawAgent(AbstractInstalledAgent):
             )
 
             session.send_keys(
-                ["source /installed-agent/setup-env.sh", "Enter"],
+                [". /installed-agent/setup-env.sh", "Enter"],
                 block=True,
                 max_timeout_sec=self._remaining_timeout(deadline),
             )
             session.send_keys(
                 [
                     (
-                        "source /installed-agent/"
+                        "bash /installed-agent/"
                         + install_script.name
                         + " || echo 'INSTALL_FAIL_STATUS'"
                     ),
@@ -565,7 +573,10 @@ class TerminalBenchOpenClawAgent(AbstractInstalledAgent):
                 max_timeout_sec=self._remaining_timeout(deadline),
             )
             installation_output = session.capture_pane(capture_entire=True)
-            if "INSTALL_FAIL_STATUS" in installation_output.splitlines():
+            if any(
+                line.strip() == "INSTALL_FAIL_STATUS"
+                for line in installation_output.splitlines()
+            ):
                 return AgentResult(failure_mode=FailureMode.AGENT_INSTALLATION_FAILED)
 
             rendered_instruction = self._render_instruction(instruction)
