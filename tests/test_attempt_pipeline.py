@@ -198,6 +198,53 @@ def test_run_attempt_success_writes_all_six_files(tmp_path: Path) -> None:
     assert "trace_metadata" in trace
 
 
+def test_run_attempt_records_materialized_task_provenance(tmp_path: Path) -> None:
+    ctx = _make_ctx(tmp_path)
+    ctx.task.update(
+        {
+            "task_source_kind": "terminal_bench_registry",
+            "task_source_id": "hello-world",
+            "task_source_path": "/cache/terminal-bench/hello-world",
+        }
+    )
+    trace_source = tmp_path / "scratch" / "trace.jsonl"
+    _write_trace(trace_source)
+
+    async def inner(ctx: AttemptContext) -> AttemptResult:
+        return AttemptResult(
+            success=True,
+            exit_status="completed",
+            trace_path=trace_source,
+            summary={
+                "task_source_path": str(
+                    tmp_path / "run" / "attempt_1" / "_materialized" / "hello-world"
+                ),
+                "original_task_source_path": "/cache/terminal-bench/hello-world",
+            },
+        )
+
+    asyncio.run(
+        run_attempt(
+            ctx,
+            inner=inner,
+            min_free_disk_gb=0.001,
+            container_executable="docker",
+        )
+    )
+
+    manifest = json.loads((ctx.attempt_dir / "run_manifest.json").read_text())
+    results = json.loads((ctx.attempt_dir / "results.json").read_text())
+    expected_task_path = str(
+        tmp_path / "run" / "attempt_1" / "_materialized" / "hello-world"
+    )
+    assert manifest["task"]["task_source_path"] == expected_task_path
+    assert manifest["task"]["original_task_source_path"] == (
+        "/cache/terminal-bench/hello-world"
+    )
+    assert results["task_source_path"] == expected_task_path
+    assert results["original_task_source_path"] == "/cache/terminal-bench/hello-world"
+
+
 def test_run_attempt_finishes_recording_after_trace_copy(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path)
     trace_source = tmp_path / "scratch" / "trace.jsonl"

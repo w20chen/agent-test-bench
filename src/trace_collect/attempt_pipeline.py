@@ -626,6 +626,14 @@ async def run_attempt(
     for key in ("task_source_kind", "task_source_id", "task_source_path"):
         if key in ctx.task:
             task_payload[key] = ctx.task.get(key)
+    if (
+        result is not None
+        and result.summary.get("original_task_source_path") is not None
+    ):
+        task_payload["task_source_path"] = result.summary.get("task_source_path")
+        task_payload["original_task_source_path"] = result.summary.get(
+            "original_task_source_path"
+        )
 
     manifest = {
         "status": status,
@@ -703,13 +711,21 @@ async def run_attempt(
         "task_source_kind",
         "task_source_id",
         "task_source_path",
+        "original_task_source_path",
         "tb_version",
         "tb_dataset",
         "tb_registry_source",
         "adapter_kind",
         "agent_import_path",
     ):
-        if key in ctx.task:
+        if (
+            result is not None
+            and result.summary.get("original_task_source_path") is not None
+            and key in {"task_source_path", "original_task_source_path"}
+            and key in result.summary
+        ):
+            results_payload[key] = result.summary.get(key)
+        elif key in ctx.task:
             results_payload[key] = ctx.task.get(key)
         elif result is not None and key in result.summary:
             results_payload[key] = result.summary.get(key)

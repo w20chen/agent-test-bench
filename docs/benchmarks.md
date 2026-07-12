@@ -131,6 +131,28 @@ export http_proxy=$HTTP_PROXY
 export https_proxy=$HTTPS_PROXY
 ```
 
+For networks where GHCR or Hugging Face is unstable, Terminal-Bench can
+materialize a per-attempt copy of the selected task and rewrite only that
+copy's Dockerfile to use mirrors. The pinned dataset cache is left unchanged,
+and the mirror setting is recorded in the trace metadata under
+`run_config.terminal_bench_mirrors`.
+
+```bash
+# Off by default. China mode uses:
+#   ghcr.io           -> ghcr.nju.edu.cn
+#   huggingface.co   -> hf-mirror.com
+export TERMINAL_BENCH_MIRROR_MODE=china
+
+# Optional overrides in china mode:
+export TERMINAL_BENCH_GHCR_MIRROR=ghcr.nju.edu.cn
+export TERMINAL_BENCH_HF_MIRROR=https://hf-mirror.com
+
+# Or provide explicit custom mirrors:
+export TERMINAL_BENCH_MIRROR_MODE=custom
+export TERMINAL_BENCH_GHCR_MIRROR=ghcr.example.edu.cn
+export TERMINAL_BENCH_HF_MIRROR=https://hf.example.edu.cn
+```
+
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek --model deepseek-chat \

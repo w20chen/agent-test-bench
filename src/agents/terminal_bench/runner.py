@@ -27,6 +27,25 @@ class _ActiveTBProcess:
     cleanup: Callable[[], None]
 
 
+@dataclass(frozen=True)
+class _MirrorConfig:
+    mode: str
+    ghcr_mirror: str | None
+    hf_mirror: str | None
+
+    @property
+    def enabled(self) -> bool:
+        return self.ghcr_mirror is not None or self.hf_mirror is not None
+
+    def as_metadata(self) -> dict[str, str]:
+        metadata = {"mode": self.mode}
+        if self.ghcr_mirror is not None:
+            metadata["ghcr_mirror"] = self.ghcr_mirror
+        if self.hf_mirror is not None:
+            metadata["hf_mirror"] = self.hf_mirror
+        return metadata
+
+
 def _optional_positive_float(value: Any, *, name: str) -> float | None:
     if value is None or value == "":
         return None
@@ -100,6 +119,7 @@ class TerminalBenchRunner:
         )
         self.mcp_config = self._resolve_mcp_config(mcp_config)
         self.mcp_config_label = self._mcp_config_label(mcp_config)
+        self.mirror_config = self._mirror_config_from_env()
         self._install_global_signal_handlers()
 
     async def run_openclaw_task(
@@ -147,8 +167,12 @@ class TerminalBenchRunner:
                 run_id=run_id,
             )
         )
-        command = self._build_tb_command(
+        task_for_run = self._materialize_task_with_mirrors(
             task=task,
+            run_root=run_root,
+        )
+        command = self._build_tb_command(
+            task=task_for_run,
             run_root=run_root,
             run_id=run_id,
             prompt_template=prompt_template,
@@ -164,7 +188,7 @@ class TerminalBenchRunner:
             cwd=repo_root,
             env=env,
             run_root=run_root,
-            task=task,
+            task=task_for_run,
             run_id=run_id,
         )
         if completed.returncode != 0:
@@ -177,7 +201,7 @@ class TerminalBenchRunner:
         trace_path = self._find_trace_path(tb_run_path)
         summary = self._summary(
             tb_version=proof["tb_version"],
-            task=task,
+            task=task_for_run,
             tb_run_path=tb_run_path,
             tb_process_logs=tb_process_logs,
         )
@@ -191,7 +215,7 @@ class TerminalBenchRunner:
         self._augment_trace_metadata(
             src=trace_path,
             dst=normalized_trace,
-            task=task,
+            task=task_for_run,
             prompt_template=prompt_template,
             tb_version=proof["tb_version"],
         )
@@ -338,6 +362,63 @@ class TerminalBenchRunner:
                 ]
             )
         return command
+
+    def _materialize_task_with_mirrors(
+        self,
+        *,
+        task: dict[str, Any],
+        run_root: Path,
+    ) -> dict[str, Any]:
+        if not self.mirror_config.enabled:
+            return task
+
+        task_source_path = task.get("task_source_path")
+        if not task_source_path:
+            raise ValueError(
+                "Terminal-Bench mirrors require task_source_path so the task can "
+                "be materialized without modifying the cached dataset"
+            )
+        source_task_dir = Path(str(task_source_path)).expanduser().resolve()
+        if not source_task_dir.is_dir():
+            raise FileNotFoundError(
+                f"Terminal-Bench task source path missing: {source_task_dir}"
+            )
+        task_id = str(task["task_id"])
+        materialized_root = run_root / "_materialized_terminal_bench_dataset"
+        materialized_task_dir = materialized_root / task_id
+        if materialized_task_dir.exists():
+            shutil.rmtree(materialized_task_dir)
+        shutil.copytree(source_task_dir, materialized_task_dir)
+        self._rewrite_task_dockerfile_for_mirrors(materialized_task_dir)
+
+        materialized_task = dict(task)
+        materialized_task["dataset_root"] = str(materialized_root.resolve())
+        materialized_task["task_source_path"] = str(materialized_task_dir.resolve())
+        materialized_task["original_task_source_path"] = str(source_task_dir)
+        return materialized_task
+
+    def _rewrite_task_dockerfile_for_mirrors(self, task_dir: Path) -> None:
+        dockerfile = task_dir / "Dockerfile"
+        if not dockerfile.exists():
+            return
+        original = dockerfile.read_text(encoding="utf-8")
+        rewritten = self._rewrite_mirror_urls(original)
+        if rewritten != original:
+            dockerfile.write_text(rewritten, encoding="utf-8")
+
+    def _rewrite_mirror_urls(self, text: str) -> str:
+        if self.mirror_config.ghcr_mirror is not None:
+            text = text.replace("ghcr.io/", f"{self.mirror_config.ghcr_mirror}/")
+        if self.mirror_config.hf_mirror is not None:
+            text = text.replace(
+                "https://huggingface.co/",
+                f"{self.mirror_config.hf_mirror}/",
+            )
+            text = text.replace(
+                "http://huggingface.co/",
+                f"{self.mirror_config.hf_mirror}/",
+            )
+        return text
 
     def _agent_timeout_for_task(self, task: dict[str, Any]) -> float | None:
         if self.global_agent_timeout_sec is not None:
@@ -789,6 +870,7 @@ class TerminalBenchRunner:
                 "task_source_kind": task.get("task_source_kind"),
                 "task_source_id": task.get("task_source_id"),
                 "task_source_path": task.get("task_source_path"),
+                "original_task_source_path": task.get("original_task_source_path"),
                 "tb_version": tb_version,
                 "tb_dataset": task.get("tb_dataset"),
                 "tb_registry_source": task.get("tb_registry_source"),
@@ -806,6 +888,8 @@ class TerminalBenchRunner:
         run_config["tb_process_cleanup_grace_sec"] = self.tb_process_cleanup_grace_sec
         if self.generation_config:
             run_config["generation"] = dict(self.generation_config)
+        if self.mirror_config.enabled:
+            run_config["terminal_bench_mirrors"] = self.mirror_config.as_metadata()
         if run_config:
             merged["run_config"] = run_config
         return merged
@@ -825,7 +909,10 @@ class TerminalBenchRunner:
             "adapter_kind": "terminal_bench_openclaw",
             "agent_import_path": self.AGENT_IMPORT_PATH,
             "tb_run_path": str(tb_run_path),
+            "task_source_path": task.get("task_source_path"),
         }
+        if task.get("original_task_source_path") is not None:
+            summary["original_task_source_path"] = task.get("original_task_source_path")
         if self.global_agent_timeout_sec is not None:
             summary["global_agent_timeout_sec"] = self.global_agent_timeout_sec
         if self.llm_timeout_sec is not None:
@@ -835,6 +922,8 @@ class TerminalBenchRunner:
             summary["mcp_config"] = self.mcp_config_label
         if self.generation_config:
             summary["generation"] = dict(self.generation_config)
+        if self.mirror_config.enabled:
+            summary["terminal_bench_mirrors"] = self.mirror_config.as_metadata()
         if tb_process_logs:
             summary.update(tb_process_logs)
         return summary
@@ -875,3 +964,47 @@ class TerminalBenchRunner:
         if mcp_config == "none":
             return "none"
         return Path(mcp_config).name
+
+    @classmethod
+    def _mirror_config_from_env(cls) -> _MirrorConfig:
+        mode = os.environ.get("TERMINAL_BENCH_MIRROR_MODE", "off").strip().lower()
+        if mode not in {"off", "china", "custom"}:
+            raise ValueError(
+                "TERMINAL_BENCH_MIRROR_MODE must be one of: off, china, custom "
+                f"(got {mode!r})"
+            )
+        if mode == "off":
+            return _MirrorConfig(mode=mode, ghcr_mirror=None, hf_mirror=None)
+        ghcr_mirror = cls._optional_mirror_host(
+            os.environ.get("TERMINAL_BENCH_GHCR_MIRROR")
+        )
+        hf_mirror = cls._optional_mirror_url(os.environ.get("TERMINAL_BENCH_HF_MIRROR"))
+        if mode == "china":
+            ghcr_mirror = ghcr_mirror or "ghcr.nju.edu.cn"
+            hf_mirror = hf_mirror or "https://hf-mirror.com"
+        if mode == "custom" and ghcr_mirror is None and hf_mirror is None:
+            raise ValueError(
+                "TERMINAL_BENCH_MIRROR_MODE=custom requires "
+                "TERMINAL_BENCH_GHCR_MIRROR or TERMINAL_BENCH_HF_MIRROR"
+            )
+        return _MirrorConfig(
+            mode=mode,
+            ghcr_mirror=ghcr_mirror,
+            hf_mirror=hf_mirror,
+        )
+
+    @staticmethod
+    def _optional_mirror_host(value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        mirror = value.strip().removeprefix("https://").removeprefix("http://")
+        return mirror.rstrip("/")
+
+    @staticmethod
+    def _optional_mirror_url(value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        mirror = value.strip().rstrip("/")
+        if not mirror.startswith(("http://", "https://")):
+            mirror = f"https://{mirror}"
+        return mirror

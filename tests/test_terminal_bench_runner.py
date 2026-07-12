@@ -203,6 +203,105 @@ def test_build_tb_command_forwards_mcp_config_path(tmp_path: Path) -> None:
     assert kwargs["mcp_config_path"] == str(mcp_config.resolve())
 
 
+def test_terminal_bench_mirrors_default_off(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("TERMINAL_BENCH_MIRROR_MODE", raising=False)
+    monkeypatch.delenv("TERMINAL_BENCH_GHCR_MIRROR", raising=False)
+    monkeypatch.delenv("TERMINAL_BENCH_HF_MIRROR", raising=False)
+    runner = _make_runner()
+    task = {"task_id": "hello-world", "dataset_root": "/tmp/dataset"}
+
+    assert runner._materialize_task_with_mirrors(
+        task=task,
+        run_root=tmp_path,
+    ) is task
+
+
+def test_terminal_bench_china_mirror_rewrites_task_copy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TERMINAL_BENCH_MIRROR_MODE", "china")
+    runner = _make_runner()
+    task_dir = tmp_path / "tasks" / "hello-world"
+    task_dir.mkdir(parents=True)
+    (task_dir / "Dockerfile").write_text(
+        "\n".join(
+            [
+                "FROM ghcr.io/laude-institute/t-bench/ubuntu-24-04:latest",
+                "RUN curl -L https://huggingface.co/datasets/x/y -o /tmp/y",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (task_dir / "task.yaml").write_text("instruction: hello\n", encoding="utf-8")
+    task = {
+        "task_id": "hello-world",
+        "dataset_root": str(tmp_path / "tasks"),
+        "task_source_path": str(task_dir),
+    }
+
+    materialized = runner._materialize_task_with_mirrors(
+        task=task,
+        run_root=tmp_path / "run",
+    )
+
+    materialized_task_dir = Path(materialized["task_source_path"])
+    materialized_dockerfile = materialized_task_dir / "Dockerfile"
+    assert materialized["dataset_root"] == str(materialized_task_dir.parent.resolve())
+    assert materialized["original_task_source_path"] == str(task_dir.resolve())
+    assert materialized_dockerfile.exists()
+    content = materialized_dockerfile.read_text(encoding="utf-8")
+    assert "ghcr.nju.edu.cn/laude-institute/t-bench/ubuntu-24-04:latest" in content
+    assert "https://hf-mirror.com/datasets/x/y" in content
+    original_content = (task_dir / "Dockerfile").read_text(encoding="utf-8")
+    assert "ghcr.io/laude-institute" in original_content
+    assert "https://huggingface.co/datasets/x/y" in original_content
+
+
+def test_terminal_bench_mirror_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("TERMINAL_BENCH_MIRROR_MODE", "china")
+    runner = _make_runner()
+    metadata = runner._trace_metadata(
+        source_metadata=None,
+        task={
+            "instance_id": "hello-world",
+            "task_source_kind": "terminal_bench_registry",
+        },
+        prompt_template="default",
+        tb_version="0.2.18",
+    )
+
+    assert metadata["run_config"]["terminal_bench_mirrors"] == {
+        "mode": "china",
+        "ghcr_mirror": "ghcr.nju.edu.cn",
+        "hf_mirror": "https://hf-mirror.com",
+    }
+
+
+def test_terminal_bench_custom_mirrors_require_custom_mode(monkeypatch) -> None:
+    monkeypatch.setenv("TERMINAL_BENCH_MIRROR_MODE", "custom")
+    monkeypatch.setenv("TERMINAL_BENCH_GHCR_MIRROR", "https://ghcr.example.com/")
+    monkeypatch.setenv("TERMINAL_BENCH_HF_MIRROR", "hf.example.com/")
+    runner = _make_runner()
+
+    assert runner._rewrite_mirror_urls(
+        "FROM ghcr.io/owner/image\nRUN curl https://huggingface.co/a/b\n"
+    ) == (
+        "FROM ghcr.example.com/owner/image\n"
+        "RUN curl https://hf.example.com/a/b\n"
+    )
+
+
+def test_terminal_bench_mirror_mode_off_ignores_mirror_env(monkeypatch) -> None:
+    monkeypatch.setenv("TERMINAL_BENCH_MIRROR_MODE", "off")
+    monkeypatch.setenv("TERMINAL_BENCH_GHCR_MIRROR", "ghcr.example.com")
+    monkeypatch.setenv("TERMINAL_BENCH_HF_MIRROR", "https://hf.example.com")
+    runner = _make_runner()
+
+    assert runner.mirror_config.enabled is False
+
+
 def test_extract_success_reads_terminal_bench_results(tmp_path: Path) -> None:
     runner = _make_runner()
     run_path = tmp_path / "tb-run"
@@ -329,6 +428,96 @@ def test_run_openclaw_task_publishes_terminal_bench_container_name(
     assert ctx.container_id == "hello-world-1-of-1-hello-world"
     metadata = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[0])
     assert metadata["execution_environment"] == "container"
+
+
+def test_run_openclaw_task_with_mirrors_uses_materialized_task_provenance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TERMINAL_BENCH_MIRROR_MODE", "china")
+    runner = _make_runner()
+    ctx = _make_ctx(tmp_path)
+    task_dir = tmp_path / "tasks" / "hello-world"
+    task_dir.mkdir(parents=True)
+    (task_dir / "Dockerfile").write_text(
+        "FROM ghcr.io/laude-institute/t-bench/ubuntu-24-04:latest\n"
+        "RUN curl https://huggingface.co/datasets/x/y\n",
+        encoding="utf-8",
+    )
+    task = {
+        "instance_id": "hello-world",
+        "task_id": "hello-world",
+        "dataset_root": str(tmp_path / "tasks"),
+        "task_source_kind": "terminal_bench_registry",
+        "task_source_id": "hello-world",
+        "task_source_path": str(task_dir),
+    }
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        runner,
+        "_preflight",
+        lambda: {
+            "tb_version": "0.2.18",
+            "tb_path": "/usr/bin/tb",
+            "docker_path": "/usr/bin/docker",
+            "agent_runtime_mode": "host_controller",
+        },
+    )
+
+    def fake_run_tb_process(**kwargs):
+        seen["task"] = kwargs["task"]
+        seen["command"] = kwargs["command"]
+        tb_run_path = ctx.attempt_dir / "_terminal_bench_run" / "hello-world"
+        tb_run_path.mkdir(parents=True)
+        (tb_run_path / "results.json").write_text(
+            json.dumps({"results": [{"is_resolved": True}]}),
+            encoding="utf-8",
+        )
+        trace_path = (
+            tb_run_path
+            / "hello-world"
+            / "hello-world.1-of-1.hello-world"
+            / "agent-logs"
+            / TerminalBenchRunner.TRACE_FILENAME
+        )
+        trace_path.parent.mkdir(parents=True)
+        trace_path.write_text(
+            json.dumps({"type": "trace_metadata"}) + "\n",
+            encoding="utf-8",
+        )
+        logs = runner._write_tb_process_logs(
+            run_root=kwargs["run_root"],
+            stdout="",
+            stderr="",
+        )
+        return subprocess.CompletedProcess(kwargs["command"], 0, "", ""), logs
+
+    monkeypatch.setattr(runner, "_run_tb_process", fake_run_tb_process)
+
+    result = runner._run_openclaw_task_sync(
+        task,
+        attempt_ctx=ctx,
+        prompt_template="default",
+    )
+
+    materialized_task = seen["task"]
+    assert isinstance(materialized_task, dict)
+    materialized_task_dir = Path(str(materialized_task["task_source_path"]))
+    assert materialized_task_dir.is_relative_to(ctx.attempt_dir)
+    assert materialized_task["original_task_source_path"] == str(task_dir.resolve())
+    command = seen["command"]
+    assert isinstance(command, list)
+    dataset_arg = command[command.index("--dataset-path") + 1]
+    assert dataset_arg == str(materialized_task_dir.parent.resolve())
+    materialized_dockerfile = materialized_task_dir / "Dockerfile"
+    content = materialized_dockerfile.read_text(encoding="utf-8")
+    assert "ghcr.nju.edu.cn/laude-institute" in content
+    assert "https://hf-mirror.com/datasets/x/y" in content
+    metadata = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert metadata["task_source_path"] == str(materialized_task_dir.resolve())
+    assert metadata["original_task_source_path"] == str(task_dir.resolve())
+    assert result.summary["original_task_source_path"] == str(task_dir.resolve())
 
 
 def test_tb_process_timeout_kills_process_group_and_container(
