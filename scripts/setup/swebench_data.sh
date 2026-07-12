@@ -9,8 +9,12 @@
 #   SWE_BENCH_VERIFIED_N  Limit to N tool-intensive tasks using the plugin's
 #                         select_subset. Default: config selection_n (32).
 #                         Set to 0 for the full SWE-bench Verified split.
+#   SWE_BENCH_VERIFIED_FORCE
+#                         Set to 1 to overwrite an existing tasks.json.
 #
-# Idempotent: if tasks.json already exists, prints the row count and exits 0.
+# Idempotent: if tasks.json already exists and FORCE is unset, prints the row
+# count and exits 0 when no explicit size was requested. Explicit size requests
+# fail fast unless FORCE=1 is set.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,11 +24,20 @@ cd "$REPO_ROOT"
 
 TASKS_FILE="data/swebench_verified/tasks.json"
 N="${SWE_BENCH_VERIFIED_N:-}"
+FORCE="${SWE_BENCH_VERIFIED_FORCE:-0}"
 
 if [[ -f "$TASKS_FILE" ]]; then
     count=$(python -c "import json; print(len(json.load(open('${TASKS_FILE}'))))")
-    echo "[setup] SKIP swebench_data: ${TASKS_FILE} already exists (${count} tasks)"
-    exit 0
+    if [[ "${FORCE}" == "1" ]]; then
+        echo "[setup] FORCE overwriting ${TASKS_FILE} (${count} existing tasks)"
+    elif [[ -n "${N}" ]]; then
+        echo "[setup] ERROR: ${TASKS_FILE} already exists (${count} tasks), but SWE_BENCH_VERIFIED_N=${N} was requested." >&2
+        echo "[setup] Move the existing file aside or rerun with SWE_BENCH_VERIFIED_FORCE=1." >&2
+        exit 1
+    else
+        echo "[setup] SKIP swebench_data: ${TASKS_FILE} already exists (${count} tasks)"
+        exit 0
+    fi
 fi
 
 echo "[setup] Downloading SWE-bench Verified dataset (n=${N:-config})..."

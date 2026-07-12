@@ -92,13 +92,13 @@ TOTAL_CORES="${TOTAL_CORES:-160}"
 # Host-mode traces (deep research) are throttled via process-level taskset.
 CPU_LIMIT="${CPU_LIMIT:-1}"
 
-# TASK_SOURCE_REBENCH / TASK_SOURCE_DR: paths to the tasks JSON for each
-# benchmark.  The simulator auto-detects the correct file from trace
-# metadata when the passed --task-source does not exist on disk, so the
-# defaults point to intentionally non-existent paths to trigger
-# auto-detection per trace.
+# TASK_SOURCE_REBENCH / TASK_SOURCE_DR: optional tasks JSON overrides.
+# Rebench defaults to the canonical local cache because it is container-mode.
+# DeepResearch defaults empty so host-mode traces auto-detect/synthesise from
+# metadata. Explicit paths are strict: if they do not exist, simulate fails
+# instead of silently synthesising tasks.
 TASK_SOURCE_REBENCH="${TASK_SOURCE_REBENCH:-${REPO_ROOT}/data/swe-rebench/tasks.json}"
-TASK_SOURCE_DR="${TASK_SOURCE_DR:-${REPO_ROOT}/data/deep-research-bench/tasks.json}"
+TASK_SOURCE_DR="${TASK_SOURCE_DR:-}"
 
 # WORKERS: multiprocessing workers for cloud_model replay.
 # Auto-detected from host core count; capped at TOTAL_CORES.
@@ -153,7 +153,7 @@ trap _cleanup EXIT INT TERM
 #   $3: number of agents (--num-agents)
 #   $4: label for logging
 #   $5: (optional) taskset CPU range override
-#   $6: path to tasks JSON (--task-source)
+#   $6: optional path to tasks JSON (--task-source); empty = auto
 #   $7: resource monitoring mode (on|off), default on.
 #       Host-mode benchmarks (deep research) must use "off".
 _run_simulate() {
@@ -162,7 +162,7 @@ _run_simulate() {
   local num_agents="$3"
   local label="$4"
   local cpu_range="${5:-}"
-  local task_source="${6:-${REPO_ROOT}/data/swe-rebench/tasks.json}"
+  local task_source="${6:-}"
   local resource_mon="${7:-on}"
 
   mkdir -p "${output_dir}"
@@ -198,7 +198,6 @@ _run_simulate() {
   local sim_cmd=(
     "${PYTHON_BIN}" -m "${SIMULATE_MODULE}" simulate
     --source-dir "${src_dir}"
-    --task-source "${task_source}"
     --mode cloud_model
     --container "${CONTAINER_EXE}"
     --num-agents "${num_agents}"
@@ -212,6 +211,9 @@ _run_simulate() {
     --replay-speed "${REPLAY_SPEED}"
     --output-dir "${output_dir}"
   )
+  if [[ -n "${task_source}" ]]; then
+    sim_cmd+=(--task-source "${task_source}")
+  fi
 
   # ── Run simulate ───────────────────────────────────────────────────────
   echo "[$(date +%H:%M:%S)] [${label}] Running simulate with ${num_agents} agents..."
