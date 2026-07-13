@@ -28,7 +28,7 @@ analysis or figure generation, and several are imported directly by tests.
 | `plot_system_resources.py` | Public | Convert `system_resources.jsonl` into a self-contained HTML dashboard. | Documented in `docs/trace-collect.md` and `docs/resource-measurement.md`. |
 | `extract_agent_timeline.py` | Public | Extract per-agent lifecycle timing from simulation outputs. | Used by `run_simulate_sweep.sh`. |
 | `run_simulate_sweep.sh` | Public | Orchestrate trace replay sweeps with system monitoring and timeline extraction. | Documented in `docs/trace-collect.md`. |
-| `run_mixed_scheduling_sweep.sh` | Supported | Run mixed scheduling replay sweeps. | Similar role to `run_simulate_sweep.sh`; keep with sweep tooling. |
+| `run_mixed_scheduling_sweep.sh` | Supported | Compare sequential vs interleaved replay scheduling for two SWE-rebench workload cohorts. | Similar role to `run_simulate_sweep.sh`; documented in `docs/trace-collect.md`. |
 | `run_smoke.sh` | Public | Run current infrastructure smoke checks. | Exposed by `make run-smoke`. |
 | `run_sweep.sh` | Public | Run harness sweep command. | Exposed by `make run-sweep`. |
 | `collect_results.sh` | Public | Pull result artifacts back from a remote machine. | Exposed by `make collect-results`. |

@@ -1353,6 +1353,7 @@ A global sweep summary is written to
 | `scripts/plot_system_resources.py` | Generates a self-contained interactive HTML page from `system_resources.jsonl`. Renders 5 Chart.js time-series panels: CPU + Load, Memory, Container Count, Network I/O rate, Disk I/O rate. No dependencies beyond stdlib (Chart.js loaded from CDN). | `--input <jsonl> --output <html>` |
 | `scripts/extract_agent_timeline.py` | Post-processes a simulation output directory. Scans `*/attempt_*/trace.jsonl`, extracts first/last action wall-clock timestamp per agent, and writes an agent lifecycle JSONL with summary statistics. | `--input-dir <dir> --output <path> [--verbose]` |
 | `scripts/run_simulate_sweep.sh` | Orchestrator that loops over N values, starts the system monitor, runs `simulate` with `--cpu-limit`, `--resource-monitoring on`, `--pmu-monitoring off`, `--ksys-monitoring off`, stops the monitor, extracts the agent timeline, and auto-generates `system_viz.html`. All parameters are configurable via environment variables. | `SOURCE_TRACES_DIR=<dir> bash scripts/run_simulate_sweep.sh` |
+| `scripts/run_mixed_scheduling_sweep.sh` | Orchestrator that compares sequential vs interleaved scheduling for two SWE-rebench replay workloads under the same total CPU budget. Both workloads are container-mode and use resource monitoring. | `SOURCE_TRACES_DIR_A=<dir> SOURCE_TRACES_DIR_B=<dir> bash scripts/run_mixed_scheduling_sweep.sh` |
 
 #### Environment Variables Reference
 
@@ -1368,11 +1369,67 @@ A global sweep summary is written to
 | `CONTAINER_EXE` | `docker` | Container runtime |
 | `TASK_CONTAINER_NO_PROXY` | *(unset)* | Set to `1` to prevent host proxy env vars (`HTTP_PROXY`, `ALL_PROXY`, etc.) from leaking into task containers. Useful when the host proxy (e.g. a SOCKS5 proxy that breaks HTTPS) should not affect in-container pip operations. |
 | `BASE_OUTPUT_DIR` | `traces/simulate/swe-rebench` | Root output directory |
+| `STRICT_SYSTEM_MONITOR` | `1` in `run_mixed_scheduling_sweep.sh` | Fail a mixed-scheduling run if the outer system monitor cannot start. Use `0` only for exploratory debugging. |
 
-All three scripts are committed to the repository and ready to use on the
+All sweep support scripts are committed to the repository and ready to use on the
 target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed
 design document covering rationale, risk assessment, and implementation
 notes.
+
+### Rebench-vs-Rebench Mixed Scheduling Sweep
+
+Use `scripts/run_mixed_scheduling_sweep.sh` when the experiment needs two
+stable, container-mode SWE-rebench workloads rather than a SWE-rebench plus
+Deep Research mix. This avoids network API variability from Deep Research
+traces while preserving the sequential vs interleaved scheduling comparison.
+
+The script expects two source directories, each containing one or more
+`trace.jsonl` files. With `--trace-assignment manifest`, a single case
+directory is valid: replay assigns the same trace to multiple agents and
+suffixes duplicate agent IDs.
+
+Recommended inspected cases from `C:\Users\29068\Desktop\agent_datasets`:
+
+| Role | Case | Observed duration | Rationale |
+|---|---|---:|---|
+| CPU/memory-heavy | `swe-rebench/AI4S2S__lilio-49/attempt_1` | ~943 s | High resource pressure among duration-matched candidates: avg CPU ~109%, peak memory ~8.9 GB, substantial pytest/tool execution. |
+| LLM/context-heavy | `swe-rebench/Azure__azure-cli-2955/attempt_1` | ~1058 s | Similar duration, larger trace/context footprint (~29.7 MB), heavier read/context activity, and lower memory peak than the CPU/memory-heavy case. |
+
+Example:
+
+```bash
+export SOURCE_TRACES_DIR_A=/mnt/c/Users/29068/Desktop/agent_datasets/swe-rebench/AI4S2S__lilio-49/attempt_1
+export SOURCE_TRACES_DIR_B=/mnt/c/Users/29068/Desktop/agent_datasets/swe-rebench/Azure__azure-cli-2955/attempt_1
+export WORKLOAD_A_LABEL=cpu-memory-heavy
+export WORKLOAD_B_LABEL=llm-heavy
+export SWEEP_VALUES="40 80 160 320"
+export TOTAL_CORES=160
+export CPU_LIMIT=1
+export STRICT_SYSTEM_MONITOR=1
+
+bash scripts/run_mixed_scheduling_sweep.sh
+```
+
+On Git Bash or another shell, use that shell's equivalent path form. The
+script requires `taskset`, so WSL/Linux is the expected runtime environment.
+
+For each N, the script runs:
+
+- `sequential_N<N>/workload_a` then `sequential_N<N>/workload_b`, each with
+  the full CPU range.
+- `interleaved_N<N>/workload_a` and `interleaved_N<N>/workload_b` in parallel,
+  splitting the CPU range evenly.
+
+The summary file records total wall time plus per-workload elapsed seconds and
+success flags. Do not change case selection, N values, replay speed, or CPU
+budget for result-producing runs without documenting the rationale.
+
+Preflight checks require both source directories to contain SWE-rebench trace
+metadata, both task-source JSON files to exist, and every `SWEEP_VALUES` entry
+to be a positive even integer. `STRICT_SYSTEM_MONITOR=1` is the default: if the
+outer system monitor cannot start, the affected simulate run fails instead of
+silently producing a result without system-level resource data. Set it to `0`
+only for exploratory debugging, not result-producing runs.
 
 ### Interpreting Sweep Output
 

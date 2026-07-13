@@ -1,3 +1,74 @@
+# Current Plan: Rebench-vs-Rebench Mixed Scheduling Sweep
+
+## Objective
+
+Replace the mixed scheduling sweep's deep-research half with a second SWE-rebench trace cohort, select two suitable SWE-rebench cases from `C:\Users\29068\Desktop\agent_datasets`, and update related documentation.
+
+## Constraints
+
+- Do not use DeepResearch traces for this experiment because network API behavior is not stable enough for reproducibility.
+- Use two real SWE-rebench trace cohorts/cases:
+  - one CPU/memory-heavy,
+  - one LLM-heavy,
+  - with roughly comparable total replay duration.
+- Preserve research integrity: no benchmark-specific hacks, no synthetic or mocked traces, no shortcuts that alter workload semantics.
+- Keep configuration explicit through environment variables.
+
+## Plan
+
+1. Inspect existing sweep script and documentation references.
+2. Inspect `C:\Users\29068\Desktop\agent_datasets` for available SWE-rebench traces and extract lightweight metadata from trace files.
+3. Rank candidate cases by observable trace characteristics:
+   - elapsed duration,
+   - tool/action mix,
+   - shell/container activity,
+   - model/LLM call activity if present,
+   - available resource/timeline artifacts.
+4. Select two case directories with comparable elapsed duration but contrasting profiles.
+5. Modify `scripts/run_mixed_scheduling_sweep.sh` so it runs two SWE-rebench cohorts instead of SWE-rebench plus DeepResearch:
+   - rename source variables to workload A/B with backward-compatible aliases where reasonable,
+   - keep both paths container-mode with resource monitoring enabled,
+   - keep CPU partitioning and sequential/interleaved comparison semantics,
+   - document selected case defaults only as examples, not hidden hardcoding.
+6. Update documentation that references `run_mixed_scheduling_sweep.sh`.
+7. Run shell syntax checks and focused tests or dry-run-safe validation.
+8. Spawn a strict reviewer sub-agent before finalizing because this touches experiment/evaluation workflow.
+9. Address reviewer findings and summarize changes.
+
+## Checkpoints
+
+- After candidate inspection, confirm selected cases if the evidence is ambiguous.
+- Before any long-running experiment execution, stop for explicit human approval.
+
+## Progress
+
+- Inspected `C:\Users\29068\Desktop\agent_datasets\swe-rebench` and found 195 trace cases, 104 with resource samples.
+- Selected:
+  - CPU/memory-heavy: `AI4S2S__lilio-49/attempt_1` (~943 s, avg CPU ~109%, peak memory ~8.9 GB).
+  - LLM/context-heavy: `Azure__azure-cli-2955/attempt_1` (~1058 s, trace footprint ~29.7 MB).
+- Updated `scripts/run_mixed_scheduling_sweep.sh` to use workload A/B SWE-rebench sources with both sides in container/resource-monitoring mode.
+- Updated `docs/scripts.md` and `docs/trace-collect.md`.
+- Static checks completed:
+  - no non-ASCII remains in `scripts/run_mixed_scheduling_sweep.sh`;
+  - `git diff --check` reported no whitespace errors, only line-ending warnings;
+  - lightweight Python assertions passed.
+- `bash -n` could not run locally because `bash.exe` points to unavailable WSL on this Windows host.
+
+## Review Gate
+
+- Independent reviewer found no critical issues.
+- Major issue found: `SOURCE_TRACES_DIR_B` fell back to stale `SOURCE_TRACES_DIR_DR`, which could silently reintroduce DeepResearch traces.
+- Fix: removed the `SOURCE_TRACES_DIR_DR` fallback and added preflight metadata validation requiring both source directories to contain SWE-rebench trace metadata.
+- Minor issues fixed:
+  - reject non-positive, non-numeric, or odd `SWEEP_VALUES`;
+  - validate `TASK_SOURCE_A` and `TASK_SOURCE_B` exist;
+  - make system monitor startup fail closed by default via `STRICT_SYSTEM_MONITOR=1`;
+  - document the strict monitor behavior and even-N constraint.
+
+---
+
+# Archived Previous Plan
+
 # Current Plan: Backward-Compatible Exec Classification
 
 ## Goal
