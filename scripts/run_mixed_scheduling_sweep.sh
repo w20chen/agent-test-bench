@@ -15,6 +15,10 @@
 # and are constrained to the same total CPU cores, making wall-clock time the
 # primary comparison metric.
 #
+# Every replay agent receives exactly one CPU core via --agent-cpuset. In
+# interleaved mode, workload A and B cores are alternated within each configured
+# LLC cluster so each cluster has as balanced an A/B mix as possible.
+#
 # Prerequisites:
 #   - SOURCE_TRACES_DIR_A: directory of pre-collected SWE-rebench traces
 #   - SOURCE_TRACES_DIR_B: directory of pre-collected SWE-rebench traces
@@ -83,6 +87,10 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 CONTAINER_EXE="${CONTAINER_EXE:-docker}"
 REPLAY_SPEED="${REPLAY_SPEED:-1}"
 STRICT_SYSTEM_MONITOR="${STRICT_SYSTEM_MONITOR:-1}"
+CPU_CORE_LIST="${CPU_CORE_LIST:-}"
+CPU_CORE_START="${CPU_CORE_START:-0}"
+CPU_CORE_STRIDE="${CPU_CORE_STRIDE:-1}"
+LLC_CLUSTER_SIZE="${LLC_CLUSTER_SIZE:-4}"
 
 # SWEEP_VALUES: total agent concurrency levels to sweep.
 # Each round processes N total traces: N/2 workload A + N/2 workload B.
@@ -91,8 +99,8 @@ STRICT_SYSTEM_MONITOR="${STRICT_SYSTEM_MONITOR:-1}"
 SWEEP_VALUES="${SWEEP_VALUES:-40 80 160 320}"
 
 # TOTAL_CORES: system-wide CPU core budget.  The entire script is pinned to
-# cores 0..(TOTAL_CORES-1) via taskset, and the two parallel simulate
-# processes in the interleaved strategy are further partitioned.
+# TOTAL_CORES physical cores. Each replay agent is pinned to exactly one core
+# via --agent-cpuset; interleaved mode splits cores per LLC cluster.
 TOTAL_CORES="${TOTAL_CORES:-160}"
 
 # CPU_LIMIT: per-container Docker --cpus quota.
@@ -177,6 +185,98 @@ if not metadata.get("instance_id"):
 PY
 }
 
+_normalize_cpu_core_list() {
+  if [[ -n "${CPU_CORE_LIST}" ]]; then
+    # Accept either comma-separated or whitespace-separated core ids.
+    echo "${CPU_CORE_LIST}" | tr ',' ' '
+    return 0
+  fi
+
+  "${PYTHON_BIN}" - "${CPU_CORE_START}" "${CPU_CORE_STRIDE}" "${EFFECTIVE_TOTAL}" <<'PY'
+import sys
+
+start = int(sys.argv[1])
+stride = int(sys.argv[2])
+count = int(sys.argv[3])
+print(" ".join(str(start + i * stride) for i in range(count)))
+PY
+}
+
+_join_csv() {
+  local IFS=,
+  echo "$*"
+}
+
+_validate_core_list() {
+  local -a cores=("$@")
+  if [[ "${#cores[@]}" -ne "${EFFECTIVE_TOTAL}" ]]; then
+    echo "ERROR: core list has ${#cores[@]} entries, expected EFFECTIVE_TOTAL=${EFFECTIVE_TOTAL}." >&2
+    exit 1
+  fi
+  if [[ "${LLC_CLUSTER_SIZE}" -le 0 ]]; then
+    echo "ERROR: LLC_CLUSTER_SIZE must be positive (got ${LLC_CLUSTER_SIZE})." >&2
+    exit 1
+  fi
+
+  local seen=" "
+  local core
+  for core in "${cores[@]}"; do
+    if [[ ! "${core}" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: CPU core ids must be non-negative integers (got ${core})." >&2
+      exit 1
+    fi
+    if [[ "${core}" -ge "${HOST_CORES}" ]]; then
+      echo "ERROR: CPU core id ${core} >= host core count ${HOST_CORES}." >&2
+      exit 1
+    fi
+    if [[ "${seen}" == *" ${core} "* ]]; then
+      echo "ERROR: duplicate CPU core id in core list: ${core}." >&2
+      exit 1
+    fi
+    seen+="${core} "
+  done
+}
+
+_split_interleaved_cores_by_llc_cluster() {
+  local -n all_cores_ref="$1"
+  local -n a_cores_ref="$2"
+  local -n b_cores_ref="$3"
+  a_cores_ref=()
+  b_cores_ref=()
+
+  local i
+  for ((i = 0; i < ${#all_cores_ref[@]}; i++)); do
+    local cluster_offset=$((i % LLC_CLUSTER_SIZE))
+    if [[ $((cluster_offset % 2)) -eq 0 ]]; then
+      a_cores_ref+=("${all_cores_ref[$i]}")
+    else
+      b_cores_ref+=("${all_cores_ref[$i]}")
+    fi
+  done
+
+  if [[ "${#a_cores_ref[@]}" -eq 0 || "${#b_cores_ref[@]}" -eq 0 ]]; then
+    echo "ERROR: interleaved split produced an empty workload core set; increase EFFECTIVE_TOTAL or LLC_CLUSTER_SIZE." >&2
+    exit 1
+  fi
+}
+
+_make_agent_cpuset_csv() {
+  local num_agents="$1"
+  shift
+  local -a cores=("$@")
+  if [[ "${#cores[@]}" -eq 0 ]]; then
+    echo "ERROR: cannot assign agent cpusets from an empty core list." >&2
+    exit 1
+  fi
+
+  local -a cpusets=()
+  local i
+  for ((i = 0; i < num_agents; i++)); do
+    cpusets+=("${cores[$((i % ${#cores[@]}))]}")
+  done
+  _join_csv "${cpusets[@]}"
+}
+
 # Track background simulate PIDs for cleanup on interrupt.
 _BG_PIDS=()
 
@@ -205,6 +305,7 @@ trap _cleanup EXIT INT TERM
 #   $5: (optional) taskset CPU range override
 #   $6: optional path to tasks JSON (--task-source); empty = auto
 #   $7: resource monitoring mode (on|off), default on.
+#   $8: comma-separated per-agent single-core cpusets
 _run_simulate() {
   local src_dir="$1"
   local output_dir="$2"
@@ -213,6 +314,7 @@ _run_simulate() {
   local cpu_range="${5:-}"
   local task_source="${6:-}"
   local resource_mon="${7:-on}"
+  local agent_cpuset_csv="${8:-}"
 
   mkdir -p "${output_dir}"
 
@@ -266,6 +368,22 @@ _run_simulate() {
   )
   if [[ -n "${task_source}" ]]; then
     sim_cmd+=(--task-source "${task_source}")
+  fi
+  if [[ -n "${agent_cpuset_csv}" ]]; then
+    local -a agent_cpusets=()
+    IFS=',' read -r -a agent_cpusets <<< "${agent_cpuset_csv}"
+    if [[ "${#agent_cpusets[@]}" -ne "${num_agents}" ]]; then
+      echo "ERROR: [${label}] got ${#agent_cpusets[@]} agent cpusets for ${num_agents} agents." >&2
+      return 1
+    fi
+    local cpuset
+    for cpuset in "${agent_cpusets[@]}"; do
+      if [[ ! "${cpuset}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: [${label}] agent cpuset must be one CPU core id, got ${cpuset}." >&2
+        return 1
+      fi
+      sim_cmd+=(--agent-cpuset "${cpuset}")
+    done
   fi
 
   # Run simulate.
@@ -460,21 +578,27 @@ echo
 
 # -- Apply global CPU affinity -------------------------------------------------
 
-# Pin the entire script process tree to EFFECTIVE_TOTAL cores.
-# Individual simulate invocations in interleaved mode further partition this.
-CORE_RANGE_FULL="0-$((EFFECTIVE_TOTAL - 1))"
-HALF_CORES=$((EFFECTIVE_TOTAL / 2))
-CORE_RANGE_LEFT="0-$((HALF_CORES - 1))"
-CORE_RANGE_RIGHT="${HALF_CORES}-$((EFFECTIVE_TOTAL - 1))"
+# Pin the entire script process tree to the configured core list. Individual
+# replay agents are then pinned to exactly one core via --agent-cpuset.
+read -r -a CORE_LIST <<< "$(_normalize_cpu_core_list)"
+_validate_core_list "${CORE_LIST[@]}"
+CORE_LIST_CSV=$(_join_csv "${CORE_LIST[@]}")
+
+declare -a INTERLEAVED_A_CORES=()
+declare -a INTERLEAVED_B_CORES=()
+_split_interleaved_cores_by_llc_cluster CORE_LIST INTERLEAVED_A_CORES INTERLEAVED_B_CORES
+INTERLEAVED_A_CORES_CSV=$(_join_csv "${INTERLEAVED_A_CORES[@]}")
+INTERLEAVED_B_CORES_CSV=$(_join_csv "${INTERLEAVED_B_CORES[@]}")
 
 echo "Core partitioning:"
-echo "  Full range:   ${CORE_RANGE_FULL}"
-echo "  Left half:    ${CORE_RANGE_LEFT}"
-echo "  Right half:   ${CORE_RANGE_RIGHT}"
+echo "  Full core list:       ${CORE_LIST_CSV}"
+echo "  Interleaved A cores:  ${INTERLEAVED_A_CORES_CSV}"
+echo "  Interleaved B cores:  ${INTERLEAVED_B_CORES_CSV}"
+echo "  LLC cluster size:     ${LLC_CLUSTER_SIZE}"
 echo
 
-# Pin this script to the full core range.
-taskset -pc "${CORE_RANGE_FULL}" $$
+# Pin this script to the full configured core list.
+taskset -pc "${CORE_LIST_CSV}" $$
 
 # -- Main sweep loop -----------------------------------------------------------
 
@@ -492,6 +616,11 @@ mkdir -p "${BASE_OUTPUT_DIR}"
   echo "  Workload B traces:    ${SOURCE_TRACES_DIR_B} (${WORKLOAD_B_TRACE_COUNT} traces)"
   echo "  Host:                 ${HOST_CORES} cores, ${HOST_MEM} RAM"
   echo "  CPU budget:           ${TOTAL_CORES} cores (effective: ${EFFECTIVE_TOTAL})"
+  echo "  CPU core list:        ${CORE_LIST_CSV}"
+  echo "  CPU core start/stride: ${CPU_CORE_START}/${CPU_CORE_STRIDE}"
+  echo "  LLC cluster size:     ${LLC_CLUSTER_SIZE}"
+  echo "  Interleaved A cores:  ${INTERLEAVED_A_CORES_CSV}"
+  echo "  Interleaved B cores:  ${INTERLEAVED_B_CORES_CSV}"
   echo "  CPU limit/container:  ${CPU_LIMIT}"
   echo "  Workers:              ${WORKERS}"
   echo "  Task source (A):      ${TASK_SOURCE_A}"
@@ -506,6 +635,9 @@ mkdir -p "${BASE_OUTPUT_DIR}"
 
 for N in ${SWEEP_VALUES}; do
   HALF_N=$((N / 2))
+  SEQ_AGENT_CPUSETS=$(_make_agent_cpuset_csv "${HALF_N}" "${CORE_LIST[@]}")
+  INT_A_AGENT_CPUSETS=$(_make_agent_cpuset_csv "${HALF_N}" "${INTERLEAVED_A_CORES[@]}")
+  INT_B_AGENT_CPUSETS=$(_make_agent_cpuset_csv "${HALF_N}" "${INTERLEAVED_B_CORES[@]}")
 
   # Strategy A: Sequential - all workload A first, then all workload B.
   _hr "Strategy A (sequential): N=${N} (${HALF_N} A -> ${HALF_N} B)"
@@ -525,9 +657,10 @@ for N in ${SWEEP_VALUES}; do
     "${SEQ_A_DIR}" \
     "${HALF_N}" \
     "seq-a" \
-    "${CORE_RANGE_FULL}" \
+    "${CORE_LIST_CSV}" \
     "${TASK_SOURCE_A}" \
-    "on"; then
+    "on" \
+    "${SEQ_AGENT_CPUSETS}"; then
     A_OK=1
   fi
 
@@ -539,9 +672,10 @@ for N in ${SWEEP_VALUES}; do
     "${SEQ_B_DIR}" \
     "${HALF_N}" \
     "seq-b" \
-    "${CORE_RANGE_FULL}" \
+    "${CORE_LIST_CSV}" \
     "${TASK_SOURCE_B}" \
-    "on"; then
+    "on" \
+    "${SEQ_AGENT_CPUSETS}"; then
     B_OK=1
   fi
 
@@ -579,27 +713,29 @@ for N in ${SWEEP_VALUES}; do
   A_BG_OK=0
   B_BG_OK=0
 
-  echo "[$(date +%H:%M:%S)] Launching workload A (${HALF_N} agents, cores ${CORE_RANGE_LEFT})..."
+  echo "[$(date +%H:%M:%S)] Launching workload A (${HALF_N} agents, cores ${INTERLEAVED_A_CORES_CSV})..."
   _run_simulate \
     "${SOURCE_TRACES_DIR_A}" \
     "${INTERLEAVED_A_DIR}" \
     "${HALF_N}" \
     "int-a" \
-    "${CORE_RANGE_LEFT}" \
+    "${INTERLEAVED_A_CORES_CSV}" \
     "${TASK_SOURCE_A}" \
-    "on" &
+    "on" \
+    "${INT_A_AGENT_CPUSETS}" &
   A_PID=$!
   _BG_PIDS+=("${A_PID}")
 
-  echo "[$(date +%H:%M:%S)] Launching workload B (${HALF_N} agents, cores ${CORE_RANGE_RIGHT})..."
+  echo "[$(date +%H:%M:%S)] Launching workload B (${HALF_N} agents, cores ${INTERLEAVED_B_CORES_CSV})..."
   _run_simulate \
     "${SOURCE_TRACES_DIR_B}" \
     "${INTERLEAVED_B_DIR}" \
     "${HALF_N}" \
     "int-b" \
-    "${CORE_RANGE_RIGHT}" \
+    "${INTERLEAVED_B_CORES_CSV}" \
     "${TASK_SOURCE_B}" \
-    "on" &
+    "on" \
+    "${INT_B_AGENT_CPUSETS}" &
   B_PID=$!
   _BG_PIDS+=("${B_PID}")
 

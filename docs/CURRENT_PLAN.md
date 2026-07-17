@@ -65,6 +65,26 @@ Replace the mixed scheduling sweep's deep-research half with a second SWE-rebenc
   - make system monitor startup fail closed by default via `STRICT_SYSTEM_MONITOR=1`;
   - document the strict monitor behavior and even-N constraint.
 
+## Follow-up Placement Constraint
+
+- New requirement: every replay agent must be bound to exactly one CPU core;
+  no agent should receive a multi-core cpuset.
+- Implemented by passing one repeated `--agent-cpuset <core>` argument per
+  replay agent in every simulate invocation.
+- Sequential phases draw per-agent single-core placements from the full
+  configured core list.
+- Interleaved phases split the configured core list within each LLC cluster,
+  alternating A/B assignments so clusters like `0,2,4,6` and `8,10,12,14`
+  have an A/B mix as balanced as possible.
+- Added topology controls:
+  - `CPU_CORE_LIST` for an explicit ordered core list grouped by LLC slice;
+  - `CPU_CORE_START` and `CPU_CORE_STRIDE` for generated lists;
+  - `LLC_CLUSTER_SIZE` for the number of configured cores per slice cluster.
+- Independent placement review found no blocking issues. Reviewer confirmed:
+  - all active simulate paths pass one `--agent-cpuset <single-core>` per agent;
+  - broad ranges cannot become agent cpusets;
+  - interleaved mode alternates A/B within each `LLC_CLUSTER_SIZE` group.
+
 ---
 
 # Archived Previous Plan

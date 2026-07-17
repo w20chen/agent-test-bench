@@ -1370,6 +1370,10 @@ A global sweep summary is written to
 | `TASK_CONTAINER_NO_PROXY` | *(unset)* | Set to `1` to prevent host proxy env vars (`HTTP_PROXY`, `ALL_PROXY`, etc.) from leaking into task containers. Useful when the host proxy (e.g. a SOCKS5 proxy that breaks HTTPS) should not affect in-container pip operations. |
 | `BASE_OUTPUT_DIR` | `traces/simulate/swe-rebench` | Root output directory |
 | `STRICT_SYSTEM_MONITOR` | `1` in `run_mixed_scheduling_sweep.sh` | Fail a mixed-scheduling run if the outer system monitor cannot start. Use `0` only for exploratory debugging. |
+| `CPU_CORE_LIST` | *(generated)* | Optional explicit list of CPU ids for mixed scheduling. Overrides `CPU_CORE_START`/`CPU_CORE_STRIDE`. |
+| `CPU_CORE_START` | `0` | First CPU id when generating the mixed-scheduling core list. |
+| `CPU_CORE_STRIDE` | `1` | Step between generated CPU ids. Set `2` for layouts such as `0,2,4,6`, `8,10,12,14`. |
+| `LLC_CLUSTER_SIZE` | `4` | Number of configured core ids per LLC-slice cluster for interleaved A/B balancing. |
 
 All sweep support scripts are committed to the repository and ready to use on the
 target machine.  See `docs/EXPERIMENT_PLAN_arm_sweep.md` for a detailed
@@ -1388,6 +1392,12 @@ The script expects two source directories, each containing one or more
 directory is valid: replay assigns the same trace to multiple agents and
 suffixes duplicate agent IDs.
 
+Every replay agent is pinned to exactly one CPU core with repeated
+`--agent-cpuset <core>` arguments. Sequential phases draw single-core agent
+placements from the full configured core list. Interleaved phases split the
+configured core list inside each LLC cluster, alternating A/B assignments so a
+cluster such as `0,2,4,6` receives two A cores and two B cores.
+
 Recommended inspected cases from `C:\Users\29068\Desktop\agent_datasets`:
 
 | Role | Case | Observed duration | Rationale |
@@ -1404,6 +1414,9 @@ export WORKLOAD_A_LABEL=cpu-memory-heavy
 export WORKLOAD_B_LABEL=llm-heavy
 export SWEEP_VALUES="40 80 160 320"
 export TOTAL_CORES=160
+export CPU_CORE_START=0
+export CPU_CORE_STRIDE=2
+export LLC_CLUSTER_SIZE=4
 export CPU_LIMIT=1
 export STRICT_SYSTEM_MONITOR=1
 
@@ -1416,9 +1429,9 @@ script requires `taskset`, so WSL/Linux is the expected runtime environment.
 For each N, the script runs:
 
 - `sequential_N<N>/workload_a` then `sequential_N<N>/workload_b`, each with
-  the full CPU range.
+  single-core agent placements drawn from the full configured core list.
 - `interleaved_N<N>/workload_a` and `interleaved_N<N>/workload_b` in parallel,
-  splitting the CPU range evenly.
+  using disjoint A/B core lists balanced within each LLC cluster.
 
 The summary file records total wall time plus per-workload elapsed seconds and
 success flags. Do not change case selection, N values, replay speed, or CPU
@@ -1430,6 +1443,11 @@ to be a positive even integer. `STRICT_SYSTEM_MONITOR=1` is the default: if the
 outer system monitor cannot start, the affected simulate run fails instead of
 silently producing a result without system-level resource data. Set it to `0`
 only for exploratory debugging, not result-producing runs.
+
+For a 160-core experiment on a machine where LLC clusters are represented as
+`0,2,4,6`, then `8,10,12,14`, set `CPU_CORE_STRIDE=2` and
+`LLC_CLUSTER_SIZE=4`. If the machine uses a different topology, set
+`CPU_CORE_LIST` explicitly to the ordered list of cores grouped by LLC slice.
 
 ### Interpreting Sweep Output
 
