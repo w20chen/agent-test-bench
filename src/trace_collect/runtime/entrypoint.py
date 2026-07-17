@@ -160,6 +160,11 @@ async def _run_openclaw(request: dict[str, Any]) -> dict[str, Any]:
         tool_workspace=Path(request["tool_workspace"]),
         exec_working_dir=request.get("exec_working_dir"),
         trace_file=Path(request["trace_file"]),
+        pytest_capture_dir=(
+            Path(request["pytest_capture_dir"])
+            if request.get("pytest_capture_dir")
+            else None
+        ),
     )
     total_llm_ms, total_tool_ms, total_tokens = _trace_summary_totals(
         Path(request["trace_file"])

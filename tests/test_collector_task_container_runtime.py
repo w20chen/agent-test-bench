@@ -194,9 +194,13 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert Path(str(seen["workspace_base"])).is_absolute()
     assert Path(str(seen["workspace_dir"])).is_absolute()
     assert Path(str(seen["trace_file"])).is_absolute()
+    assert Path(str(seen["pytest_capture_dir"])).is_absolute()
     assert Path(str(seen["raw_stdout_path"])).is_absolute()
     assert Path(str(seen["raw_stderr_path"])).is_absolute()
     assert Path(str(seen["result_path"])) == runtime_dir.resolve() / "run.result.json"
+    assert Path(str(seen["pytest_capture_dir"])) == (
+        ctx.attempt_dir.resolve() / "pytest_scripts"
+    )
     assert seen["tool_workspace"] == "/testbed"
     assert seen["exec_working_dir"] == "/testbed"
     assert preflight_seen["runtime"] == "/usr/bin/python3"

@@ -28,6 +28,13 @@ from agents.openclaw.eval.types import (
 from agents.openclaw.providers.base import LLMProvider
 from agents.openclaw.session.manager import SessionManager
 from trace_collect.latency_metrics import summarize_llm_latencies
+from trace_collect.pytest_script_capture import (
+    PytestCaptureRecord,
+    capture_pytest_scripts_before_tool,
+    finalize_pytest_capture,
+    record_pytest_capture_failure,
+    record_pytest_finalize_failure,
+)
 
 
 def _trace_has_llm_error(trace_file: Path | None) -> bool:
@@ -73,6 +80,8 @@ class TraceCollectorHook(AgentHook):
         *,
         agent_id: str | None = None,
         task_id: str | None = None,
+        pytest_capture_dir: Path | None = None,
+        pytest_project_root: Path | None = None,
     ) -> None:
         self.trace_file = trace_file
         self.instance_id = instance_id
@@ -92,6 +101,9 @@ class TraceCollectorHook(AgentHook):
         self._records: list[dict[str, Any]] = []
         self._actions: list[dict[str, Any]] = []
         self._pending_llm_records: list[dict[str, Any]] = []
+        self._pytest_capture_dir = pytest_capture_dir
+        self._pytest_project_root = pytest_project_root
+        self._pytest_captures_by_tool_call: dict[str, PytestCaptureRecord] = {}
         self._flushed = False
         self._fh = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
 
@@ -152,6 +164,34 @@ class TraceCollectorHook(AgentHook):
         if context.tool_calls:
             for tc in context.tool_calls:
                 self._tool_start_ts[tc.id] = time.monotonic()
+                if (
+                    self._pytest_capture_dir is not None
+                    and self._pytest_project_root is not None
+                ):
+                    try:
+                        capture = capture_pytest_scripts_before_tool(
+                            capture_root=self._pytest_capture_dir,
+                            project_root=self._pytest_project_root,
+                            iteration=context.iteration,
+                            tool_call_id=tc.id,
+                            tool_name=tc.name,
+                            tool_args=tc.arguments
+                            if isinstance(tc.arguments, dict)
+                            else {},
+                        )
+                    except Exception as exc:
+                        capture = record_pytest_capture_failure(
+                            capture_root=self._pytest_capture_dir,
+                            iteration=context.iteration,
+                            tool_call_id=tc.id,
+                            tool_name=tc.name,
+                            tool_args=tc.arguments
+                            if isinstance(tc.arguments, dict)
+                            else {},
+                            error=repr(exc),
+                        )
+                    if capture is not None:
+                        self._pytest_captures_by_tool_call[tc.id] = capture
                 is_mcp = tc.name.startswith("mcp_")
                 self.emit_event(
                     MCP if is_mcp else TOOL,
@@ -350,6 +390,7 @@ class TraceCollectorHook(AgentHook):
                     )
 
                 action_id_suffix = tc_id if tc_id else tool_name
+                action_id = f"tool_{context.iteration}_{action_id_suffix}"
                 tool_action_data: dict[str, Any] = {
                     "tool_name": tool_name,
                     "tool_call_id": tc_id,
@@ -366,7 +407,7 @@ class TraceCollectorHook(AgentHook):
                     tool_action_data["wall_ms"] = per_tool_timing
                 tool_action = TraceAction(
                     action_type="tool_exec",
-                    action_id=f"tool_{context.iteration}_{action_id_suffix}",
+                    action_id=action_id,
                     agent_id=self.agent_id,
                     program_id=self.program_id,
                     instance_id=self.instance_id,
@@ -375,6 +416,27 @@ class TraceCollectorHook(AgentHook):
                     ts_end=tool_ts_end,
                     data=tool_action_data,
                 )
+                capture_record = self._pytest_captures_by_tool_call.pop(tc_id, None)
+                if capture_record is not None:
+                    try:
+                        finalize_pytest_capture(
+                            capture_record,
+                            action_id=action_id,
+                            ts_start=tool_ts_start,
+                            ts_end=tool_ts_end,
+                            duration_ms=round(duration_ms, 1),
+                            success=tool_ok,
+                        )
+                    except Exception as exc:
+                        record_pytest_finalize_failure(
+                            capture_record,
+                            action_id=action_id,
+                            ts_start=tool_ts_start,
+                            ts_end=tool_ts_end,
+                            duration_ms=round(duration_ms, 1),
+                            success=tool_ok,
+                            error=repr(exc),
+                        )
                 self._write_action(tool_action)
 
         if context.response:
@@ -771,11 +833,29 @@ class SessionRunner:
         instance_id: str | None = None,
         channel: str = "cli",
         prepare_ms: float | None = None,
+        capture_pytest_scripts: bool = False,
+        pytest_capture_dir: Path | None = None,
     ) -> SessionRunResult:
         workspace.mkdir(parents=True, exist_ok=True)
         iid = instance_id or session_key
 
-        trace_hook = TraceCollectorHook(trace_file, iid, agent_id=iid, task_id=iid)
+        effective_project_workspace = project_workspace or tool_workspace or workspace
+        pytest_capture_dir = (
+            (pytest_capture_dir or trace_file.parent / "pytest_scripts")
+            if capture_pytest_scripts
+            else None
+        )
+        pytest_project_root = (
+            effective_project_workspace if capture_pytest_scripts else None
+        )
+        trace_hook = TraceCollectorHook(
+            trace_file,
+            iid,
+            agent_id=iid,
+            task_id=iid,
+            pytest_capture_dir=pytest_capture_dir,
+            pytest_project_root=pytest_project_root,
+        )
 
         metadata = {
             "type": "trace_metadata",

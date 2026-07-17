@@ -513,6 +513,14 @@ traces/<model>/<ts>/
 one attempt per task, full resource monitoring enabled, `--ksys`
 per instance (output to `<instance_id>/`).
 
+For SWE-style OpenClaw collection, each pytest tool invocation also writes a
+`pytest_scripts/` artifact directory under the attempt.  Each
+`iter_<N>_exec-pytest_<tool_call_id>/` subdirectory contains the original
+`command.sh`, copied pytest `.py` files under `files/`, and `manifest.json`
+with the trace timing fields (`duration_ms`, `ts_start`, `ts_end`, `success`,
+`action_id`).  The attempt-level `pytest_scripts/index.jsonl` provides one
+row per captured pytest invocation for downstream timing analysis.
+
 ---
 
 ## Simulate: Trace Replay
