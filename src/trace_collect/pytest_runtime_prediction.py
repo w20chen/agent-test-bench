@@ -28,6 +28,8 @@ RUNTIME_JSON_FILENAME = "pytest_runtime.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
 PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
+PREDICTION_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 3
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._+-]+")
 _EXIT_CODE_RE = re.compile(r"Exit code:\s*(-?\d+)")
@@ -335,6 +337,16 @@ def _history_commands(history: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return commands if isinstance(commands, dict) else {}
 
 
+def _history_overheads(history: dict[str, Any]) -> dict[str, Any]:
+    overheads = history.get("overheads")
+    return overheads if isinstance(overheads, dict) else {}
+
+
+def _history_unknown_tests(history: dict[str, Any]) -> dict[str, Any]:
+    unknown_tests = history.get("unknown_tests")
+    return unknown_tests if isinstance(unknown_tests, dict) else {}
+
+
 def historical_duration(history: dict[str, Any], nodeid: str) -> float | None:
     rec = _history_tests(history).get(nodeid)
     if not isinstance(rec, dict):
@@ -354,6 +366,18 @@ def global_history_median(history: dict[str, Any]) -> float | None:
                 float(v) for v in durations if isinstance(v, (int, float)) and v >= 0
             )
     return _median(values)
+
+
+def global_overhead_median(history: dict[str, Any]) -> float | None:
+    overheads = _history_overheads(history)
+    durations = overheads.get("durations")
+    return _median(durations if isinstance(durations, list) else [])
+
+
+def global_unknown_test_median(history: dict[str, Any]) -> float | None:
+    unknown_tests = _history_unknown_tests(history)
+    durations = unknown_tests.get("durations")
+    return _median(durations if isinstance(durations, list) else [])
 
 
 def file_history_median(history: dict[str, Any], file_path: str) -> float | None:
@@ -389,14 +413,41 @@ def predict_test_duration(
     return None, "unavailable"
 
 
+def predict_test_duration_with_unknown_fallback(
+    history: dict[str, Any],
+    nodeid: str,
+    *,
+    project_median: float | None = None,
+    unknown_median: float | None = None,
+) -> tuple[float | None, str]:
+    """Predict one test duration, preferring cold-start unknown-test history."""
+    exact = historical_duration(history, nodeid)
+    if exact is not None:
+        return exact, "nodeid"
+    by_file = file_history_median(history, _node_file(nodeid))
+    if by_file is not None:
+        return by_file, "file"
+    if unknown_median is None:
+        unknown_median = global_unknown_test_median(history)
+    if unknown_median is not None:
+        return unknown_median, "unknown"
+    if project_median is None:
+        project_median = global_history_median(history)
+    if project_median is not None:
+        return project_median, "project"
+    return None, "unavailable"
+
+
 def compute_pytest_predictions(
     *,
     history: dict[str, Any],
     command: str,
     nodeids: list[str],
 ) -> dict[str, Any]:
-    """Compute Last Run, Test Count, and Per-Test Historical Sum."""
+    """Compute Last Run, Test Count, and overhead-adjusted Per-Test Sum."""
     project_median = global_history_median(history)
+    overhead_median = global_overhead_median(history)
+    unknown_median = global_unknown_test_median(history)
     command_key = normalize_pytest_command(command)
     command_rec = _history_commands(history).get(command_key)
     command_durations = (
@@ -416,8 +467,11 @@ def compute_pytest_predictions(
     )
 
     per_test_values: list[dict[str, Any]] = []
+    unknown_fallback_values: list[dict[str, Any]] = []
     per_test_total = 0.0
+    unknown_fallback_total = 0.0
     per_test_available = True
+    unknown_fallback_available = True
     for nodeid in nodeids:
         predicted, source = predict_test_duration(
             history,
@@ -436,13 +490,66 @@ def compute_pytest_predictions(
         else:
             per_test_total += predicted
 
+        unknown_predicted, unknown_source = predict_test_duration_with_unknown_fallback(
+            history,
+            nodeid,
+            project_median=project_median,
+            unknown_median=unknown_median,
+        )
+        unknown_fallback_values.append(
+            {
+                "nodeid": nodeid,
+                "predicted_duration_s": unknown_predicted,
+                "source": unknown_source,
+            }
+        )
+        if unknown_predicted is None:
+            unknown_fallback_available = False
+        else:
+            unknown_fallback_total += unknown_predicted
+
+    per_test_without_overhead = (
+        per_test_total if per_test_available and nodeids else None
+    )
+    overhead_used = (
+        overhead_median
+        if per_test_without_overhead is not None and overhead_median is not None
+        else None
+    )
+    per_test_with_overhead = (
+        per_test_without_overhead + overhead_used
+        if per_test_without_overhead is not None and overhead_used is not None
+        else per_test_without_overhead
+    )
+    unknown_without_overhead = (
+        unknown_fallback_total if unknown_fallback_available and nodeids else None
+    )
+    unknown_overhead_used = (
+        overhead_median
+        if unknown_without_overhead is not None and overhead_median is not None
+        else None
+    )
+    unknown_with_overhead = (
+        unknown_without_overhead + unknown_overhead_used
+        if unknown_without_overhead is not None and unknown_overhead_used is not None
+        else unknown_without_overhead
+    )
+
     return {
         "command_key": command_key,
         "project_test_median_s": project_median,
+        "project_overhead_median_s": overhead_median,
+        "project_unknown_test_median_s": unknown_median,
         "prediction_last_run_s": last_run,
         "prediction_test_count_s": test_count,
-        "prediction_per_test_s": per_test_total if per_test_available and nodeids else None,
+        "prediction_per_test_without_overhead_s": per_test_without_overhead,
+        "prediction_per_test_overhead_s": overhead_used,
+        "prediction_per_test_s": per_test_with_overhead,
         "per_test_prediction_details": per_test_values,
+        "prediction_unknown_test_fallback_without_overhead_s": unknown_without_overhead,
+        "prediction_unknown_test_fallback_overhead_s": unknown_overhead_used,
+        "prediction_unknown_test_fallback_s": unknown_with_overhead,
+        "unknown_test_fallback_prediction_details": unknown_fallback_values,
     }
 
 
@@ -458,16 +565,27 @@ def update_pytest_history(
     command: str,
     total_duration_s: float,
     tests: list[dict[str, Any]],
+    per_test_prediction_details: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return updated bounded history after this run."""
     updated = {
-        "schema_version": 1,
+        "schema_version": HISTORY_SCHEMA_VERSION,
         "updated_at": _utc_now(),
         "history_limit": HISTORY_LIMIT,
         "tests": dict(_history_tests(history)),
         "commands": dict(_history_commands(history)),
+        "overheads": dict(_history_overheads(history)),
+        "unknown_tests": dict(_history_unknown_tests(history)),
     }
     test_history = updated["tests"]
+    prediction_source_by_nodeid = {
+        str(detail.get("nodeid")): str(detail.get("source") or "")
+        for detail in (per_test_prediction_details or [])
+        if isinstance(detail, dict) and isinstance(detail.get("nodeid"), str)
+    }
+    unknown_observed_durations: list[float] = []
+    observed_test_duration_s = 0.0
+    observed_test_count = 0
     for test in tests:
         nodeid = test.get("nodeid")
         duration = test.get("duration_s")
@@ -475,6 +593,10 @@ def update_pytest_history(
             continue
         if str(test.get("outcome") or "").lower() == "notrun":
             continue
+        observed_test_duration_s += float(duration)
+        observed_test_count += 1
+        if prediction_source_by_nodeid.get(nodeid) in {"project", "unavailable"}:
+            unknown_observed_durations.append(float(duration))
         rec = dict(test_history.get(nodeid) or {})
         rec["durations"] = _bounded_append(rec.get("durations") or [], float(duration))
         rec["last_outcome"] = test.get("outcome")
@@ -490,6 +612,24 @@ def update_pytest_history(
     )
     command_rec["last_seen_at"] = updated["updated_at"]
     command_history[command_key] = command_rec
+
+    if observed_test_count > 0:
+        overhead_s = max(0.0, float(total_duration_s) - observed_test_duration_s)
+        overheads = dict(updated["overheads"])
+        overheads["durations"] = _bounded_append(overheads.get("durations") or [], overhead_s)
+        overheads["last_seen_at"] = updated["updated_at"]
+        overheads["last_observed_test_duration_s"] = observed_test_duration_s
+        overheads["last_observed_test_count"] = observed_test_count
+        updated["overheads"] = overheads
+    if unknown_observed_durations:
+        unknown_tests = dict(updated["unknown_tests"])
+        durations = unknown_tests.get("durations") or []
+        for duration in unknown_observed_durations:
+            durations = _bounded_append(durations, duration)
+        unknown_tests["durations"] = durations
+        unknown_tests["last_seen_at"] = updated["updated_at"]
+        unknown_tests["last_observed_count"] = len(unknown_observed_durations)
+        updated["unknown_tests"] = unknown_tests
     return updated
 
 
@@ -575,6 +715,7 @@ def finalize_pytest_runtime_prediction(
         "last_run": predictions["prediction_last_run_s"],
         "test_count": predictions["prediction_test_count_s"],
         "per_test": predictions["prediction_per_test_s"],
+        "unknown_test_fallback": predictions["prediction_unknown_test_fallback_s"],
     }
     absolute_error = {
         key: _absolute_error(value, actual_duration_s)
@@ -586,7 +727,7 @@ def finalize_pytest_runtime_prediction(
     }
 
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": PREDICTION_SCHEMA_VERSION,
         "created_at": _utc_now(),
         "run_id": action_id,
         "iteration": record.iteration,
@@ -615,17 +756,45 @@ def finalize_pytest_runtime_prediction(
         "prediction_last_run_s": predictions["prediction_last_run_s"],
         "prediction_test_count_s": predictions["prediction_test_count_s"],
         "prediction_per_test_s": predictions["prediction_per_test_s"],
+        "prediction_per_test_without_overhead_s": predictions[
+            "prediction_per_test_without_overhead_s"
+        ],
+        "prediction_per_test_overhead_s": predictions["prediction_per_test_overhead_s"],
         "per_test_prediction_details": predictions["per_test_prediction_details"],
+        "prediction_unknown_test_fallback_s": predictions[
+            "prediction_unknown_test_fallback_s"
+        ],
+        "prediction_unknown_test_fallback_without_overhead_s": predictions[
+            "prediction_unknown_test_fallback_without_overhead_s"
+        ],
+        "prediction_unknown_test_fallback_overhead_s": predictions[
+            "prediction_unknown_test_fallback_overhead_s"
+        ],
+        "unknown_test_fallback_prediction_details": predictions[
+            "unknown_test_fallback_prediction_details"
+        ],
         "absolute_error": absolute_error,
         "relative_error": relative_error,
         "history_before": {
             "test_count": len(_history_tests(history)),
             "command_count": len(_history_commands(history)),
             "project_test_median_s": predictions["project_test_median_s"],
+            "project_overhead_median_s": predictions["project_overhead_median_s"],
+            "project_unknown_test_median_s": predictions[
+                "project_unknown_test_median_s"
+            ],
         },
         "warnings": warnings,
     }
-    _write_json(record.directory / "prediction.json", payload)
+    detailed_payload: dict[str, Any] = {
+        **payload,
+        "pytest_output": {
+            "text": tool_result,
+            "length_chars": len(tool_result),
+            "truncated_by_tool": "... chars truncated" in tool_result,
+        },
+    }
+    _write_json(record.directory / "prediction.json", detailed_payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
 
     if tests:
@@ -634,11 +803,12 @@ def finalize_pytest_runtime_prediction(
             command=record.command,
             total_duration_s=actual_duration_s,
             tests=tests,
+            per_test_prediction_details=predictions["per_test_prediction_details"],
         )
         _write_json(history_path, updated_history)
 
     print(format_pytest_prediction_summary(payload), flush=True)
-    return payload
+    return detailed_payload
 
 
 def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
@@ -650,13 +820,17 @@ def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
         return "n/a" if value is None else f"{float(value):.2f}s"
 
     rel = payload.get("relative_error") or {}
-    per_test_rel = rel.get("per_test")
-    per_test_err = "n/a" if per_test_rel is None else f"{float(per_test_rel) * 100:.1f}%"
+
+    def _err(method: str) -> str:
+        value = rel.get(method)
+        return "n/a" if value is None else f"{float(value) * 100:.1f}%"
+
     return (
         "[pytest-predict] "
         f"iter={payload.get('iteration')} tests={count} actual={_fmt(actual)} "
-        f"last={_fmt(payload.get('prediction_last_run_s'))} "
-        f"count={_fmt(payload.get('prediction_test_count_s'))} "
-        f"per_test={_fmt(payload.get('prediction_per_test_s'))} "
-        f"per_test_err={per_test_err}"
+        f"last={_fmt(payload.get('prediction_last_run_s'))} last_err={_err('last_run')} "
+        f"count={_fmt(payload.get('prediction_test_count_s'))} count_err={_err('test_count')} "
+        f"per_test={_fmt(payload.get('prediction_per_test_s'))} per_test_err={_err('per_test')} "
+        f"unknown={_fmt(payload.get('prediction_unknown_test_fallback_s'))} "
+        f"unknown_err={_err('unknown_test_fallback')}"
     )

@@ -528,7 +528,7 @@ load a temporary pytest plugin that writes per-node `nodeid`, `duration_s`, and
 pytest finishes, collect mode immediately prints a concise line like:
 
 ```text
-[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s count=143.80s per_test=215.70s per_test_err=2.1%
+[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9%
 ```
 
 Artifacts are written as:
@@ -544,14 +544,24 @@ attempt_N/pytest_runtime/
 ```
 
 `prediction.json` preserves the actual wall duration, test collection,
-per-test durations/outcomes, the three prediction baselines, and absolute /
-relative errors.  The prediction is computed from `history.json` before the
-current run is added, so the current pytest duration does not leak into its own
-prediction.  `prediction_last_run_s` is keyed by the exact normalized command;
-it does not yet merge merely similar commands.  `actual_duration_s` is the
-whole tool wall time, while per-test history comes from pytest setup/call/
-teardown reports, so startup and collection overhead remain visible as model
-error in this prototype.  Commands that explicitly assign or export
+per-test durations/outcomes, the prediction baselines, absolute /
+relative errors, and `pytest_output.text`, which is the captured shell-tool
+output for that pytest invocation.  The prediction is computed from
+`history.json` before the current run is added, so the current pytest duration
+does not leak into its own prediction.  `predictions.jsonl` appends compact
+per-run rows and omits the full pytest output to keep aggregate scans cheap.
+`prediction_last_run_s` is keyed by the exact normalized command;
+it does not yet merge merely similar commands.  Starting with
+`schema_version=2`, `prediction_per_test_s` is an
+overhead-adjusted per-test estimate: the sum of historical node/file/project
+test durations plus the recent median pytest overhead, where overhead is
+`actual_duration_s - sum(observed test duration_s)`.  The unadjusted sum is
+kept as `prediction_per_test_without_overhead_s`, and the added overhead is
+kept as `prediction_per_test_overhead_s`.  Starting with `schema_version=3`,
+`prediction_unknown_test_fallback_s` adds a fourth baseline for cold-start
+tests: node/file predictions are reused when available, but completely unseen
+tests use the median duration of earlier tests that were also unknown at
+prediction time, then add the same overhead term.  Commands that explicitly assign or export
 `PYTHONPATH` are skipped by this prototype's runtime instrumentation, because
 that shell assignment can hide the temporary pytest plugin from pytest while
 still inheriting plugin-related environment variables.

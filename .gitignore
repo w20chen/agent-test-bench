@@ -23,6 +23,7 @@ results/
 traces/
 output/
 analysis_outputs/
+artifacts/
 .claude/
 
 # Generated visualization artifacts

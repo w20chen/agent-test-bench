@@ -12,7 +12,10 @@ from trace_collect.pytest_runtime_prediction import (
     HIDDEN_RUNTIME_DIR_ARG,
     compute_pytest_predictions,
     finalize_pytest_runtime_prediction,
+    format_pytest_prediction_summary,
     global_history_median,
+    global_overhead_median,
+    global_unknown_test_median,
     historical_duration,
     is_pytest_tool_call,
     merge_pytest_runtime_environment,
@@ -113,6 +116,63 @@ def test_prediction_methods_do_not_use_current_run() -> None:
     assert predictions["prediction_per_test_s"] == pytest.approx(3.0)
 
 
+def test_per_test_prediction_adds_historical_overhead() -> None:
+    history = {
+        "tests": {
+            "tests/test_a.py::test_1": {"durations": [1.0]},
+            "tests/test_a.py::test_2": {"durations": [2.0]},
+        },
+        "overheads": {"durations": [9.0, 11.0, 10.0]},
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_a.py",
+        nodeids=["tests/test_a.py::test_1", "tests/test_a.py::test_2"],
+    )
+
+    assert global_overhead_median(history) == pytest.approx(10.0)
+    assert predictions["prediction_per_test_without_overhead_s"] == pytest.approx(3.0)
+    assert predictions["prediction_per_test_overhead_s"] == pytest.approx(10.0)
+    assert predictions["prediction_per_test_s"] == pytest.approx(13.0)
+
+
+def test_per_test_overhead_field_is_null_when_not_used() -> None:
+    predictions = compute_pytest_predictions(
+        history={"overheads": {"durations": [1.0]}},
+        command="python -m pytest tests/test_a.py",
+        nodeids=[],
+    )
+
+    assert predictions["prediction_per_test_s"] is None
+    assert predictions["prediction_per_test_without_overhead_s"] is None
+    assert predictions["prediction_per_test_overhead_s"] is None
+
+
+def test_unknown_test_fallback_is_fourth_prediction_method() -> None:
+    history = {
+        "tests": {
+            "tests/test_known.py::test_fast": {"durations": [0.1]},
+        },
+        "overheads": {"durations": [1.0]},
+        "unknown_tests": {"durations": [7.0, 9.0, 8.0]},
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_new.py",
+        nodeids=["tests/test_new.py::test_slow"],
+    )
+
+    assert global_unknown_test_median(history) == pytest.approx(8.0)
+    assert predictions["prediction_per_test_s"] == pytest.approx(1.1)
+    assert predictions["per_test_prediction_details"][0]["source"] == "project"
+    assert predictions["prediction_unknown_test_fallback_without_overhead_s"] == pytest.approx(8.0)
+    assert predictions["prediction_unknown_test_fallback_overhead_s"] == pytest.approx(1.0)
+    assert predictions["prediction_unknown_test_fallback_s"] == pytest.approx(9.0)
+    assert predictions["unknown_test_fallback_prediction_details"][0]["source"] == "unknown"
+
+
 def test_missing_and_corrupt_history_degrade_safely(tmp_path: Path) -> None:
     invocation = tmp_path / "pytest_runtime" / "iter_0001_exec-pytest_call_a"
     invocation.mkdir(parents=True)
@@ -157,9 +217,65 @@ def test_missing_and_corrupt_history_degrade_safely(tmp_path: Path) -> None:
     assert payload["prediction_last_run_s"] is None
     assert payload["prediction_test_count_s"] is None
     assert payload["prediction_per_test_s"] is None
+    assert payload["schema_version"] == 3
     assert payload["warnings"]
     history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
+    assert history["schema_version"] == 3
     assert history["tests"]["tests/test_a.py::test_1"]["durations"] == [0.01]
+    assert history["overheads"]["durations"] == pytest.approx([0.19])
+
+
+def test_prediction_json_includes_pytest_output_but_jsonl_stays_compact(
+    tmp_path: Path,
+) -> None:
+    invocation = tmp_path / "pytest_runtime" / "iter_0001_exec-pytest_call_a"
+    invocation.mkdir(parents=True)
+    (invocation / "pytest_runtime.json").write_text(
+        json.dumps(
+            {
+                "collected_count": 1,
+                "exit_code": 0,
+                "tests": [
+                    {
+                        "nodeid": "tests/test_a.py::test_1",
+                        "duration_s": 0.01,
+                        "outcome": "passed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=tmp_path / "pytest_runtime",
+        iteration=1,
+        tool_call_id="call_a",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests/test_a.py"},
+    )
+    assert record is not None
+    record.directory = invocation
+
+    payload = finalize_pytest_runtime_prediction(
+        record,
+        prediction_root=tmp_path / "pytest_runtime",
+        action_id="tool_1_call_a",
+        ts_start=1.0,
+        ts_end=1.2,
+        duration_ms=200.0,
+        success=True,
+        tool_result="test output\nExit code: 0",
+    )
+
+    assert payload["pytest_output"]["text"] == "test output\nExit code: 0"
+    prediction_json = json.loads((invocation / "prediction.json").read_text())
+    prediction_jsonl = json.loads(
+        (tmp_path / "pytest_runtime" / "predictions.jsonl").read_text()
+    )
+    assert prediction_json["pytest_output"]["length_chars"] == len(
+        "test output\nExit code: 0"
+    )
+    assert "pytest_output" not in prediction_jsonl
 
 
 def test_notrun_tests_are_not_added_to_history(tmp_path: Path) -> None:
@@ -211,6 +327,95 @@ def test_notrun_tests_are_not_added_to_history(tmp_path: Path) -> None:
     history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
     assert "tests/test_a.py::test_ran" in history["tests"]
     assert "tests/test_a.py::test_notrun" not in history["tests"]
+
+
+def test_unknown_history_records_only_tests_that_were_unknown(tmp_path: Path) -> None:
+    invocation = tmp_path / "pytest_runtime" / "iter_0001_exec-pytest_call_a"
+    invocation.mkdir(parents=True)
+    (tmp_path / "pytest_runtime" / "history.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "tests": {
+                    "tests/test_a.py::test_known": {"durations": [0.01]},
+                },
+                "commands": {},
+                "overheads": {},
+                "unknown_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (invocation / "pytest_runtime.json").write_text(
+        json.dumps(
+            {
+                "collected_count": 2,
+                "exit_code": 0,
+                "tests": [
+                    {
+                        "nodeid": "tests/test_a.py::test_known",
+                        "duration_s": 0.02,
+                        "outcome": "passed",
+                    },
+                    {
+                        "nodeid": "tests/test_new.py::test_slow",
+                        "duration_s": 7.0,
+                        "outcome": "passed",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=tmp_path / "pytest_runtime",
+        iteration=1,
+        tool_call_id="call_a",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests"},
+    )
+    assert record is not None
+    record.directory = invocation
+
+    finalize_pytest_runtime_prediction(
+        record,
+        prediction_root=tmp_path / "pytest_runtime",
+        action_id="tool_1_call_a",
+        ts_start=1.0,
+        ts_end=9.0,
+        duration_ms=8000.0,
+        success=True,
+        tool_result="Exit code: 0",
+    )
+
+    history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
+    assert history["unknown_tests"]["durations"] == pytest.approx([7.0])
+
+
+def test_realtime_summary_prints_all_prediction_errors() -> None:
+    line = format_pytest_prediction_summary(
+        {
+            "iteration": 3,
+            "collected_count": 2,
+            "actual_duration_s": 10.0,
+            "prediction_last_run_s": 8.0,
+            "prediction_test_count_s": 5.0,
+            "prediction_per_test_s": 9.0,
+            "prediction_unknown_test_fallback_s": 11.0,
+            "relative_error": {
+                "last_run": 0.2,
+                "test_count": 0.5,
+                "per_test": 0.1,
+                "unknown_test_fallback": 0.1,
+            },
+        }
+    )
+
+    assert line.startswith("[pytest-predict] ")
+    assert "last=8.00s last_err=20.0%" in line
+    assert "count=5.00s count_err=50.0%" in line
+    assert "per_test=9.00s per_test_err=10.0%" in line
+    assert "unknown=11.00s unknown_err=10.0%" in line
 
 
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:

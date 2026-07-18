@@ -12,6 +12,7 @@ METHODS = (
     ("last_run", "Last Run"),
     ("test_count", "Test Count"),
     ("per_test", "Per-Test Historical"),
+    ("unknown_test_fallback", "Unknown-Test Fallback"),
 )
 
 
@@ -93,12 +94,19 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "prediction_last_run_s",
         "prediction_test_count_s",
         "prediction_per_test_s",
+        "prediction_per_test_without_overhead_s",
+        "prediction_per_test_overhead_s",
+        "prediction_unknown_test_fallback_s",
+        "prediction_unknown_test_fallback_without_overhead_s",
+        "prediction_unknown_test_fallback_overhead_s",
         "absolute_error_last_run",
         "absolute_error_test_count",
         "absolute_error_per_test",
+        "absolute_error_unknown_test_fallback",
         "relative_error_last_run",
         "relative_error_test_count",
         "relative_error_per_test",
+        "relative_error_unknown_test_fallback",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -116,12 +124,33 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
                     "prediction_last_run_s": row.get("prediction_last_run_s"),
                     "prediction_test_count_s": row.get("prediction_test_count_s"),
                     "prediction_per_test_s": row.get("prediction_per_test_s"),
+                    "prediction_per_test_without_overhead_s": row.get(
+                        "prediction_per_test_without_overhead_s"
+                    ),
+                    "prediction_per_test_overhead_s": row.get(
+                        "prediction_per_test_overhead_s"
+                    ),
+                    "prediction_unknown_test_fallback_s": row.get(
+                        "prediction_unknown_test_fallback_s"
+                    ),
+                    "prediction_unknown_test_fallback_without_overhead_s": row.get(
+                        "prediction_unknown_test_fallback_without_overhead_s"
+                    ),
+                    "prediction_unknown_test_fallback_overhead_s": row.get(
+                        "prediction_unknown_test_fallback_overhead_s"
+                    ),
                     "absolute_error_last_run": abs_err.get("last_run"),
                     "absolute_error_test_count": abs_err.get("test_count"),
                     "absolute_error_per_test": abs_err.get("per_test"),
+                    "absolute_error_unknown_test_fallback": abs_err.get(
+                        "unknown_test_fallback"
+                    ),
                     "relative_error_last_run": rel_err.get("last_run"),
                     "relative_error_test_count": rel_err.get("test_count"),
                     "relative_error_per_test": rel_err.get("per_test"),
+                    "relative_error_unknown_test_fallback": rel_err.get(
+                        "unknown_test_fallback"
+                    ),
                 }
             )
 
