@@ -222,6 +222,31 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert result.total_tokens == 99
     assert "openclaw stdout" in ctx.container_stdout
 
+    seen.clear()
+    asyncio.run(
+        _run_openclaw_in_task_container(
+            ctx=ctx,
+            task=dict(ctx.task),
+            benchmark=SimpleNamespace(
+                config=SimpleNamespace(slug="swe-rebench", harness_split="filtered")
+            ),
+            container_executable="docker",
+            provider_name="openrouter",
+            api_base="https://example.com",
+            api_key="test-key",
+            model="qwen-plus-latest",
+            max_iterations=10,
+            generation_config=None,
+            max_context_tokens=1024,
+            mcp_config=None,
+            capture_pytest_scripts=False,
+            capture_pytest_runtime=False,
+        )
+    )
+
+    assert seen["pytest_capture_dir"] is None
+    assert seen["pytest_runtime_dir"] is None
+
 
 def test_run_openclaw_in_task_container_adds_mcp_bootstrap_requirements(
     tmp_path: Path,

@@ -148,6 +148,8 @@ def test_normalize_openclaw_trace_stamps_record_internals(tmp_path: Path) -> Non
     metadata = json.loads(dst.read_text(encoding="utf-8").splitlines()[0])
     assert metadata["run_config"]["mcp_config"] == "none"
     assert metadata["run_config"]["record_internals"] is True
+    assert metadata["run_config"]["capture_pytest_scripts"] is True
+    assert metadata["run_config"]["capture_pytest_runtime"] is True
 
 
 def test_normalize_openclaw_trace_marks_unknown_capabilities_without_metadata(

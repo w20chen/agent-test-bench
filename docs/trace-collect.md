@@ -89,6 +89,8 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--ksys-monitoring auto\|on\|off` | Control Huawei Kunpeng ksys system-level telemetry |
 | `--tool-profiling off\|vtune\|ksys` | Wrap each matching tool invocation with a platform profiler (VTune for Intel x86, ksys for Kunpeng) |
 | `--tool-profiling-tools <list>` | Comma-separated tool names to profile (default: `exec-pytest`) |
+| `--capture-pytest-scripts` / `--no-capture-pytest-scripts` | Save pytest scripts referenced by `exec-pytest` calls (default: on) |
+| `--capture-pytest-runtime` / `--no-capture-pytest-runtime` | Enable pytest node timing collection and prediction artifacts (default: on) |
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |
 | `--model` | Model identifier |
@@ -519,7 +521,9 @@ For SWE-style OpenClaw collection, each pytest tool invocation also writes a
 `command.sh`, copied pytest `.py` files under `files/`, and `manifest.json`
 with the trace timing fields (`duration_ms`, `ts_start`, `ts_end`, `success`,
 `action_id`).  The attempt-level `pytest_scripts/index.jsonl` provides one
-row per captured pytest invocation for downstream timing analysis.
+row per captured pytest invocation for downstream timing analysis.  This is
+enabled by default in collect mode; pass `--no-capture-pytest-scripts` to
+disable it.
 
 The same SWE-style OpenClaw collect path also records a minimal pytest runtime
 prediction prototype under `pytest_runtime/`.  Matching `exec-pytest` commands
@@ -561,10 +565,14 @@ kept as `prediction_per_test_overhead_s`.  Starting with `schema_version=3`,
 `prediction_unknown_test_fallback_s` adds a fourth baseline for cold-start
 tests: node/file predictions are reused when available, but completely unseen
 tests use the median duration of earlier tests that were also unknown at
-prediction time, then add the same overhead term.  Commands that explicitly assign or export
-`PYTHONPATH` are skipped by this prototype's runtime instrumentation, because
-that shell assignment can hide the temporary pytest plugin from pytest while
-still inheriting plugin-related environment variables.
+prediction time, then add the same overhead term.
+
+Commands that explicitly assign or export `PYTHONPATH` are skipped by this
+prototype's runtime instrumentation, because that shell assignment can hide the
+temporary pytest plugin from pytest while still inheriting plugin-related
+environment variables.  Runtime prediction is enabled by default in collect
+mode; pass `--no-capture-pytest-runtime` to disable plugin injection,
+prediction artifacts, and realtime `[pytest-predict]` stdout lines.
 
 Summarize a run directory with:
 

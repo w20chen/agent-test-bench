@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -1087,6 +1088,8 @@ async def collect_traces(
     mcp_config: str | None = None,
     prompt_template: str | None = None,
     min_free_disk_gb: float = 30.0,
+    capture_pytest_scripts: bool = True,
+    capture_pytest_runtime: bool = True,
     record_internals: bool = False,
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
@@ -1257,24 +1260,37 @@ async def collect_traces(
                         record_internals=record_internals,
                         tool_profiling=tool_profiling,
                         tool_profiling_tools=tool_profiling_tools,
+                        capture_pytest_scripts=capture_pytest_scripts,
+                        capture_pytest_runtime=capture_pytest_runtime,
                     )
 
                 assert runner is not None
+                run_task_kwargs: dict[str, Any] = {
+                    "attempt_ctx": ctx,
+                    "prompt_template": ctx.prompt_template,
+                }
+                run_task_params = inspect.signature(runner.run_task).parameters
+                if "capture_pytest_scripts" in run_task_params:
+                    run_task_kwargs["capture_pytest_scripts"] = capture_pytest_scripts
+                if "capture_pytest_runtime" in run_task_params:
+                    run_task_kwargs["capture_pytest_runtime"] = capture_pytest_runtime
                 result = await runner.run_task(
                     task,
-                    attempt_ctx=ctx,
-                    prompt_template=ctx.prompt_template,
+                    **run_task_kwargs,
                 )
                 if not isinstance(result, AttemptResult):
                     raise TypeError(
                         "benchmark runner returned "
                         f"{type(result).__name__}, expected AttemptResult"
                     )
-                if record_internals and result.trace_path is not None:
-                    _stamp_trace_run_config(
-                        result.trace_path,
-                        {"record_internals": True},
-                    )
+                if result.trace_path is not None:
+                    run_config: dict[str, Any] = {
+                        "capture_pytest_scripts": capture_pytest_scripts,
+                        "capture_pytest_runtime": capture_pytest_runtime,
+                    }
+                    if record_internals:
+                        run_config["record_internals"] = True
+                    _stamp_trace_run_config(result.trace_path, run_config)
                 return result
 
             return inner
@@ -1310,6 +1326,8 @@ def _normalize_openclaw_trace(
     runtime_proof: dict[str, Any] | None = None,
     record_internals: bool = False,
     generation_config: dict[str, Any] | None = None,
+    capture_pytest_scripts: bool = True,
+    capture_pytest_runtime: bool = True,
 ) -> None:
     """Copy an OpenClaw trace into the attempt dir, merging trace metadata."""
     lines = src.read_text(encoding="utf-8").splitlines()
@@ -1369,6 +1387,10 @@ def _normalize_openclaw_trace(
         run_config = merged.get("run_config") or {}
         run_config["generation"] = dict(generation_config)
         merged["run_config"] = run_config
+    run_config = merged.get("run_config") or {}
+    run_config["capture_pytest_scripts"] = capture_pytest_scripts
+    run_config["capture_pytest_runtime"] = capture_pytest_runtime
+    merged["run_config"] = run_config
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "w", encoding="utf-8") as f:
@@ -1427,6 +1449,8 @@ async def _run_openclaw_in_task_container(
     record_internals: bool = False,
     tool_profiling: str = "off",
     tool_profiling_tools: list[str] | None = None,
+    capture_pytest_scripts: bool = True,
+    capture_pytest_runtime: bool = True,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1557,8 +1581,16 @@ async def _run_openclaw_in_task_container(
                 "exec_path_append": "/tmp/openclaw-task-userbase/bin",
                 "exec_working_dir": "/testbed",
                 "trace_file": str(runtime_dir / "trace.raw.jsonl"),
-                "pytest_capture_dir": str(ctx.attempt_dir.resolve() / "pytest_scripts"),
-                "pytest_runtime_dir": str(ctx.attempt_dir.resolve() / "pytest_runtime"),
+                "pytest_capture_dir": (
+                    str(ctx.attempt_dir.resolve() / "pytest_scripts")
+                    if capture_pytest_scripts
+                    else None
+                ),
+                "pytest_runtime_dir": (
+                    str(ctx.attempt_dir.resolve() / "pytest_runtime")
+                    if capture_pytest_runtime
+                    else None
+                ),
                 "raw_stdout_path": str(stdout_path),
                 "raw_stderr_path": str(stderr_path),
                 "container_executable": container_executable,
@@ -1583,6 +1615,8 @@ async def _run_openclaw_in_task_container(
             runtime_proof=runtime_proof,
             record_internals=record_internals,
             generation_config=generation_config,
+            capture_pytest_scripts=capture_pytest_scripts,
+            capture_pytest_runtime=capture_pytest_runtime,
         )
     finally:
         if _stats_sampler is not None:

@@ -160,11 +160,13 @@ async def _run_openclaw(request: dict[str, Any]) -> dict[str, Any]:
         tool_workspace=Path(request["tool_workspace"]),
         exec_working_dir=request.get("exec_working_dir"),
         trace_file=Path(request["trace_file"]),
+        capture_pytest_scripts=bool(request.get("pytest_capture_dir")),
         pytest_capture_dir=(
             Path(request["pytest_capture_dir"])
             if request.get("pytest_capture_dir")
             else None
         ),
+        capture_pytest_runtime=bool(request.get("pytest_runtime_dir")),
         pytest_runtime_dir=(
             Path(request["pytest_runtime_dir"])
             if request.get("pytest_runtime_dir")

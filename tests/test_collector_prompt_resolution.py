@@ -63,6 +63,39 @@ def test_parse_collect_args_accepts_record_internals() -> None:
     assert args.record_internals is True
 
 
+def test_parse_collect_args_pytest_capture_switches_default_on() -> None:
+    args = parse_collect_args(["--provider", "openrouter", "--model", "z-ai/glm-5.1"])
+
+    assert args.capture_pytest_scripts is True
+    assert args.capture_pytest_runtime is True
+
+
+def test_parse_collect_args_pytest_capture_switches_are_independent() -> None:
+    scripts_off = parse_collect_args(
+        [
+            "--provider",
+            "openrouter",
+            "--model",
+            "z-ai/glm-5.1",
+            "--no-capture-pytest-scripts",
+        ]
+    )
+    runtime_off = parse_collect_args(
+        [
+            "--provider",
+            "openrouter",
+            "--model",
+            "z-ai/glm-5.1",
+            "--no-capture-pytest-runtime",
+        ]
+    )
+
+    assert scripts_off.capture_pytest_scripts is False
+    assert scripts_off.capture_pytest_runtime is True
+    assert runtime_off.capture_pytest_scripts is True
+    assert runtime_off.capture_pytest_runtime is False
+
+
 def test_parse_collect_args_allows_omitted_container_for_host_mode() -> None:
     args = parse_collect_args(["--provider", "openrouter", "--model", "z-ai/glm-5.1"])
     assert args.container is None
@@ -146,6 +179,49 @@ def test_run_collect_passes_container_to_collect_traces(
     _run_collect(args)
 
     assert seen["container_executable"] == container_executable
+    assert seen["capture_pytest_scripts"] is True
+    assert seen["capture_pytest_runtime"] is True
+
+
+def test_run_collect_passes_pytest_capture_switches(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_collect_traces(**kwargs):
+        seen.update(kwargs)
+        return Path("/tmp/fake-run")
+
+    monkeypatch.setattr(
+        "trace_collect.cli.resolve_llm_config",
+        lambda **kwargs: SimpleNamespace(
+            name="openrouter",
+            api_base="https://example.com",
+            api_key="test-key",
+            model="z-ai/glm-5.1",
+            env_key="OPENROUTER_API_KEY",
+        ),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.collect_traces",
+        fake_collect_traces,
+    )
+
+    args = parse_collect_args(
+        [
+            "--provider",
+            "openrouter",
+            "--model",
+            "z-ai/glm-5.1",
+            "--mcp-config",
+            "none",
+            "--no-capture-pytest-scripts",
+            "--no-capture-pytest-runtime",
+        ]
+    )
+
+    _run_collect(args)
+
+    assert seen["capture_pytest_scripts"] is False
+    assert seen["capture_pytest_runtime"] is False
 
 
 def test_run_collect_passes_record_internals(monkeypatch) -> None:

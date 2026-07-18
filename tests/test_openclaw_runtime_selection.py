@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,7 @@ def test_collect_traces_supports_host_controller_runner(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    seen: dict[str, object] = {}
     trace_path = tmp_path / "tb" / "trace.jsonl"
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path.write_text('{"type":"trace_metadata"}\n', encoding="utf-8")
@@ -107,9 +109,19 @@ def test_collect_traces_supports_host_controller_runner(
     )
 
     class FakeRunner:
-        async def run_task(self, task, *, attempt_ctx, prompt_template):
+        async def run_task(
+            self,
+            task,
+            *,
+            attempt_ctx,
+            prompt_template,
+            capture_pytest_scripts,
+            capture_pytest_runtime,
+        ):
             from trace_collect.attempt_pipeline import AttemptResult
 
+            seen["capture_pytest_scripts"] = capture_pytest_scripts
+            seen["capture_pytest_runtime"] = capture_pytest_runtime
             return AttemptResult(
                 success=True,
                 exit_status="completed",
@@ -143,12 +155,19 @@ def test_collect_traces_supports_host_controller_runner(
             sample=1,
             min_free_disk_gb=0.001,
             container_executable=None,
+            capture_pytest_scripts=False,
+            capture_pytest_runtime=False,
         )
     )
 
     results_path = run_dir / "results.jsonl"
     payload = results_path.read_text(encoding="utf-8")
     assert '"success": true' in payload
+    assert seen["capture_pytest_scripts"] is False
+    assert seen["capture_pytest_runtime"] is False
+    metadata = json.loads(trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert metadata["run_config"]["capture_pytest_scripts"] is False
+    assert metadata["run_config"]["capture_pytest_runtime"] is False
 
 
 def test_collect_traces_requires_explicit_container_runtime(

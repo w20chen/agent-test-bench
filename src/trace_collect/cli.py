@@ -194,6 +194,25 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--capture-pytest-scripts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Save pytest test scripts referenced by exec-pytest calls. "
+            "Use --no-capture-pytest-scripts to disable. Default: enabled."
+        ),
+    )
+    parser.add_argument(
+        "--capture-pytest-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Inject the lightweight pytest runtime plugin and write pytest "
+            "prediction artifacts. Use --no-capture-pytest-runtime to disable. "
+            "Default: enabled."
+        ),
+    )
+    parser.add_argument(
         "--run-id",
         default=None,
         help="Resume an interrupted run by passing its existing run directory path.",
@@ -869,6 +888,8 @@ def _run_collect(args: argparse.Namespace) -> None:
                 mcp_config=args.mcp_config,
                 prompt_template=args.prompt_template,
                 min_free_disk_gb=args.min_free_disk_gb,
+                capture_pytest_scripts=args.capture_pytest_scripts,
+                capture_pytest_runtime=args.capture_pytest_runtime,
                 record_internals=args.record_internals,
                 resource_monitoring=args.resource_monitoring,
                 pmu_monitoring=args.pmu_monitoring,
