@@ -1558,6 +1558,7 @@ async def _run_openclaw_in_task_container(
                 "exec_working_dir": "/testbed",
                 "trace_file": str(runtime_dir / "trace.raw.jsonl"),
                 "pytest_capture_dir": str(ctx.attempt_dir.resolve() / "pytest_scripts"),
+                "pytest_runtime_dir": str(ctx.attempt_dir.resolve() / "pytest_runtime"),
                 "raw_stdout_path": str(stdout_path),
                 "raw_stderr_path": str(stderr_path),
                 "container_executable": container_executable,

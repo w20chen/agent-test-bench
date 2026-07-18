@@ -35,6 +35,12 @@ from trace_collect.pytest_script_capture import (
     record_pytest_capture_failure,
     record_pytest_finalize_failure,
 )
+from trace_collect.pytest_runtime_prediction import (
+    PytestRuntimeRecord,
+    finalize_pytest_runtime_prediction,
+    prepare_pytest_runtime_prediction_before_tool,
+    sanitize_tool_args_for_trace,
+)
 
 
 def _trace_has_llm_error(trace_file: Path | None) -> bool:
@@ -82,6 +88,7 @@ class TraceCollectorHook(AgentHook):
         task_id: str | None = None,
         pytest_capture_dir: Path | None = None,
         pytest_project_root: Path | None = None,
+        pytest_runtime_dir: Path | None = None,
     ) -> None:
         self.trace_file = trace_file
         self.instance_id = instance_id
@@ -104,6 +111,8 @@ class TraceCollectorHook(AgentHook):
         self._pytest_capture_dir = pytest_capture_dir
         self._pytest_project_root = pytest_project_root
         self._pytest_captures_by_tool_call: dict[str, PytestCaptureRecord] = {}
+        self._pytest_runtime_dir = pytest_runtime_dir
+        self._pytest_runtime_by_tool_call: dict[str, PytestRuntimeRecord] = {}
         self._flushed = False
         self._fh = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
 
@@ -192,15 +201,49 @@ class TraceCollectorHook(AgentHook):
                         )
                     if capture is not None:
                         self._pytest_captures_by_tool_call[tc.id] = capture
+                if self._pytest_runtime_dir is not None:
+                    try:
+                        runtime_record = prepare_pytest_runtime_prediction_before_tool(
+                            prediction_root=self._pytest_runtime_dir,
+                            iteration=context.iteration,
+                            tool_call_id=tc.id,
+                            tool_name=tc.name,
+                            tool_args=tc.arguments
+                            if isinstance(tc.arguments, dict)
+                            else {},
+                        )
+                    except Exception as exc:
+                        self.emit_event(
+                            TOOL,
+                            "pytest_runtime_prediction_error",
+                            {
+                                "tool_call_id": tc.id,
+                                "error": repr(exc),
+                            },
+                            iteration=context.iteration,
+                        )
+                        runtime_record = None
+                    if runtime_record is not None:
+                        runtime_record.working_directory = (
+                            str(self._pytest_project_root)
+                            if self._pytest_project_root is not None
+                            else None
+                        )
+                        self._pytest_runtime_by_tool_call[tc.id] = runtime_record
                 is_mcp = tc.name.startswith("mcp_")
+                args_preview_obj = (
+                    sanitize_tool_args_for_trace(tc.arguments)
+                    if isinstance(tc.arguments, dict)
+                    else tc.arguments
+                )
                 self.emit_event(
                     MCP if is_mcp else TOOL,
                     "tool_exec_start",
                     {
                         "tool_name": tc.name,
-                        "args_preview": json.dumps(tc.arguments, ensure_ascii=False)[
-                            :200
-                        ],
+                        "args_preview": json.dumps(
+                            args_preview_obj, ensure_ascii=False
+                        )[:200],
                     },
                     iteration=context.iteration,
                 )
@@ -316,8 +359,13 @@ class TraceCollectorHook(AgentHook):
             tool_name_by_id: dict[str, str] = {}
             if context.tool_calls:
                 for tc in context.tool_calls:
+                    args_for_trace = (
+                        sanitize_tool_args_for_trace(tc.arguments)
+                        if isinstance(tc.arguments, dict)
+                        else tc.arguments
+                    )
                     tool_args_by_id[tc.id] = json.dumps(
-                        tc.arguments, ensure_ascii=False
+                        args_for_trace, ensure_ascii=False
                     )
                     tool_name_by_id[tc.id] = tc.name
 
@@ -436,6 +484,33 @@ class TraceCollectorHook(AgentHook):
                             duration_ms=round(duration_ms, 1),
                             success=tool_ok,
                             error=repr(exc),
+                        )
+                runtime_record = self._pytest_runtime_by_tool_call.pop(tc_id, None)
+                if runtime_record is not None:
+                    try:
+                        finalize_pytest_runtime_prediction(
+                            runtime_record,
+                            prediction_root=self._pytest_runtime_dir
+                            or runtime_record.directory.parent,
+                            action_id=action_id,
+                            ts_start=tool_ts_start,
+                            ts_end=tool_ts_end,
+                            duration_ms=round(duration_ms, 1),
+                            success=tool_ok,
+                            tool_result=tool_content,
+                            working_directory=runtime_record.working_directory,
+                        )
+                    except Exception as exc:
+                        self.emit_event(
+                            TOOL,
+                            "pytest_runtime_prediction_error",
+                            {
+                                "tool_call_id": tc_id,
+                                "action_id": action_id,
+                                "error": repr(exc),
+                            },
+                            iteration=context.iteration,
+                            ts=tool_ts_end,
                         )
                 self._write_action(tool_action)
 
@@ -672,7 +747,11 @@ class TraceCollectorHook(AgentHook):
         if context.tool_calls:
             tool_calls = []
             for idx, tc in enumerate(context.tool_calls):
-                arguments = tc.arguments
+                arguments = (
+                    sanitize_tool_args_for_trace(tc.arguments)
+                    if isinstance(tc.arguments, dict)
+                    else tc.arguments
+                )
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments, ensure_ascii=False)
                 tool_calls.append(
@@ -835,6 +914,8 @@ class SessionRunner:
         prepare_ms: float | None = None,
         capture_pytest_scripts: bool = False,
         pytest_capture_dir: Path | None = None,
+        capture_pytest_runtime: bool = False,
+        pytest_runtime_dir: Path | None = None,
     ) -> SessionRunResult:
         workspace.mkdir(parents=True, exist_ok=True)
         iid = instance_id or session_key
@@ -846,7 +927,14 @@ class SessionRunner:
             else None
         )
         pytest_project_root = (
-            effective_project_workspace if capture_pytest_scripts else None
+            effective_project_workspace
+            if capture_pytest_scripts or capture_pytest_runtime
+            else None
+        )
+        pytest_runtime_dir = (
+            (pytest_runtime_dir or trace_file.parent / "pytest_runtime")
+            if capture_pytest_runtime
+            else None
         )
         trace_hook = TraceCollectorHook(
             trace_file,
@@ -855,6 +943,7 @@ class SessionRunner:
             task_id=iid,
             pytest_capture_dir=pytest_capture_dir,
             pytest_project_root=pytest_project_root,
+            pytest_runtime_dir=pytest_runtime_dir,
         )
 
         metadata = {

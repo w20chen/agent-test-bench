@@ -165,6 +165,11 @@ async def _run_openclaw(request: dict[str, Any]) -> dict[str, Any]:
             if request.get("pytest_capture_dir")
             else None
         ),
+        pytest_runtime_dir=(
+            Path(request["pytest_runtime_dir"])
+            if request.get("pytest_runtime_dir")
+            else None
+        ),
     )
     total_llm_ms, total_tool_ms, total_tokens = _trace_summary_totals(
         Path(request["trace_file"])

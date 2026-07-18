@@ -521,6 +521,47 @@ with the trace timing fields (`duration_ms`, `ts_start`, `ts_end`, `success`,
 `action_id`).  The attempt-level `pytest_scripts/index.jsonl` provides one
 row per captured pytest invocation for downstream timing analysis.
 
+The same SWE-style OpenClaw collect path also records a minimal pytest runtime
+prediction prototype under `pytest_runtime/`.  Matching `exec-pytest` commands
+load a temporary pytest plugin that writes per-node `nodeid`, `duration_s`, and
+`outcome` data without modifying the target repository's tests.  After each
+pytest finishes, collect mode immediately prints a concise line like:
+
+```text
+[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s count=143.80s per_test=215.70s per_test_err=2.1%
+```
+
+Artifacts are written as:
+
+```text
+attempt_N/pytest_runtime/
+  history.json
+  predictions.jsonl
+  iter_0017_exec-pytest_<tool_call_id>/
+    pytest_runtime.json
+    prediction.json
+    instrumentation.json
+```
+
+`prediction.json` preserves the actual wall duration, test collection,
+per-test durations/outcomes, the three prediction baselines, and absolute /
+relative errors.  The prediction is computed from `history.json` before the
+current run is added, so the current pytest duration does not leak into its own
+prediction.  `prediction_last_run_s` is keyed by the exact normalized command;
+it does not yet merge merely similar commands.  `actual_duration_s` is the
+whole tool wall time, while per-test history comes from pytest setup/call/
+teardown reports, so startup and collection overhead remain visible as model
+error in this prototype.  Commands that explicitly assign or export
+`PYTHONPATH` are skipped by this prototype's runtime instrumentation, because
+that shell assignment can hide the temporary pytest plugin from pytest while
+still inheriting plugin-related environment variables.
+
+Summarize a run directory with:
+
+```bash
+PYTHONPATH=src python scripts/analyze_pytest_prediction.py traces/swe-rebench/<model>/<run>
+```
+
 ---
 
 ## Simulate: Trace Replay

@@ -14,6 +14,11 @@ from loguru import logger
 
 from agents.openclaw.tools.base import Tool
 from trace_collect.exec_classifier import classify_exec_tool_name
+from trace_collect.pytest_runtime_prediction import (
+    HIDDEN_RUNTIME_DIR_ARG,
+    merge_pytest_runtime_environment,
+    prepare_pytest_runtime_environment,
+)
 
 
 MAX_EXEC_TOOL_TIMEOUT_SEC = 600
@@ -340,6 +345,17 @@ class ExecTool(Tool):
         # VTune wrapping only happens when VTUNE_BIN is also set (vtune mode).
         _tool_profile = os.environ.get("VTUNE_PROFILE") == "1"
         _classified = classify_exec_tool_name("exec", {"command": command})
+
+        pytest_runtime_dir = kwargs.get(HIDDEN_RUNTIME_DIR_ARG)
+        if _classified == "exec-pytest" and pytest_runtime_dir:
+            try:
+                runtime_env = prepare_pytest_runtime_environment(
+                    invocation_dir=Path(str(pytest_runtime_dir)),
+                )
+                env = merge_pytest_runtime_environment(env, runtime_env)
+            except Exception as exc:
+                logger.warning("pytest runtime instrumentation disabled: {}", exc)
+
         if _tool_profile and _classified in vtune_tools:
             vtune_bin = os.environ.get("VTUNE_BIN", "")
             vtune_out = os.environ.get("VTUNE_OUT", cwd)
@@ -366,7 +382,7 @@ class ExecTool(Tool):
                 # approach avoids all nested quoting issues.
                 _script = os.path.join(run_dir, "run.sh")
                 with open(_script, "w") as _f:
-                    _f.write(f"#!/bin/bash\nset -e\n{command}\n")
+                    _f.write(f"#!/bin/bash\nset -e\n{run_command}\n")
                 os.chmod(_script, 0o755)
                 run_command = (
                     f"{shlex.quote(vtune_bin)} -collect uarch-exploration "

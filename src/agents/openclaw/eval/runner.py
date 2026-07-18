@@ -174,6 +174,8 @@ class SWEBenchRunner:
         trace_file: Path | None = None,
         capture_pytest_scripts: bool = True,
         pytest_capture_dir: Path | None = None,
+        capture_pytest_runtime: bool = True,
+        pytest_runtime_dir: Path | None = None,
     ) -> EvalResult:
         """Run a single evaluation task inside the prepared task container."""
         ws = task.workspace_dir
@@ -204,6 +206,8 @@ class SWEBenchRunner:
             prepare_ms=None,
             capture_pytest_scripts=capture_pytest_scripts,
             pytest_capture_dir=pytest_capture_dir,
+            capture_pytest_runtime=capture_pytest_runtime,
+            pytest_runtime_dir=pytest_runtime_dir,
         )
 
         content = result.content
