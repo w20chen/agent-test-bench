@@ -515,6 +515,8 @@ traces/<model>/<ts>/
 one attempt per task, full resource monitoring enabled, `--ksys`
 per instance (output to `<instance_id>/`).
 
+#### `pytest` Tool Invocation
+
 For SWE-style OpenClaw collection, each pytest tool invocation also writes a
 `pytest_scripts/` artifact directory under the attempt.  Each
 `iter_<N>_exec-pytest_<tool_call_id>/` subdirectory contains the original
@@ -554,8 +556,16 @@ output for that pytest invocation.  The prediction is computed from
 `history.json` before the current run is added, so the current pytest duration
 does not leak into its own prediction.  `predictions.jsonl` appends compact
 per-run rows and omits the full pytest output to keep aggregate scans cheap.
-`prediction_last_run_s` is keyed by the exact normalized command;
-it does not yet merge merely similar commands.  Starting with
+`prediction_last_run_s` is keyed by `normalized_command`.  Starting with
+`schema_version=4`, this key strips interpreter-path differences and stdout
+post-processing such as `| head`, `| tail`, and `| grep`, while preserving
+timeout values, test targets, `-k` / `-m` selectors, plugin/config flags, and
+selection-changing flags such as `--ignore`.  Order-independent targets and
+ignore/deselect flags are sorted before the key is written; this keys by the
+selected test set, not by pytest execution order.  Command-level Last Run
+history is updated only when the runtime plugin observes at least one test
+node, so early failures that produce no pytest runtime JSON do not pollute
+later command-duration predictions.  Starting with
 `schema_version=2`, `prediction_per_test_s` is an
 overhead-adjusted per-test estimate: the sum of historical node/file/project
 test durations plus the recent median pytest overhead, where overhead is

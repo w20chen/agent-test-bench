@@ -19,9 +19,11 @@ from trace_collect.pytest_runtime_prediction import (
     historical_duration,
     is_pytest_tool_call,
     merge_pytest_runtime_environment,
+    normalize_pytest_command,
     predict_test_duration,
     prepare_pytest_runtime_environment,
     prepare_pytest_runtime_prediction_before_tool,
+    update_pytest_history,
 )
 
 
@@ -74,6 +76,77 @@ def test_pytest_command_recognition() -> None:
     )
 
 
+def test_normalized_command_merges_interpreter_and_stdout_wrappers() -> None:
+    left = normalize_pytest_command(
+        "cd /testbed && /usr/local/bin/python -m pytest tests/test_a.py -v 2>&1 | head -80"
+    )
+    right = normalize_pytest_command(
+        "cd /testbed && python3 -m pytest tests/test_a.py --no-header 2>&1 | grep FAILED"
+    )
+
+    assert left == "cd /testbed && pytest tests/test_a.py"
+    assert right == left
+
+
+def test_normalized_command_keeps_timeout_as_strict_key() -> None:
+    timeout_60 = normalize_pytest_command(
+        "cd /testbed && timeout 60 python -m pytest tests/test_a.py -v"
+    )
+    timeout_1m = normalize_pytest_command(
+        "cd /testbed && timeout 1m python -m pytest tests/test_a.py -v"
+    )
+    timeout_120 = normalize_pytest_command(
+        "cd /testbed && timeout 120 python -m pytest tests/test_a.py -v"
+    )
+
+    assert timeout_60 == "cd /testbed && timeout=60 pytest tests/test_a.py"
+    assert timeout_1m == timeout_60
+    assert timeout_120 == "cd /testbed && timeout=120 pytest tests/test_a.py"
+    assert timeout_60 != timeout_120
+
+
+def test_normalized_command_sorts_order_independent_selection_parts() -> None:
+    left = normalize_pytest_command(
+        "cd /testbed && python -m pytest tests/test_b.py tests/test_a.py "
+        "--ignore=tests/slow.py --ignore tests/flaky.py -v"
+    )
+    right = normalize_pytest_command(
+        "cd /testbed && pytest --ignore tests/flaky.py tests/test_a.py "
+        "--ignore=tests/slow.py tests/test_b.py"
+    )
+
+    assert left == right
+    assert left == (
+        "cd /testbed && pytest tests/test_a.py tests/test_b.py "
+        "--ignore tests/flaky.py --ignore tests/slow.py"
+    )
+
+
+def test_normalized_command_preserves_ordered_selectors_and_unsafe_prelude() -> None:
+    with_selector = normalize_pytest_command(
+        "cd /testbed && python -m pytest tests/ -k 'a or b' -p no:anyio -v"
+    )
+    with_prelude = normalize_pytest_command(
+        "cd /testbed && git stash && python -m pytest tests/test_a.py -v 2>&1 | tail -20"
+    )
+
+    assert with_selector == "cd /testbed && pytest tests/ -k a or b -p no:anyio"
+    assert "git stash" in with_prelude
+    assert "| tail -20" in with_prelude
+
+
+def test_normalized_command_keeps_known_value_flags_out_of_targets() -> None:
+    normalized = normalize_pytest_command(
+        "cd /testbed && python -m pytest tests/test_a.py "
+        "--junitxml out.xml --cov src --cov-report term -v"
+    )
+
+    assert normalized == (
+        "cd /testbed && pytest tests/test_a.py "
+        "--junitxml out.xml --cov src --cov-report term"
+    )
+
+
 def test_history_median_and_fallbacks() -> None:
     history = {
         "tests": {
@@ -101,7 +174,7 @@ def test_prediction_methods_do_not_use_current_run() -> None:
             "tests/test_a.py::test_2": {"durations": [2.0]},
         },
         "commands": {
-            "python -m pytest tests/test_a.py": {"durations": [4.0]},
+            "pytest tests/test_a.py": {"durations": [4.0]},
         },
     }
 
@@ -114,6 +187,17 @@ def test_prediction_methods_do_not_use_current_run() -> None:
     assert predictions["prediction_last_run_s"] == pytest.approx(4.0)
     assert predictions["prediction_test_count_s"] == pytest.approx(3.0)
     assert predictions["prediction_per_test_s"] == pytest.approx(3.0)
+
+
+def test_command_history_ignores_runs_without_observed_tests() -> None:
+    history = update_pytest_history(
+        history={},
+        command="python -m pytest tests/test_a.py -v",
+        total_duration_s=0.02,
+        tests=[],
+    )
+
+    assert history["commands"] == {}
 
 
 def test_per_test_prediction_adds_historical_overhead() -> None:
@@ -217,10 +301,10 @@ def test_missing_and_corrupt_history_degrade_safely(tmp_path: Path) -> None:
     assert payload["prediction_last_run_s"] is None
     assert payload["prediction_test_count_s"] is None
     assert payload["prediction_per_test_s"] is None
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["warnings"]
     history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
-    assert history["schema_version"] == 3
+    assert history["schema_version"] == 4
     assert history["tests"]["tests/test_a.py::test_1"]["durations"] == [0.01]
     assert history["overheads"]["durations"] == pytest.approx([0.19])
 

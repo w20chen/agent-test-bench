@@ -28,14 +28,40 @@ RUNTIME_JSON_FILENAME = "pytest_runtime.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
 PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
-PREDICTION_SCHEMA_VERSION = 3
-HISTORY_SCHEMA_VERSION = 3
+PREDICTION_SCHEMA_VERSION = 4
+HISTORY_SCHEMA_VERSION = 4
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._+-]+")
 _EXIT_CODE_RE = re.compile(r"Exit code:\s*(-?\d+)")
 _PYTHONPATH_ASSIGN_RE = re.compile(
     r"(?i)(?:^|[\s;&|])(?:export\s+|env\s+|set\s+)?PYTHONPATH\s*="
 )
+_SHELL_STOP_TOKENS = {"|", ">", ">>", "<", "2>", "2>>", "&>"}
+_PYTEST_OUTPUT_FLAGS = {
+    "-v",
+    "-vv",
+    "-vvv",
+    "-q",
+    "-qq",
+    "--no-header",
+    "--disable-warnings",
+}
+_PYTEST_OUTPUT_VALUE_FLAGS = {"--tb", "--color"}
+_PYTEST_SORTABLE_VALUE_FLAGS = {"--ignore", "--ignore-glob", "--deselect"}
+_PYTEST_ORDERED_VALUE_FLAGS = {
+    "-k",
+    "-m",
+    "-p",
+    "-o",
+    "--confcutdir",
+    "--rootdir",
+    "--timeout",
+    "--maxfail",
+    "--junitxml",
+    "--html",
+    "--cov",
+    "--cov-report",
+}
 
 
 @dataclass(slots=True)
@@ -95,12 +121,154 @@ def _node_file(nodeid: str) -> str:
     return nodeid.split("::", 1)[0]
 
 
-def normalize_pytest_command(command: str) -> str:
-    """Return a conservative normalized command key for last-run baseline."""
+def _squash_shell(command: str) -> str:
     try:
-        return " ".join(shlex.split(command, posix=(os.name != "nt")))
+        return " ".join(shlex.split(command, posix=True))
     except ValueError:
         return " ".join(command.split())
+
+
+def _shell_basename(token: str) -> str:
+    return token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def _is_redirection_token(token: str) -> bool:
+    return (
+        token in _SHELL_STOP_TOKENS
+        or bool(re.fullmatch(r"\d?>&?\d", token))
+        or bool(re.fullmatch(r"\d?>>?.+", token))
+    )
+
+
+def _split_option_value(token: str) -> tuple[str, str] | None:
+    if not token.startswith("--") or "=" not in token:
+        return None
+    name, value = token.split("=", 1)
+    return name, value
+
+
+def _normalize_timeout_value(value: str) -> str:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhdSMHD]?)", value)
+    if match is None:
+        return value
+    amount = float(match.group(1))
+    unit = match.group(2).lower() or "s"
+    multiplier = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}[unit]
+    seconds = amount * multiplier
+    if seconds.is_integer():
+        return str(int(seconds))
+    return f"{seconds:.3f}".rstrip("0").rstrip(".")
+
+
+def normalize_pytest_command(command: str) -> str:
+    """Return a stable pytest selection key for the Last Run baseline.
+
+    The key intentionally keeps timeout and test-selection semantics while
+    dropping interpreter paths, pytest verbosity/reporting flags, and stdout
+    post-processing such as ``| head`` or ``| grep``.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return _squash_shell(command)
+    if not tokens:
+        return ""
+
+    cwd: str | None = None
+    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
+        cwd = tokens[1]
+        tokens = tokens[3:]
+
+    if "&&" in tokens or ";" in tokens:
+        return _squash_shell(command)
+
+    timeout_s: str | None = None
+    if tokens and _shell_basename(tokens[0]) == "timeout":
+        if len(tokens) < 3:
+            return _squash_shell(command)
+        timeout_s = _normalize_timeout_value(tokens[1])
+        tokens = tokens[2:]
+
+    env_prefix: list[str] = []
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        env_prefix.append(tokens.pop(0))
+
+    pytest_idx: int | None = None
+    pytest_args_start: int | None = None
+    for idx, token in enumerate(tokens):
+        base = _shell_basename(token)
+        if base == "pytest":
+            pytest_idx = idx
+            pytest_args_start = idx + 1
+            break
+        if (
+            base.startswith("python")
+            and idx + 2 < len(tokens)
+            and tokens[idx + 1] == "-m"
+            and tokens[idx + 2] == "pytest"
+        ):
+            pytest_idx = idx
+            pytest_args_start = idx + 3
+            break
+    if pytest_idx is None or pytest_args_start is None:
+        return _squash_shell(command)
+    if any(tok not in env_prefix for tok in tokens[:pytest_idx]):
+        return _squash_shell(command)
+
+    pytest_args: list[str] = []
+    for token in tokens[pytest_args_start:]:
+        if token in _SHELL_STOP_TOKENS or _is_redirection_token(token):
+            break
+        pytest_args.append(token)
+
+    targets: list[str] = []
+    sortable_flags: dict[str, list[str]] = {name: [] for name in _PYTEST_SORTABLE_VALUE_FLAGS}
+    ordered_parts: list[str] = []
+    idx = 0
+    while idx < len(pytest_args):
+        token = pytest_args[idx]
+        split = _split_option_value(token)
+        option_name = split[0] if split is not None else token
+
+        if token in _PYTEST_OUTPUT_FLAGS or option_name in _PYTEST_OUTPUT_VALUE_FLAGS:
+            idx += 1 if split is not None else 2 if token in _PYTEST_OUTPUT_VALUE_FLAGS else 1
+            continue
+        if split is not None and option_name in _PYTEST_SORTABLE_VALUE_FLAGS:
+            sortable_flags[option_name].append(split[1])
+            idx += 1
+            continue
+        if token in _PYTEST_SORTABLE_VALUE_FLAGS and idx + 1 < len(pytest_args):
+            sortable_flags[token].append(pytest_args[idx + 1])
+            idx += 2
+            continue
+        if split is not None and option_name in _PYTEST_ORDERED_VALUE_FLAGS:
+            ordered_parts.extend([option_name, split[1]])
+            idx += 1
+            continue
+        if token in _PYTEST_ORDERED_VALUE_FLAGS and idx + 1 < len(pytest_args):
+            ordered_parts.extend([token, pytest_args[idx + 1]])
+            idx += 2
+            continue
+        if token.startswith("-"):
+            ordered_parts.append(token)
+            idx += 1
+            continue
+        targets.append(token.removeprefix("/testbed/"))
+        idx += 1
+
+    parts: list[str] = []
+    if cwd is not None:
+        parts.extend(["cd", cwd, "&&"])
+    if timeout_s is not None:
+        parts.append(f"timeout={timeout_s}")
+    parts.extend(env_prefix)
+    parts.append("pytest")
+    parts.extend(sorted(targets))
+    for flag in sorted(sortable_flags):
+        for value in sorted(sortable_flags[flag]):
+            parts.extend([flag, value.removeprefix("/testbed/")])
+    parts.extend(ordered_parts)
+    return " ".join(parts)
 
 
 def command_contains_literal_pytest(command: str) -> bool:
@@ -603,17 +771,18 @@ def update_pytest_history(
         rec["last_seen_at"] = updated["updated_at"]
         test_history[nodeid] = rec
 
-    command_key = normalize_pytest_command(command)
-    command_history = updated["commands"]
-    command_rec = dict(command_history.get(command_key) or {})
-    command_rec["durations"] = _bounded_append(
-        command_rec.get("durations") or [],
-        total_duration_s,
-    )
-    command_rec["last_seen_at"] = updated["updated_at"]
-    command_history[command_key] = command_rec
-
     if observed_test_count > 0:
+        command_key = normalize_pytest_command(command)
+        command_history = updated["commands"]
+        command_rec = dict(command_history.get(command_key) or {})
+        command_rec["durations"] = _bounded_append(
+            command_rec.get("durations") or [],
+            total_duration_s,
+        )
+        command_rec["last_seen_at"] = updated["updated_at"]
+        command_rec["last_observed_test_count"] = observed_test_count
+        command_history[command_key] = command_rec
+
         overhead_s = max(0.0, float(total_duration_s) - observed_test_duration_s)
         overheads = dict(updated["overheads"])
         overheads["durations"] = _bounded_append(overheads.get("durations") or [], overhead_s)
