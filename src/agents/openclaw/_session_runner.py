@@ -95,6 +95,7 @@ class TraceCollectorHook(AgentHook):
         pytest_project_root: Path | None = None,
         pytest_runtime_dir: Path | None = None,
         pip_runtime_dir: Path | None = None,
+        pip_history_dir: Path | None = None,
     ) -> None:
         self.trace_file = trace_file
         self.instance_id = instance_id
@@ -120,6 +121,7 @@ class TraceCollectorHook(AgentHook):
         self._pytest_runtime_dir = pytest_runtime_dir
         self._pytest_runtime_by_tool_call: dict[str, PytestRuntimeRecord] = {}
         self._pip_runtime_dir = pip_runtime_dir
+        self._pip_history_dir = pip_history_dir
         self._pip_runtime_by_tool_call: dict[str, PipRuntimeRecord] = {}
         self._flushed = False
         self._fh = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
@@ -242,6 +244,7 @@ class TraceCollectorHook(AgentHook):
                     try:
                         pip_runtime_record = prepare_pip_runtime_prediction_before_tool(
                             prediction_root=self._pip_runtime_dir,
+                            history_root=self._pip_history_dir,
                             iteration=context.iteration,
                             tool_call_id=tc.id,
                             tool_name=tc.name,
@@ -557,6 +560,7 @@ class TraceCollectorHook(AgentHook):
                             pip_runtime_record,
                             prediction_root=self._pip_runtime_dir
                             or pip_runtime_record.directory.parent,
+                            history_root=self._pip_history_dir,
                             action_id=action_id,
                             ts_start=tool_ts_start,
                             ts_end=tool_ts_end,
@@ -983,6 +987,7 @@ class SessionRunner:
         pytest_runtime_dir: Path | None = None,
         capture_pip_runtime: bool = False,
         pip_runtime_dir: Path | None = None,
+        pip_history_dir: Path | None = None,
     ) -> SessionRunResult:
         workspace.mkdir(parents=True, exist_ok=True)
         iid = instance_id or session_key
@@ -1008,6 +1013,7 @@ class SessionRunner:
             if capture_pip_runtime
             else None
         )
+        pip_history_dir = pip_history_dir if capture_pip_runtime else None
         trace_hook = TraceCollectorHook(
             trace_file,
             iid,
@@ -1017,6 +1023,7 @@ class SessionRunner:
             pytest_project_root=pytest_project_root,
             pytest_runtime_dir=pytest_runtime_dir,
             pip_runtime_dir=pip_runtime_dir,
+            pip_history_dir=pip_history_dir,
         )
 
         metadata = {

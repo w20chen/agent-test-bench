@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from trace_collect.attempt_pipeline import AttemptContext
 from trace_collect.collector import (
+    _pip_history_scope_dir,
     _run_openclaw_in_task_container,
 )
 from trace_collect.runtime.task_container import (
@@ -59,6 +60,18 @@ def _make_relative_ctx(monkeypatch, tmp_path: Path, *, scaffold: str) -> Attempt
     )
 
 
+def test_pip_history_scope_dir_avoids_sanitized_instance_collisions(
+    tmp_path: Path,
+) -> None:
+    first = _pip_history_scope_dir(tmp_path / "run", "a/b")
+    second = _pip_history_scope_dir(tmp_path / "run", "a_b")
+
+    assert first != second
+    assert first.parent == second.parent
+    assert first.name.startswith("a_b-")
+    assert second.name.startswith("a_b-")
+
+
 def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     tmp_path: Path,
     monkeypatch,
@@ -66,6 +79,8 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     seen: dict[str, object] = {}
     preflight_seen: dict[str, object] = {}
     bootstrap_seen: dict[str, object] = {}
+    pip_seed_seen: dict[str, object] = {}
+    pip_merge_seen: dict[str, object] = {}
     ctx = _make_relative_ctx(monkeypatch, tmp_path, scaffold="openclaw")
     runtime_dir = ctx.attempt_dir / "_task_container_runtime" / "openclaw"
     stdout_path = runtime_dir / "stdout.txt"
@@ -162,6 +177,14 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
             ),
         )[1],
     )
+    monkeypatch.setattr(
+        "trace_collect.collector.seed_pip_history_from_shared",
+        lambda **kwargs: pip_seed_seen.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.merge_pip_predictions_into_shared_history",
+        lambda **kwargs: pip_merge_seen.update(kwargs),
+    )
 
     result = asyncio.run(
         _run_openclaw_in_task_container(
@@ -209,6 +232,14 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert Path(str(seen["pip_runtime_dir"])) == (
         ctx.attempt_dir.resolve() / "pip_runtime"
     )
+    assert "pip_history_dir" not in seen
+    assert pip_seed_seen["shared_history_root"] == (
+        _pip_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
+    )
+    assert pip_seed_seen["attempt_prediction_root"] == (
+        ctx.attempt_dir.resolve() / "pip_runtime"
+    )
+    assert pip_merge_seen == pip_seed_seen
     assert seen["tool_workspace"] == "/testbed"
     assert seen["exec_working_dir"] == "/testbed"
     assert preflight_seen["runtime"] == "/usr/bin/python3"
@@ -227,6 +258,8 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert "openclaw stdout" in ctx.container_stdout
 
     seen.clear()
+    pip_seed_seen.clear()
+    pip_merge_seen.clear()
     asyncio.run(
         _run_openclaw_in_task_container(
             ctx=ctx,
@@ -252,6 +285,9 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert seen["pytest_capture_dir"] is None
     assert seen["pytest_runtime_dir"] is None
     assert seen["pip_runtime_dir"] is None
+    assert "pip_history_dir" not in seen
+    assert pip_seed_seen == {}
+    assert pip_merge_seen == {}
 
 
 def test_run_openclaw_in_task_container_adds_mcp_bootstrap_requirements(

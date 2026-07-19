@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import statistics
-from typing import Any
+import sys
+import time
+from typing import Any, Iterator
 
 from trace_collect.exec_classifier import classify_exec_tool_name
 
@@ -20,6 +24,7 @@ PREDICTION_FILENAME = "prediction.json"
 HISTORY_LIMIT = 5
 PREDICTION_SCHEMA_VERSION = 1
 HISTORY_SCHEMA_VERSION = 1
+LOCK_STALE_AFTER_S = 600.0
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._+-]+")
 _EXIT_CODE_RE = re.compile(r"Exit code:\s*(-?\d+)")
@@ -65,6 +70,11 @@ _VALUE_FLAGS = {
     "--target",
 }
 _STOP_TOKENS = {"|", "||", ">", ">>", "<", "2>", "2>>", "&>"}
+_ANSI_RESET = "\033[0m"
+_ANSI_BLUE = "\033[36m"
+_ANSI_GREEN = "\033[32m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_DIM = "\033[2m"
 
 
 @dataclass(slots=True)
@@ -76,6 +86,7 @@ class PipRuntimeRecord:
     directory: Path
     command: str
     working_directory: str | None = None
+    history_root: Path | None = None
 
 
 @dataclass(slots=True)
@@ -93,6 +104,16 @@ def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _should_color_stdout() -> bool:
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def _ansi(text: str, color: str, *, enabled: bool) -> str:
+    return f"{color}{text}{_ANSI_RESET}" if enabled else text
+
+
 def _safe_component(value: str, *, fallback: str) -> str:
     cleaned = _SAFE_NAME_RE.sub("_", value.strip())[:80].strip("._-")
     return cleaned or fallback
@@ -100,10 +121,12 @@ def _safe_component(value: str, *, fallback: str) -> str:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}")
+    tmp_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    tmp_path.replace(path)
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -122,6 +145,44 @@ def _load_json(path: Path) -> tuple[dict[str, Any], str | None]:
     if not isinstance(loaded, dict):
         return {}, f"{path.name} is not a JSON object"
     return loaded, None
+
+
+def _history_path(history_root: Path | None, prediction_root: Path) -> Path:
+    return (history_root or prediction_root) / HISTORY_FILENAME
+
+
+@contextmanager
+def _history_lock(history_path: Path, timeout_s: float = 30.0) -> Iterator[None]:
+    lock_path = history_path.with_suffix(f"{history_path.suffix}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout_s
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age_s = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age_s = 0.0
+            if age_s > LOCK_STALE_AFTER_S:
+                try:
+                    lock_path.unlink()
+                    continue
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {lock_path}")
+            time.sleep(0.05)
+    try:
+        os.write(fd, _utc_now().encode("utf-8"))
+        yield
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _median(values: list[float]) -> float | None:
@@ -381,6 +442,7 @@ def is_pip_install_tool_call(tool_name: str, tool_args: dict[str, Any]) -> bool:
 def prepare_pip_runtime_prediction_before_tool(
     *,
     prediction_root: Path,
+    history_root: Path | None = None,
     iteration: int,
     tool_call_id: str,
     tool_name: str,
@@ -403,7 +465,7 @@ def prepare_pip_runtime_prediction_before_tool(
     )
     if parsed is None:
         return None
-    history_path = prediction_root / HISTORY_FILENAME
+    history_path = _history_path(history_root, prediction_root)
     history, history_warning = _load_json(history_path)
     predictions = compute_pip_predictions(
         history=history,
@@ -424,6 +486,8 @@ def prepare_pip_runtime_prediction_before_tool(
         "predictions": predictions,
         "warnings": [history_warning] if history_warning else [],
         "working_directory": working_directory,
+        "history_path": str(history_path),
+        "history_scope": "shared" if history_root is not None else "attempt",
         "status": "pending_execution",
     }
     _write_json(invocation_dir / "pending.json", record)
@@ -433,6 +497,7 @@ def prepare_pip_runtime_prediction_before_tool(
         directory=invocation_dir,
         command=command,
         working_directory=working_directory or None,
+        history_root=history_root,
     )
 
 
@@ -551,6 +616,70 @@ def update_pip_history(
     return updated
 
 
+def seed_pip_history_from_shared(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Copy shared pip history into an attempt-local prediction directory."""
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    attempt_history_path = _history_path(None, attempt_prediction_root)
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+    if warning:
+        return
+    if history:
+        _write_json(attempt_history_path, history)
+
+
+def merge_pip_predictions_into_shared_history(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Merge successful attempt-local pip prediction rows into shared history."""
+
+    predictions_path = attempt_prediction_root / PREDICTIONS_FILENAME
+    if not predictions_path.exists():
+        return
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in predictions_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                loaded = json.loads(line)
+                if isinstance(loaded, dict):
+                    rows.append(loaded)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not rows:
+        return
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+        if warning:
+            history = {}
+        for row in rows:
+            if row.get("history_updated") is not True:
+                continue
+            normalized_command = row.get("normalized_command")
+            total_duration_s = row.get("actual_duration_s")
+            if not isinstance(normalized_command, str) or not isinstance(
+                total_duration_s, (int, float)
+            ):
+                continue
+            package_count = row.get("package_count")
+            history = update_pip_history(
+                history=history,
+                normalized_command=normalized_command,
+                total_duration_s=float(total_duration_s),
+                package_count=package_count if isinstance(package_count, int) else None,
+                success=True,
+            )
+        _write_json(shared_history_path, history)
+
+
 def _absolute_error(prediction: float | None, actual: float) -> float | None:
     return None if prediction is None else abs(float(prediction) - actual)
 
@@ -577,6 +706,7 @@ def finalize_pip_runtime_prediction(
     record: PipRuntimeRecord,
     *,
     prediction_root: Path,
+    history_root: Path | None = None,
     action_id: str,
     ts_start: float,
     ts_end: float,
@@ -621,8 +751,9 @@ def finalize_pip_runtime_prediction(
         if isinstance(pending.get("shell_has_or_chain"), bool)
         else parsed.shell_has_or_chain
     )
-    history_path = prediction_root / HISTORY_FILENAME
-    history, history_warning = _load_json(history_path)
+    effective_history_root = history_root or record.history_root
+    history_path = _history_path(effective_history_root, prediction_root)
+    _, history_warning = _load_json(history_path)
     predictions = (
         pending.get("predictions")
         if isinstance(pending.get("predictions"), dict)
@@ -676,6 +807,8 @@ def finalize_pip_runtime_prediction(
         "exit_code": exit_code,
         "success": success,
         "history_updated": successful_install,
+        "history_path": str(history_path),
+        "history_scope": "shared" if effective_history_root is not None else "attempt",
         **predictions,
         "absolute_error": {
             key: _absolute_error(value, actual_duration_s)
@@ -687,23 +820,35 @@ def finalize_pip_runtime_prediction(
         },
         "warnings": warnings,
     }
+    try:
+        with _history_lock(history_path):
+            locked_history, locked_warning = _load_json(history_path)
+            if locked_warning and locked_warning not in payload["warnings"]:
+                payload["warnings"].append(locked_warning)
+            updated = update_pip_history(
+                history=locked_history,
+                normalized_command=normalized_command,
+                total_duration_s=actual_duration_s,
+                package_count=package_count,
+                success=successful_install,
+            )
+            _write_json(history_path, updated)
+    except Exception as exc:
+        payload["history_updated"] = False
+        payload["warnings"].append(f"failed to update history: {exc!r}")
     _write_json(record.directory / PREDICTION_FILENAME, payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
-    updated = update_pip_history(
-        history=history,
-        normalized_command=normalized_command,
-        total_duration_s=actual_duration_s,
-        package_count=package_count,
-        success=successful_install,
-    )
-    _write_json(history_path, updated)
-    summary = format_pip_prediction_summary(payload)
+    summary = format_pip_prediction_summary(payload, color=_should_color_stdout())
     if summary:
         print(summary, flush=True)
     return payload
 
 
-def format_pip_prediction_summary(payload: dict[str, Any]) -> str:
+def format_pip_prediction_summary(
+    payload: dict[str, Any],
+    *,
+    color: bool = False,
+) -> str:
     """Return a compact human-readable prediction line."""
 
     actual = payload.get("actual_duration_s")
@@ -718,19 +863,31 @@ def format_pip_prediction_summary(payload: dict[str, Any]) -> str:
         value = rel.get(method)
         return "n/a" if value is None else f"{float(value) * 100:.1f}%"
 
+    label = _ansi("[pip-predict]", _ANSI_BLUE, enabled=color)
+    actual_text = _ansi(_fmt(actual), _ANSI_GREEN, enabled=color)
+    recommended_text = _ansi(
+        f"{payload.get('prediction_recommended_method')}:"
+        f"{_fmt(payload.get('prediction_recommended_s'))}",
+        _ANSI_YELLOW,
+        enabled=color,
+    )
+    reliability_text = _ansi(
+        str((payload.get("prediction_reliability") or {}).get("level", "unavailable")),
+        _ANSI_DIM,
+        enabled=color,
+    )
     return (
-        "[pip-predict] "
+        f"{label} "
         f"iter={payload.get('iteration')} "
         f"packages={payload.get('package_count')} "
-        f"actual={_fmt(actual)} "
+        f"actual={actual_text} "
         f"last={_fmt(payload.get('prediction_last_run_s'))} "
         f"last_err={_err('last_run')} "
         f"package_count={_fmt(payload.get('prediction_package_count_s'))} "
         f"package_count_err={_err('package_count')} "
         f"global={_fmt(payload.get('prediction_global_median_s'))} "
         f"global_err={_err('global_median')} "
-        f"recommended={payload.get('prediction_recommended_method')}:"
-        f"{_fmt(payload.get('prediction_recommended_s'))} "
+        f"recommended={recommended_text} "
         f"rec_err={_err('recommended')} "
-        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'unavailable')}"
+        f"reliability={reliability_text}"
     )

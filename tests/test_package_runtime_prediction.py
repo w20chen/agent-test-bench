@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import time
+from threading import Thread
 
 import pytest
 
 from trace_collect.package_runtime_prediction import (
+    LOCK_STALE_AFTER_S,
     compute_pip_predictions,
     finalize_pip_runtime_prediction,
     format_pip_prediction_summary,
     is_pip_install_tool_call,
+    merge_pip_predictions_into_shared_history,
     parse_pip_install_command,
     prepare_pip_runtime_prediction_before_tool,
+    seed_pip_history_from_shared,
     update_pip_history,
 )
 
@@ -165,6 +171,29 @@ def test_format_pip_prediction_summary_includes_all_method_errors() -> None:
     assert "recommended=package_count:11.00s rec_err=10.0%" in summary
 
 
+def test_format_pip_prediction_summary_color_is_opt_in() -> None:
+    payload = {
+        "iteration": 4,
+        "package_count": 2,
+        "actual_duration_s": 10.0,
+        "prediction_last_run_s": 9.0,
+        "prediction_package_count_s": 11.0,
+        "prediction_global_median_s": 8.0,
+        "prediction_recommended_s": 11.0,
+        "prediction_recommended_method": "package_count",
+        "prediction_reliability": {"level": "medium"},
+        "relative_error": {},
+    }
+
+    plain = format_pip_prediction_summary(payload)
+    colored = format_pip_prediction_summary(payload, color=True)
+
+    assert "\033[" not in plain
+    assert "\033[" in colored
+    assert "[pip-predict]" in colored
+    assert "recommended=\033[" in colored
+
+
 def test_update_history_skips_failed_runs_for_future_predictions() -> None:
     history = update_pip_history(
         history={},
@@ -222,6 +251,179 @@ def test_finalize_pip_runtime_prediction_writes_artifacts(tmp_path: Path) -> Non
 
     history = json.loads((root / "history.json").read_text(encoding="utf-8"))
     assert history["commands"]["pip install requests"]["durations"] == [6.0]
+
+
+def test_shared_history_root_reuses_prior_attempt_knowledge(tmp_path: Path) -> None:
+    history_root = tmp_path / "pip_runtime_db"
+    first_root = tmp_path / "attempt_1" / "pip_runtime"
+    second_root = tmp_path / "attempt_2" / "pip_runtime"
+
+    first = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=first_root,
+        history_root=history_root,
+        iteration=1,
+        tool_call_id="call-first",
+        tool_name="exec",
+        tool_args={"command": "pip install requests"},
+    )
+    assert first is not None
+    first_payload = finalize_pip_runtime_prediction(
+        first,
+        prediction_root=first_root,
+        history_root=history_root,
+        action_id="tool_1_call-first",
+        ts_start=1.0,
+        ts_end=7.0,
+        duration_ms=6000.0,
+        success=True,
+        tool_result="Successfully installed requests\nExit code: 0",
+    )
+
+    second = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=second_root,
+        history_root=history_root,
+        iteration=1,
+        tool_call_id="call-second",
+        tool_name="exec",
+        tool_args={"command": "python -m pip install requests -q"},
+    )
+    assert second is not None
+    pending = json.loads((second.directory / "pending.json").read_text(encoding="utf-8"))
+
+    assert first_payload["history_scope"] == "shared"
+    assert first_payload["history_path"] == str(history_root / "history.json")
+    assert not (first_root / "history.json").exists()
+    assert pending["history_scope"] == "shared"
+    assert pending["predictions"]["prediction_recommended_method"] == "last_run"
+    assert pending["predictions"]["prediction_recommended_s"] == pytest.approx(6.0)
+
+
+def test_seed_and_merge_shared_history_for_task_container_attempts(
+    tmp_path: Path,
+) -> None:
+    shared_root = tmp_path / "run" / "pip_runtime_db"
+    first_root = tmp_path / "run" / "instance" / "attempt_1" / "pip_runtime"
+    second_root = tmp_path / "run" / "instance" / "attempt_2" / "pip_runtime"
+
+    first = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=first_root,
+        iteration=1,
+        tool_call_id="call-first",
+        tool_name="exec",
+        tool_args={"command": "pip install requests"},
+    )
+    assert first is not None
+    finalize_pip_runtime_prediction(
+        first,
+        prediction_root=first_root,
+        action_id="tool_1_call-first",
+        ts_start=1.0,
+        ts_end=5.0,
+        duration_ms=4000.0,
+        success=True,
+        tool_result="Successfully installed requests\nExit code: 0",
+    )
+    merge_pip_predictions_into_shared_history(
+        shared_history_root=shared_root,
+        attempt_prediction_root=first_root,
+    )
+
+    seed_pip_history_from_shared(
+        shared_history_root=shared_root,
+        attempt_prediction_root=second_root,
+    )
+    second = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=second_root,
+        iteration=1,
+        tool_call_id="call-second",
+        tool_name="exec",
+        tool_args={"command": "python -m pip install requests -q"},
+    )
+    assert second is not None
+    pending = json.loads((second.directory / "pending.json").read_text(encoding="utf-8"))
+
+    assert pending["history_scope"] == "attempt"
+    assert pending["predictions"]["prediction_recommended_method"] == "last_run"
+    assert pending["predictions"]["prediction_recommended_s"] == pytest.approx(4.0)
+
+
+def test_shared_history_concurrent_updates_keep_both_samples(tmp_path: Path) -> None:
+    shared_root = tmp_path / "pip_runtime_db"
+    attempt_roots = [tmp_path / "a1" / "pip_runtime", tmp_path / "a2" / "pip_runtime"]
+    durations = [3000.0, 5000.0]
+    errors: list[BaseException] = []
+
+    def _run(attempt_root: Path, duration_ms: float, call_id: str) -> None:
+        try:
+            record = prepare_pip_runtime_prediction_before_tool(
+                prediction_root=attempt_root,
+                history_root=shared_root,
+                iteration=1,
+                tool_call_id=call_id,
+                tool_name="exec",
+                tool_args={"command": "pip install requests"},
+            )
+            assert record is not None
+            finalize_pip_runtime_prediction(
+                record,
+                prediction_root=attempt_root,
+                history_root=shared_root,
+                action_id=f"tool_1_{call_id}",
+                ts_start=1.0,
+                ts_end=1.0 + duration_ms / 1000.0,
+                duration_ms=duration_ms,
+                success=True,
+                tool_result="Successfully installed requests\nExit code: 0",
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [
+        Thread(target=_run, args=(attempt_roots[idx], durations[idx], f"call-{idx}"))
+        for idx in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    history = json.loads((shared_root / "history.json").read_text(encoding="utf-8"))
+    samples = history["commands"]["pip install requests"]["durations"]
+    assert errors == []
+    assert sorted(samples) == [3.0, 5.0]
+
+
+def test_stale_history_lock_is_recovered(tmp_path: Path) -> None:
+    shared_root = tmp_path / "pip_runtime_db"
+    lock_path = shared_root / "history.json.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("stale", encoding="utf-8")
+    stale_time = time.time() - LOCK_STALE_AFTER_S - 1.0
+    os.utime(lock_path, (stale_time, stale_time))
+
+    record = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=tmp_path / "attempt" / "pip_runtime",
+        history_root=shared_root,
+        iteration=1,
+        tool_call_id="call-stale",
+        tool_name="exec",
+        tool_args={"command": "pip install requests"},
+    )
+    assert record is not None
+    payload = finalize_pip_runtime_prediction(
+        record,
+        prediction_root=record.directory.parent,
+        history_root=shared_root,
+        action_id="tool_1_call-stale",
+        ts_start=1.0,
+        ts_end=3.0,
+        duration_ms=2000.0,
+        success=True,
+        tool_result="Successfully installed requests\nExit code: 0",
+    )
+
+    assert payload["history_updated"] is True
+    assert not lock_path.exists()
 
 
 def test_finalize_uses_pre_execution_prediction_snapshot(tmp_path: Path) -> None:

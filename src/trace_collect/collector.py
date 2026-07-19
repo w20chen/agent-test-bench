@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -48,6 +49,10 @@ from trace_collect.monitoring import (
     MonitoringPolicy,
     resolve_collect_monitoring,
 )
+from trace_collect.package_runtime_prediction import (
+    merge_pip_predictions_into_shared_history,
+    seed_pip_history_from_shared,
+)
 from trace_collect.runtime.task_container import (
     bootstrap_task_container_python,
     preflight_task_container_runtime,
@@ -63,6 +68,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _DOCKER_HOST_GATEWAY = "172.17.0.1"
+
+
+def _pip_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._+-]+", "_", instance_id).strip("._-")
+    digest = hashlib.sha1(instance_id.encode("utf-8")).hexdigest()[:10]
+    return run_dir.resolve() / "pip_runtime_db" / f"{safe or 'instance'}-{digest}"
 
 
 def _recording_server_public_host(
@@ -1278,6 +1289,10 @@ async def collect_traces(
                     run_task_kwargs["capture_pytest_runtime"] = capture_pytest_runtime
                 if "capture_pip_runtime" in run_task_params:
                     run_task_kwargs["capture_pip_runtime"] = capture_pip_runtime
+                if "pip_history_dir" in run_task_params and capture_pip_runtime:
+                    run_task_kwargs["pip_history_dir"] = (
+                        _pip_history_scope_dir(run_dir, instance_id)
+                    )
                 result = await runner.run_task(
                     task,
                     **run_task_kwargs,
@@ -1557,6 +1572,21 @@ async def _run_openclaw_in_task_container(
             container_executable=container_executable,
         )
         runtime_dir.mkdir(parents=True, exist_ok=True)
+        pip_runtime_dir = (
+            ctx.attempt_dir.resolve() / "pip_runtime"
+            if capture_pip_runtime
+            else None
+        )
+        pip_shared_history_dir = (
+            _pip_history_scope_dir(ctx.run_dir, ctx.instance_id)
+            if capture_pip_runtime
+            else None
+        )
+        if pip_runtime_dir is not None and pip_shared_history_dir is not None:
+            seed_pip_history_from_shared(
+                shared_history_root=pip_shared_history_dir,
+                attempt_prediction_root=pip_runtime_dir,
+            )
         runtime = run_task_container_agent(
             container_id=container_id,
             timeout=(max_iterations * 120) + 300,
@@ -1600,8 +1630,8 @@ async def _run_openclaw_in_task_container(
                     else None
                 ),
                 "pip_runtime_dir": (
-                    str(ctx.attempt_dir.resolve() / "pip_runtime")
-                    if capture_pip_runtime
+                    str(pip_runtime_dir)
+                    if pip_runtime_dir is not None
                     else None
                 ),
                 "raw_stdout_path": str(stdout_path),
@@ -1610,6 +1640,11 @@ async def _run_openclaw_in_task_container(
             },
             container_executable=container_executable,
         )
+        if pip_runtime_dir is not None and pip_shared_history_dir is not None:
+            merge_pip_predictions_into_shared_history(
+                shared_history_root=pip_shared_history_dir,
+                attempt_prediction_root=pip_runtime_dir,
+            )
         runtime_proof = {
             **asdict(proof),
             **runtime.runtime_proof,

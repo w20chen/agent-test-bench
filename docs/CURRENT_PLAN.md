@@ -205,3 +205,29 @@ Progress:
     tests\test_openclaw_runtime_selection.py -q -p no:cacheprovider
     --basetemp .tmp-tests\pip-runtime-expanded` passed with 30 tests.
   - `git diff --check` passed with Windows line-ending warnings only.
+
+## Pip Shared History Update
+
+Objective: make pip runtime prediction useful across attempts by storing the
+learned history in a run-level database while preserving per-attempt artifacts.
+
+Plan:
+
+- Keep `attempt_N/pip_runtime/` as the local prediction artifact directory.
+- Add a shared instance-scoped history directory such as
+  `run_dir/pip_runtime_db/<instance_id>/`.
+- Read predictions from the shared history before each pip invocation.
+- Update the shared history only after successful, unmasked pip installs.
+- Record the history path in `pending.json` and `prediction.json` for audit.
+- Add focused tests for cross-attempt reuse and disabled capture behavior.
+
+Reviewer follow-up:
+
+- Avoided mounting `run_dir` into task containers. Task-container attempts use
+  an attempt-local history mirror; the host seeds it before execution and
+  merges successful prediction rows back afterward.
+- Made JSON writes atomic and added stale lock recovery for shared history.
+- Scoped collect-level shared history by `instance_id` to avoid mixing unrelated
+  task images/repos.
+- Added a short hash suffix to the instance scope directory to avoid sanitized
+  `instance_id` collisions.

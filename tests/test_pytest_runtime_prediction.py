@@ -630,6 +630,30 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     assert "reliability=high" in line
 
 
+def test_realtime_summary_color_is_opt_in() -> None:
+    payload = {
+        "iteration": 3,
+        "collected_count": 2,
+        "actual_duration_s": 10.0,
+        "prediction_last_run_s": 8.0,
+        "prediction_test_count_s": 5.0,
+        "prediction_per_test_s": 9.0,
+        "prediction_unknown_test_fallback_s": 11.0,
+        "prediction_recommended_s": 9.0,
+        "prediction_recommended_method": "per_test",
+        "prediction_reliability": {"level": "high"},
+        "relative_error": {},
+    }
+
+    plain = format_pytest_prediction_summary(payload)
+    colored = format_pytest_prediction_summary(payload, color=True)
+
+    assert "\033[" not in plain
+    assert "\033[" in colored
+    assert "[pytest-predict]" in colored
+    assert "recommended=\033[" in colored
+
+
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:
     overrides = prepare_pytest_runtime_environment(invocation_dir=tmp_path)
     env = merge_pytest_runtime_environment(

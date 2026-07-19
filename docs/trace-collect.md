@@ -661,6 +661,15 @@ variables, modify tool arguments, or change package installation semantics.
 It recognizes common forms such as `pip install ...`, `pip3 install ...`, and
 `python -m pip install ...`.
 
+Pip prediction learns from an instance-scoped history database under the run
+directory, so later attempts for the same task instance can use successful
+installs observed by earlier attempts without mixing unrelated images or repos.
+Per-attempt directories still hold the invocation artifacts needed for audit.
+In task-container mode, the host seeds each attempt's local history from the
+shared database before the container starts, then merges successful prediction
+rows back after the attempt finishes; this keeps the shared database
+host-visible without adding broader container mounts.
+
 After each supported invocation finishes, collect mode prints one summary line
 with all simple baselines and their relative errors:
 
@@ -671,19 +680,25 @@ with all simple baselines and their relative errors:
 Artifacts are written as:
 
 ```text
+pip_runtime_db/
+  <instance_scope>/
+    history.json
 attempt_N/pip_runtime/
-  history.json
   predictions.jsonl
   iter_0004_exec-pip_<tool_call_id>/
     pending.json
     prediction.json
 ```
 
+`<instance_scope>` is a filesystem-safe instance label with a short hash suffix
+to avoid collisions between different raw `instance_id` values.
+
 `pending.json` snapshots the normalized command and predictions before the pip
-command executes. `prediction.json` then adds the observed wall duration, exit
-code, success metadata, absolute / relative errors, and whether the run was
-admitted into history. `predictions.jsonl` appends the same compact per-run
-rows for aggregate scans.
+command executes, including the history path used for that prediction.
+`prediction.json` then adds the observed wall duration, exit code, success
+metadata, absolute / relative errors, and whether the run was admitted into
+history. `predictions.jsonl` appends the same compact per-run rows for
+aggregate scans.
 
 The predictor intentionally keeps only three simple baselines:
 
@@ -700,11 +715,11 @@ else:
 
 `normalized_command` sorts explicit package arguments and hashes readable
 requirement files, so `python -m pip install -r requirements.txt` is keyed by
-the dependency file content rather than by the raw shell spelling. History is
-updated only for successful installs. Commands with nonzero `Exit code` do not
-enter history, and commands containing `||` fallback chains are recorded but
-excluded from history updates because the final shell status can mask a failed
-pip invocation.
+the dependency file content rather than by the raw shell spelling. The shared
+history is updated only for successful installs. Commands with nonzero
+`Exit code` do not enter history, and commands containing `||` fallback chains
+are recorded but excluded from history updates because the final shell status
+can mask a failed pip invocation.
 
 Pip runtime prediction is enabled by default in collect mode; pass
 `--no-capture-pip-runtime` to disable `pip_runtime/` artifacts and realtime
