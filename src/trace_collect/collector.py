@@ -1090,6 +1090,7 @@ async def collect_traces(
     min_free_disk_gb: float = 30.0,
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
+    capture_pip_runtime: bool = True,
     record_internals: bool = False,
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
@@ -1262,6 +1263,7 @@ async def collect_traces(
                         tool_profiling_tools=tool_profiling_tools,
                         capture_pytest_scripts=capture_pytest_scripts,
                         capture_pytest_runtime=capture_pytest_runtime,
+                        capture_pip_runtime=capture_pip_runtime,
                     )
 
                 assert runner is not None
@@ -1274,6 +1276,8 @@ async def collect_traces(
                     run_task_kwargs["capture_pytest_scripts"] = capture_pytest_scripts
                 if "capture_pytest_runtime" in run_task_params:
                     run_task_kwargs["capture_pytest_runtime"] = capture_pytest_runtime
+                if "capture_pip_runtime" in run_task_params:
+                    run_task_kwargs["capture_pip_runtime"] = capture_pip_runtime
                 result = await runner.run_task(
                     task,
                     **run_task_kwargs,
@@ -1287,6 +1291,7 @@ async def collect_traces(
                     run_config: dict[str, Any] = {
                         "capture_pytest_scripts": capture_pytest_scripts,
                         "capture_pytest_runtime": capture_pytest_runtime,
+                        "capture_pip_runtime": capture_pip_runtime,
                     }
                     if record_internals:
                         run_config["record_internals"] = True
@@ -1328,6 +1333,7 @@ def _normalize_openclaw_trace(
     generation_config: dict[str, Any] | None = None,
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
+    capture_pip_runtime: bool = True,
 ) -> None:
     """Copy an OpenClaw trace into the attempt dir, merging trace metadata."""
     lines = src.read_text(encoding="utf-8").splitlines()
@@ -1390,6 +1396,7 @@ def _normalize_openclaw_trace(
     run_config = merged.get("run_config") or {}
     run_config["capture_pytest_scripts"] = capture_pytest_scripts
     run_config["capture_pytest_runtime"] = capture_pytest_runtime
+    run_config["capture_pip_runtime"] = capture_pip_runtime
     merged["run_config"] = run_config
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1451,6 +1458,7 @@ async def _run_openclaw_in_task_container(
     tool_profiling_tools: list[str] | None = None,
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
+    capture_pip_runtime: bool = True,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1591,6 +1599,11 @@ async def _run_openclaw_in_task_container(
                     if capture_pytest_runtime
                     else None
                 ),
+                "pip_runtime_dir": (
+                    str(ctx.attempt_dir.resolve() / "pip_runtime")
+                    if capture_pip_runtime
+                    else None
+                ),
                 "raw_stdout_path": str(stdout_path),
                 "raw_stderr_path": str(stderr_path),
                 "container_executable": container_executable,
@@ -1617,6 +1630,7 @@ async def _run_openclaw_in_task_container(
             generation_config=generation_config,
             capture_pytest_scripts=capture_pytest_scripts,
             capture_pytest_runtime=capture_pytest_runtime,
+            capture_pip_runtime=capture_pip_runtime,
         )
     finally:
         if _stats_sampler is not None:

@@ -176,6 +176,8 @@ class SWEBenchRunner:
         pytest_capture_dir: Path | None = None,
         capture_pytest_runtime: bool = True,
         pytest_runtime_dir: Path | None = None,
+        capture_pip_runtime: bool = True,
+        pip_runtime_dir: Path | None = None,
     ) -> EvalResult:
         """Run a single evaluation task inside the prepared task container."""
         ws = task.workspace_dir
@@ -208,6 +210,8 @@ class SWEBenchRunner:
             pytest_capture_dir=pytest_capture_dir,
             capture_pytest_runtime=capture_pytest_runtime,
             pytest_runtime_dir=pytest_runtime_dir,
+            capture_pip_runtime=capture_pip_runtime,
+            pip_runtime_dir=pip_runtime_dir,
         )
 
         content = result.content

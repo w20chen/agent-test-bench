@@ -196,6 +196,7 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert Path(str(seen["trace_file"])).is_absolute()
     assert Path(str(seen["pytest_capture_dir"])).is_absolute()
     assert Path(str(seen["pytest_runtime_dir"])).is_absolute()
+    assert Path(str(seen["pip_runtime_dir"])).is_absolute()
     assert Path(str(seen["raw_stdout_path"])).is_absolute()
     assert Path(str(seen["raw_stderr_path"])).is_absolute()
     assert Path(str(seen["result_path"])) == runtime_dir.resolve() / "run.result.json"
@@ -204,6 +205,9 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     )
     assert Path(str(seen["pytest_runtime_dir"])) == (
         ctx.attempt_dir.resolve() / "pytest_runtime"
+    )
+    assert Path(str(seen["pip_runtime_dir"])) == (
+        ctx.attempt_dir.resolve() / "pip_runtime"
     )
     assert seen["tool_workspace"] == "/testbed"
     assert seen["exec_working_dir"] == "/testbed"
@@ -241,11 +245,13 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
             mcp_config=None,
             capture_pytest_scripts=False,
             capture_pytest_runtime=False,
+            capture_pip_runtime=False,
         )
     )
 
     assert seen["pytest_capture_dir"] is None
     assert seen["pytest_runtime_dir"] is None
+    assert seen["pip_runtime_dir"] is None
 
 
 def test_run_openclaw_in_task_container_adds_mcp_bootstrap_requirements(

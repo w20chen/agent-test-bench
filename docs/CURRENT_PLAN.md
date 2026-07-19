@@ -160,3 +160,48 @@ finalizing.
   - realtime stdout docs include recommended/reliability;
   - added tests for old history, medium file fallback, old-schema analyzer
     buckets, and JSONL recommended fields.
+
+## Pip Runtime Prediction Update
+
+Objective: add a minimal trace-collect-only runtime predictor for `pip install`
+commands, focused only on wall-clock duration.
+
+Scope:
+
+- Add `src/trace_collect/package_runtime_prediction.py` for command recognition,
+  conservative normalization, bounded history, and prediction artifact writing.
+- Support `pip install ...`, `pip3 install ...`, and `python -m pip install ...`.
+- Use only simple predictors: same-command Last Run, package-count baseline, and
+  tool-global median fallback.
+- Record compact attempt-local artifacts under `attempt_N/pip_runtime/`.
+- Wire a thin optional hook through OpenClaw trace collection without modifying
+  `ExecTool` or changing command execution semantics.
+- Add focused unit tests and run a targeted pytest suite.
+
+Review gate: because the trace/evaluation collection path is touched, run a
+fresh reviewer before finalizing and fix any critical or major findings.
+
+Progress:
+
+- Added compact pip runtime prediction artifacts with pre-execution prediction
+  snapshots and post-execution actual/error finalization.
+- Wired optional `capture_pip_runtime` through CLI, collector, task-container
+  entrypoint, and OpenClaw session runner.
+- Kept `ExecTool` and command execution semantics unchanged.
+- Reviewer found major issues around failed installs entering history and
+  hindsight-prone post-execution prediction. Fixed by:
+  - updating history only when shell success is consistent with `Exit code: 0`
+    and the command has no `||` fallback chain;
+  - snapshotting predictions in `pending.json` before execution;
+  - disabling post-execution recomputation when the pending snapshot is missing;
+  - preserving per-call `working_dir` instead of overwriting it with project
+    root.
+- Validation:
+  - `python -m py_compile src\trace_collect\package_runtime_prediction.py
+    src\agents\openclaw\_session_runner.py tests\test_package_runtime_prediction.py
+    tests\test_session_runner_actions.py`
+  - `python -m pytest tests\test_package_runtime_prediction.py
+    tests\test_session_runner_actions.py tests\test_collector_task_container_runtime.py
+    tests\test_openclaw_runtime_selection.py -q -p no:cacheprovider
+    --basetemp .tmp-tests\pip-runtime-expanded` passed with 30 tests.
+  - `git diff --check` passed with Windows line-ending warnings only.

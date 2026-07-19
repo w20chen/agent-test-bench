@@ -78,6 +78,180 @@ def test_trace_collector_emits_llm_call_action(tmp_path: Path) -> None:
     asyncio.run(_drive_emits_llm_call_action(tmp_path))
 
 
+def test_trace_collector_writes_pip_runtime_prediction(tmp_path: Path) -> None:
+    asyncio.run(_drive_writes_pip_runtime_prediction(tmp_path))
+
+
+def test_trace_collector_preserves_pip_working_dir(tmp_path: Path) -> None:
+    asyncio.run(_drive_preserves_pip_working_dir(tmp_path))
+
+
+async def _drive_writes_pip_runtime_prediction(tmp_path: Path) -> None:
+    trace_file = tmp_path / "trace.jsonl"
+    hook = TraceCollectorHook(
+        trace_file,
+        instance_id="test-pip",
+        pytest_project_root=tmp_path,
+        pip_runtime_dir=tmp_path / "pip_runtime",
+    )
+
+    messages_in = [{"role": "user", "content": "Install a dependency."}]
+    await hook.before_iteration(_StubContext(iteration=0, messages=messages_in))
+    tool_call = _StubToolCall("exec", {"command": "python -m pip install requests -q"})
+    messages_after_llm = messages_in + [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "arguments": json.dumps(tool_call.arguments),
+                    },
+                }
+            ],
+        }
+    ]
+    await hook.before_execute_tools(
+        _StubContext(
+            iteration=0,
+            messages=messages_after_llm,
+            tool_calls=[tool_call],
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+    )
+    messages_after_tool = messages_after_llm + [
+        {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": "exec",
+            "content": "Successfully installed requests\nExit code: 0",
+        }
+    ]
+    await hook.after_iteration(
+        _StubContext(
+            iteration=0,
+            messages=messages_after_tool,
+            tool_calls=[tool_call],
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+            response=_StubResponse(content="", finish_reason="tool_calls"),
+            tool_events=[
+                {
+                    "tc_id": tool_call.id,
+                    "wall_ms": 2000.0,
+                    "start_mono": 1.0,
+                }
+            ],
+        )
+    )
+    hook.close()
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "pip_runtime" / "predictions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    trace_records = [
+        json.loads(line)
+        for line in trace_file.read_text(encoding="utf-8").splitlines()
+    ]
+    tool_actions = [
+        record
+        for record in trace_records
+        if record.get("type") == "action"
+        and record.get("action_type") == "tool_exec"
+    ]
+
+    assert rows[0]["normalized_command"] == "pip install requests"
+    assert rows[0]["actual_duration_s"] == pytest.approx(2.0)
+    assert json.loads(tool_actions[0]["data"]["tool_args"]) == {
+        "command": "python -m pip install requests -q"
+    }
+
+
+async def _drive_preserves_pip_working_dir(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    tool_dir = tmp_path / "tool-dir"
+    project.mkdir()
+    tool_dir.mkdir()
+    (project / "requirements.txt").write_text("project-only\n", encoding="utf-8")
+    (tool_dir / "requirements.txt").write_text("tool-only\n", encoding="utf-8")
+    trace_file = tmp_path / "trace.jsonl"
+    hook = TraceCollectorHook(
+        trace_file,
+        instance_id="test-pip-cwd",
+        pytest_project_root=project,
+        pip_runtime_dir=tmp_path / "pip_runtime",
+    )
+
+    messages_in = [{"role": "user", "content": "Install a dependency."}]
+    await hook.before_iteration(_StubContext(iteration=0, messages=messages_in))
+    tool_call = _StubToolCall(
+        "exec",
+        {
+            "command": "python -m pip install -r requirements.txt",
+            "working_dir": str(tool_dir),
+        },
+    )
+    messages_after_llm = messages_in + [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "arguments": json.dumps(tool_call.arguments),
+                    },
+                }
+            ],
+        }
+    ]
+    await hook.before_execute_tools(
+        _StubContext(iteration=0, messages=messages_after_llm, tool_calls=[tool_call])
+    )
+    messages_after_tool = messages_after_llm + [
+        {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": "exec",
+            "content": "Successfully installed tool-only\nExit code: 0",
+        }
+    ]
+    await hook.after_iteration(
+        _StubContext(
+            iteration=0,
+            messages=messages_after_tool,
+            tool_calls=[tool_call],
+            response=_StubResponse(content="", finish_reason="tool_calls"),
+            tool_events=[
+                {
+                    "tc_id": tool_call.id,
+                    "wall_ms": 2000.0,
+                    "start_mono": 1.0,
+                }
+            ],
+        )
+    )
+    hook.close()
+
+    row = json.loads(
+        (tmp_path / "pip_runtime" / "predictions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+
+    assert row["working_directory"] == str(tool_dir)
+    assert row["normalized_command"].startswith(
+        "pip install -r requirements.txt:sha256="
+    )
+
+
 async def _drive_emits_llm_call_action(tmp_path: Path) -> None:
     """One iteration with one tool call must produce ONE llm_call action
     AND ONE tool_exec action — in that chronological order."""

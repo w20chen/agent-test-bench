@@ -22,6 +22,7 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [Practical Resume Example](#practical-resume-example)
 - [Collect Concurrency: `--concurrency`](#collect-concurrency---concurrency)
   - [Resource-monitoring defaults](#resource-monitoring-defaults)
+  - [Tool Runtime Artifacts](#tool-runtime-artifacts)
 - [Simulate: Trace Replay](#simulate-trace-replay)
   - [Two Simulation Modes](#two-simulation-modes)
   - [Trace Sources](#trace-sources)
@@ -31,14 +32,12 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [Architecture Comparison](#architecture-comparison)
   - [Execution Flow Diagrams](#execution-flow-diagrams)
   - [Why Collect Doesn't Need `--workers`](#why-collect-doesnt-need---workers)
-  - [Why Simulate Needed `--workers` (The Bug That Was Fixed)](#why-simulate-needed---workers-the-bug-that-was-fixed)
   - [Choosing the Right Setting](#choosing-the-right-setting)
   - [Worker Architecture & Event-Loop Contention](#worker-architecture--event-loop-contention)
 - [Timing & Chronometry](#timing--chronometry)
   - [Conceptual Time Windows](#conceptual-time-windows)
   - [Where To Find Timing Data](#where-to-find-timing-data)
   - [Collect vs Simulate: Why `elapsed_s` Differs](#collect-vs-simulate-why-elapsed_s-differs)
-  - [Backward Compatibility](#backward-compatibility)
 - [N:M Trace-to-Agent Mapping](#nm-trace-to-agent-mapping)
 - [CPU Core Limiting](#cpu-core-limiting)
   - [Multi-Thread Container Fairness](#multi-thread-container-fairness)
@@ -91,6 +90,7 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--tool-profiling-tools <list>` | Comma-separated tool names to profile (default: `exec-pytest`) |
 | `--capture-pytest-scripts` / `--no-capture-pytest-scripts` | Save pytest scripts referenced by `exec-pytest` calls (default: on) |
 | `--capture-pytest-runtime` / `--no-capture-pytest-runtime` | Enable pytest node timing collection and prediction artifacts (default: on) |
+| `--capture-pip-runtime` / `--no-capture-pip-runtime` | Enable compact `pip install` duration prediction artifacts (default: on) |
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |
 | `--model` | Model identifier |
@@ -515,6 +515,12 @@ traces/<model>/<ts>/
 one attempt per task, full resource monitoring enabled, `--ksys`
 per instance (output to `<instance_id>/`).
 
+### Tool Runtime Artifacts
+
+OpenClaw collect mode writes additional tool-specific artifacts for selected
+commands. These artifacts are passive: unless a subsection says otherwise, they
+do not change the executed command or the tool environment.
+
 #### `pytest` Tool Invocation
 
 For SWE-style OpenClaw collection, each pytest tool invocation also writes a
@@ -645,6 +651,64 @@ The analyzer reports all baseline methods plus `Recommended`, then prints
 the exported rows include the recommended method, reliability level, fallback
 ratios, collected-count delta, and all absolute/relative errors.
 
+#### `pip install` Tool Invocation
+
+The OpenClaw collect path also records compact runtime prediction artifacts for
+supported `pip install` commands under `pip_runtime/`. This is a passive
+trace-collection feature: it does not wrap the command, inject environment
+variables, modify tool arguments, or change package installation semantics.
+It recognizes common forms such as `pip install ...`, `pip3 install ...`, and
+`python -m pip install ...`.
+
+After each supported invocation finishes, collect mode prints one summary line
+with all simple baselines and their relative errors:
+
+```text
+[pip-predict] iter=4 packages=2 actual=10.00s last=9.00s last_err=10.0% package_count=11.00s package_count_err=10.0% global=8.00s global_err=20.0% recommended=package_count:11.00s rec_err=10.0% reliability=medium
+```
+
+Artifacts are written as:
+
+```text
+attempt_N/pip_runtime/
+  history.json
+  predictions.jsonl
+  iter_0004_exec-pip_<tool_call_id>/
+    pending.json
+    prediction.json
+```
+
+`pending.json` snapshots the normalized command and predictions before the pip
+command executes. `prediction.json` then adds the observed wall duration, exit
+code, success metadata, absolute / relative errors, and whether the run was
+admitted into history. `predictions.jsonl` appends the same compact per-run
+rows for aggregate scans.
+
+The predictor intentionally keeps only three simple baselines:
+
+```text
+if the same normalized pip command has prior successful history:
+    use Last Run, reliability=high
+elif package_count is available and prior per-package history exists:
+    use Package Count, reliability=medium
+elif any prior successful pip install duration exists:
+    use Global Median, reliability=low
+else:
+    prediction is unavailable
+```
+
+`normalized_command` sorts explicit package arguments and hashes readable
+requirement files, so `python -m pip install -r requirements.txt` is keyed by
+the dependency file content rather than by the raw shell spelling. History is
+updated only for successful installs. Commands with nonzero `Exit code` do not
+enter history, and commands containing `||` fallback chains are recorded but
+excluded from history updates because the final shell status can mask a failed
+pip invocation.
+
+Pip runtime prediction is enabled by default in collect mode; pass
+`--no-capture-pip-runtime` to disable `pip_runtime/` artifacts and realtime
+`[pip-predict]` stdout lines.
+
 ---
 
 ## Simulate: Trace Replay
@@ -732,8 +796,8 @@ file.
 | `--trace-assignment` | no | `manifest` | `manifest` or `random` |
 | `--trace-assignment-seed` | no | — | RNG seed for `random` trace assignment |
 | `--cpu-limit` | no | — | CPU core limit for the entire simulate run |
-| `--workers` | no | `1` | Number of worker processes for concurrent `cloud_model` replay. Each worker runs its own asyncio event loop, splitting N agents across W processes (N/W per loop). Eliminates the single-event-loop scheduling bottleneck that inflates `asyncio.sleep()` wake-up latency and Docker callback delay under high concurrency. `cloud_model` only. Default `1` = legacy single-process behaviour. Recommended: `min(num_agents, os.cpu_count())` |
-| `--prep-concurrency` | no | `0` (auto) | System-wide maximum concurrent container preparations (Docker run + Python bootstrap), shared across the main process and all worker processes. `0` preserves the historical limit of 20. This controls warm-up load; replay is released separately by a global all-ready barrier. |
+| `--workers` | no | `1` | Number of worker processes for concurrent `cloud_model` replay. Each worker runs its own asyncio event loop, splitting N agents across W processes (N/W per loop). Use `min(num_agents, os.cpu_count())` for large replay runs. `cloud_model` only. |
+| `--prep-concurrency` | no | `0` (auto) | System-wide maximum concurrent container preparations (Docker run + Python bootstrap), shared across the main process and all worker processes. `0` uses the default limit of 20. This controls warm-up load; replay is released separately by a global all-ready barrier. |
 
 LLM flags (`--provider`, `--api-base`, `--api-key`, `--model`) are required
 for `local_model` mode only.
@@ -810,35 +874,6 @@ its own `asyncio.run()` event loop, so there is no coroutine contention.
 The bottleneck in collect mode is not the Python event loop — it's the
 Docker daemon and system resources (CPU, memory, I/O).
 
-### Why Simulate Needed `--workers` (The Bug That Was Fixed)
-
-Before commit `5ff6ab9` (2026-06-28), simulate `cloud_model` ran all N agents
-as asyncio coroutines in a **single event loop** in a **single process**:
-
-```
-Single Process (the bug)
-  │
-  └─ Single asyncio event loop
-       ├─ coroutine 1: agent 1
-       ├─ coroutine 2: agent 2
-       ├─ ...
-       └─ coroutine 320: agent 320
-            ↑
-       All 320 coroutines compete for one event loop.
-       asyncio.sleep() wake-up delayed by queue depth.
-       Measured timing = real work + event loop congestion (noise).
-```
-
-This caused:
-- **Event loop congestion**: `asyncio.sleep()` callbacks queued behind hundreds of other coroutines
-- **Inflated timing**: `ts_end - ts_start` included scheduling delay, not just real work
-- **Noise dominating signal**: At 320 agents, Python bookkeeping overhead exceeded actual container execution time
-
-The fix (`5ff6ab9`) introduced `--workers` to distribute agents across
-independent OS processes, each with its own event loop.  This eliminates
-Python-level measurement noise while preserving the real resource competition
-(Docker daemon, CPU, memory) that the pressure test is designed to measure.
-
 ### Choosing the Right Setting
 
 **For simulate (`--workers`):**
@@ -912,7 +947,7 @@ More workers → container resource contention unchanged (Docker daemon remains 
 
 | Workers | Agents/Worker | Event-loop congestion | Timing accuracy | Memory cost |
 |---------|--------------|----------------------|-----------------|-------------|
-| 1 (legacy) | 640 | Severe | ❌ Unusable | Minimal |
+| 1 | 640 | Severe | ❌ Unusable | Minimal |
 | 64 | 10 | Mild | ✅ Acceptable | Low |
 | 160 | 4 | Very low | ✅ Good | Moderate |
 | **320** | **2** | Near-zero | **✅ Near-perfect** | Moderate (320 Python processes) |
@@ -951,7 +986,7 @@ created visible "waves": the first 20 containers would start, then the next
 `--prep-concurrency` (added 2026-06-28) controls preparation load:
 
 - **System-wide limit:** one shared semaphore covers the main process and all
-  worker processes; `0` preserves the historical limit of 20.
+  worker processes; `0` uses the default limit of 20.
 - **Concurrent worker preparation:** sessions inside each worker prepare
   concurrently while respecting that shared limit.
 - **Global replay barrier:** every process waits until every session is
@@ -1028,7 +1063,6 @@ separately so they can be analysed or excluded as needed.
 | `run_manifest.json` → `timing.agent_exec_s` | `agent_start_time` → `agent_end_time` | Pure agent execution loop |
 | `run_manifest.json` → `timing.teardown_s` | `agent_end_time` → `end_time` | Sampler stop, container teardown, manifest write |
 | `run_manifest.json` → `timing.permission_fix_s` | subset of `setup_s` | Image permission fix (`ensure_fixed_image`) |
-| `run_manifest.json` → `result_summary.total_time` | same as `wall_total_s` | **Legacy field** — kept for backward compatibility |
 | `run_manifest.json` → `result_summary.active_time` | LLM time only | Sum of all LLM call latencies (seconds) |
 | `run_manifest.json` → `result_summary.tool_time` | Tool time only | Sum of all tool execution latencies (seconds) |
 | `results.jsonl` → `elapsed_s` | `t0` (before `run_attempt`) → after `run_attempt` | Slightly wider than `wall_total_s` — includes image prefetch wait and context creation (~ms) |
@@ -1072,16 +1106,6 @@ separately so they can be analysed or excluded as needed.
 If you replay a collect trace with simulate and compare `elapsed_s`, the
 simulate value will be **smaller** because it excludes setup and teardown.
 To compare the actual agent work, use `agent_exec_s` from both sides.
-
-### Backward Compatibility
-
-- **Old `run_manifest.json`** (no `timing` section): the HTML viz still works —
-  it computes Agent Time from trace actions.  "Wall Clock" is not displayed.
-- **Old trace.jsonl** replayed in simulate: the new `timing.agent_exec_s`
-  and `timing.container_setup_s` fields are added to the summary; `elapsed_s`
-  is preserved as-is.
-- **Old `results.jsonl`**: `elapsed_s` and `permission_fix_time` continue
-  to work unchanged.
 
 ---
 
@@ -1495,7 +1519,7 @@ A global sweep summary is written to
 | `SWEEP_VALUES` | `40 80 160 320` | Space-separated list of N (agent count) values |
 | `CPU_LIMIT` | `1` | Per-container CPU quota via Docker `--cpus=N`. Unset for native scheduling |
 | `WORKERS` | `os.cpu_count()` | Number of worker processes — splits agents across independent event loops |
-| `PREP_CONCURRENCY` | `0` (auto) | System-wide concurrent container preparation limit shared across all workers. `0` preserves the historical limit of 20 |
+| `PREP_CONCURRENCY` | `0` (auto) | System-wide concurrent container preparation limit shared across all workers. `0` uses the default limit of 20 |
 | `REPLAY_SPEED` | `1` | Wall-clock acceleration multiplier |
 | `PYTHON_BIN` | `python3` | Python interpreter |
 | `CONTAINER_EXE` | `docker` | Container runtime |
@@ -1668,35 +1692,6 @@ For throughput analysis, use the **shell Wall Time** (reported in the sweep summ
 | **System resource timeline** | `system_resources.jsonl` — per-second samples for CPU saturation analysis |
 | **Per-agent trace** | `<agent_id>--aN/attempt_1/trace.jsonl` — full action sequence with per-action timing |
 
-### Concurrent Replay: Cascade Failure Prevention
-
-In cloud-model concurrent replay (`_run_cloud_model_replay`), all sessions
-write to a **shared** `TraceLogger` (a single JSONL file).  Prior to the fix
-described below, `asyncio.gather` was called **without** `return_exceptions=True`.
-When any single session raised an unhandled exception (typically from post-loop
-cleanup: sampler stop, resource JSON write, or `log_summary`), the gather
-immediately propagated it.  The outer `finally` block then called
-`trace_logger.close()`, but **other sessions were still running** — every
-subsequent `trace_logger.log_trace_action()` call failed with:
-
-```
-I/O operation on closed file
-```
-
-This produced a cascade: one real exception → shared file closed → *all*
-remaining sessions report "I/O operation on closed file" for every action.
-
-**Fix (commit `52755be`):**
-
-1. `_run_cloud_model_replay`: `asyncio.gather` now uses `return_exceptions=True`.
-   All sessions complete before the gather returns.  Exceptions are collected,
-   logged individually, and the first is re-raised as `SimulateError`.
-
-2. `_replay_cloud_model_session`: post-loop cleanup code (sampler stop,
-   `write_resources_json`, `log_summary`) is wrapped in `try/except` that
-   logs and re-raises — so a single session's cleanup failure is clearly
-   attributed and does not corrupt other sessions' data.
-
 ---
 
 ## Stress Test Analysis
@@ -1849,7 +1844,7 @@ For Huawei Kunpeng hardware, `--ksys-monitoring on` enables chip-level telemetry
 that complements the standard resource samplers. Ksys captures metrics that
 are not available through generic Linux PMU counters.
 
-The legacy `--ksys` alias, or `--ksys-monitoring on`, starts
+The `--ksys` alias, or `--ksys-monitoring on`, starts
 `ksys collect -o <dir>` as a background process alongside
 the agent and stops it (SIGINT) when the agent finishes.
 
