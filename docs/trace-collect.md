@@ -14,12 +14,12 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
 
 - [Basic Usage](#basic-usage)
   - [CLI Flags Reference](#cli-flags-reference)
+  - [Task Selection Rules](#task-selection-rules)
+  - [Run Directory and Attempt Rules](#run-directory-and-attempt-rules)
   - [OpenClaw Standalone CLI](#openclaw-standalone-cli)
   - [Deep Research Bench](#deep-research-bench)
 - [Resuming Interrupted Runs](#resuming-interrupted-runs)
   - [Resume Judgment Logic](#resume-judgment-logic)
-  - [Status Decision Table](#status-decision-table)
-  - [Practical Resume Example](#practical-resume-example)
 - [Collect Concurrency: `--concurrency`](#collect-concurrency---concurrency)
   - [Resource-monitoring defaults](#resource-monitoring-defaults)
   - [Tool Runtime Artifacts](#tool-runtime-artifacts)
@@ -83,6 +83,7 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--skip N` | Skip the first N tasks before applying `--sample` (e.g. `--skip 10 --sample 5` runs tasks 11–15) |
 | `--instance-ids a,b,c` | Run only specified instance(s) |
 | `--run-id <path>` | Resume an interrupted run |
+| `--rerun-completed` | With `--run-id`, append new attempts for selected instances that already completed |
 | `--prompt-template <name>` | Override the benchmark default prompt |
 | `--resource-monitoring auto\|on\|off` | Control CPU, memory, disk, network, context-switch, and host memory bandwidth sampling |
 | `--pmu-monitoring auto\|on\|off` | Control PMU sampling; concurrent `on` is forbidden; auto-disabled when `--tool-profiling` is active |
@@ -101,8 +102,8 @@ registry, checkpointing behavior, and trace schema v5 layout.
 
 ### Task Selection Rules
 
-`--instance-ids`, `--skip`, and `--sample` combine in a fixed pipeline order.
-Each flag narrows the list left-to-right:
+Task selection happens before resume/rerun logic. `--instance-ids`, `--skip`,
+and `--sample` combine in a fixed pipeline order:
 
 ```
 Benchmark tasks (all)
@@ -147,6 +148,31 @@ Key rules:
 - `--concurrency > 1` requires at least one of `--instance-ids`, `--skip`,
   or `--sample` to prevent accidentally running the entire benchmark with
   high parallelism.
+
+### Run Directory and Attempt Rules
+
+These flags decide where outputs go, which selected tasks are eligible, and how
+many attempts each eligible task gets:
+
+| Flag | Effect |
+|------|--------|
+| no `--run-id` | Create a fresh timestamped run directory. |
+| `--run-id <dir>` | Reuse a run directory; completed/exhausted instances are skipped by default. |
+| `--rerun-completed` | Do not skip completed/exhausted selected instances; append new attempts. Normally used with `--run-id`. |
+| `--concurrency N` | For each eligible task, start N attempts at once. Tasks still run one benchmark instance at a time. |
+
+Attempts are never overwritten. For each eligible instance, the collector scans
+`<run_dir>/<instance_id>/attempt_*` and writes the next number.
+
+Common combinations:
+
+| Command shape | Result |
+|---------------|--------|
+| `--sample 20` | New timestamped run, one `attempt_1` for each selected task. |
+| `--run-id OLD --sample 20` | Resume OLD: skip completed/exhausted selected tasks; retry only unfinished/error tasks. |
+| `--run-id OLD --sample 20 --rerun-completed` | Append one new attempt for every selected task, including completed/exhausted ones. |
+| `--run-id OLD --sample 20 --rerun-completed --concurrency 3` | Append three new attempts per selected task. |
+| `--instance-ids A,B --concurrency 4` | Run only A and B; each gets four attempts. |
 
 ### OpenClaw Standalone CLI
 
@@ -193,11 +219,10 @@ Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
 
 ## Resuming Interrupted Runs
 
-When a long-running collection is interrupted (network failure, OOM, manual
-stop, etc.), pass `--run-id <path>` to the **same** `trace_collect.cli`
-command to resume from where it left off.  Re-specify all other flags exactly
-as in the original invocation (provider, model, benchmark, scaffold,
-mcp-config, etc.).
+Use `--run-id <path>` to write into an existing run directory. This is the
+normal way to resume an interrupted run or to append extra attempts while
+keeping run-scoped history databases such as `pip_runtime_db/` and
+`python_script_runtime_db/`.
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
@@ -209,90 +234,33 @@ PYTHONPATH=src python -m trace_collect.cli \
     --run-id traces/swe-rebench/deepseek-v4-flash/20260624T180504
 ```
 
-Key behaviors on resume:
-
-- The run directory is **reused** (no new timestamp subdirectory is created).
-- Tasks already completed are **skipped** (see judgment logic below).
-- Tasks not yet completed are re-run, creating a new `attempt_N/` subdirectory
-  (e.g., `attempt_2/`, `attempt_3/`, …).  Previous attempts are preserved.
-- Results are **appended** to the existing `results.jsonl`.
-
-### Resume Judgment Logic
-
-At startup, the collector calls `load_completed_ids(run_dir)`, which scans
-every `{run_dir}/{instance_id}/attempt_*/run_manifest.json` and reads the
-`"status"` field.
-
-**Only two status values mark a task as "done" (will be skipped):**
-
-| `status` | Meaning |
-|----------|---------|
-| `"completed"` | Agent finished successfully (`success=True`). |
-| `"exhausted"` | Agent reached `--max-iterations` without succeeding. Treated as a legitimate terminal state — re-running would waste compute. |
-
-**Everything else will be re-executed:**
-
-- `"error"` — the task failed (see decision table below).
-- Missing `run_manifest.json` — the task never ran or was interrupted before
-  writing the manifest.
-- `run_manifest.json` is corrupted / unreadable JSON.
-
-Once an instance has at least one attempt with status `"completed"` or
-`"exhausted"`, that instance is permanently skipped for this run directory.
-
-### Status Decision Table
-
-The manifest `status` is determined in `src/trace_collect/attempt_pipeline.py`.
-
-| Condition | `status` | Resume behavior |
-|-----------|----------|-----------------|
-| No error, `success=True`, exit_status OK | `"completed"` | **Skipped** |
-| `exit_status == "max_iterations"` | `"exhausted"` | **Skipped** (terminal) |
-| `inner_error is not None` (unhandled exception crash) | `"error"` | **Re-run** |
-| `result.success == False` | `"error"` | **Re-run** |
-| `exit_status` is one of `"error"`, `"tool_error"`, `"empty_final_response"`, `"timeout"`, `"failed"` | `"error"` | **Re-run** |
-| No `run_manifest.json` at all | N/A | **Re-run** |
-
-> **Note:** The five exit statuses that force `"error"` (`error`, `tool_error`,
-> `empty_final_response`, `timeout`, `failed`) are defined in the constant
-> `_NONCOMPLETED_EXIT_STATUSES`.  Even if `success=True`, these exit statuses
-> override the manifest status to `"error"`, ensuring the task is retried.
-
-### Practical Resume Example
-
-A full production resume command, typically run under `nohup` for long sessions:
+By default, terminal instances are skipped. Add `--rerun-completed` when you
+want selected terminal instances to receive new `attempt_N` directories.
 
 ```bash
-nohup env ARM_IMAGE_MODE=qemu PYTHONPATH=src python -m trace_collect.cli \
+PYTHONPATH=src python -m trace_collect.cli \
     --provider deepseek \
     --model deepseek-v4-flash \
     --benchmark swe-rebench \
     --scaffold openclaw \
     --mcp-config none \
-    --container docker \
     --run-id traces/swe-rebench/deepseek-v4-flash/20260624T180504 \
-    --resource-monitoring off \
-    --pmu-monitoring off \
-    --ksys-monitoring off \
-    > trace_collect.log 2>&1 &
+    --rerun-completed
 ```
 
-To verify which tasks will be re-run vs skipped before starting, inspect the
-run directory:
+### Resume Judgment Logic
 
-```bash
-# Count completed/error tasks in the run directory
-for dir in traces/swe-rebench/deepseek-v4-flash/20260624T180504/*/; do
-    instance=$(basename "$dir")
-    latest=$(ls -d "$dir"attempt_*/run_manifest.json 2>/dev/null | tail -1)
-    if [ -n "$latest" ]; then
-        status=$(python3 -c "import json; print(json.load(open('$latest')).get('status','MISSING'))")
-        echo "$instance -> $status"
-    else
-        echo "$instance -> NO_MANIFEST"
-    fi
-done
-```
+At startup, the collector scans
+`{run_dir}/{instance_id}/attempt_*/run_manifest.json`.
+
+| `status` | Meaning |
+|----------|---------|
+| `"completed"` | Terminal; skipped unless `--rerun-completed` is set. |
+| `"exhausted"` | Terminal; skipped unless `--rerun-completed` is set. |
+| `"error"` or missing/corrupt manifest | Eligible to run again. |
+
+For the full combination behavior, see
+[Run Directory and Attempt Rules](#run-directory-and-attempt-rules).
 
 ---
 
@@ -311,25 +279,11 @@ for **each** benchmark task.  Tasks themselves are iterated **sequentially** —
 different tasks never run concurrently.  Within a single task, all N attempts
 run at once, each in its own OS thread via `asyncio.to_thread()`.
 
-### Relationship with `--sample` and `--instance-ids`
+### Relationship with Other Run Flags
 
-These three flags are **orthogonal** and compose freely:
-
-| Flag | Role | Default |
-|------|------|---------|
-| `--sample N` | Limits to the first **N tasks** from the benchmark | all tasks |
-| `--instance-ids a,b,c` | Runs only the **specified instance(s)** | all tasks |
-| `--concurrency N` | Spawns **N parallel attempts** per task | 1 (sequential) |
-
-- `--sample` and `--instance-ids` control **which tasks** run.
-  When both are given, `--instance-ids` selects first, then `--sample`
-  truncates the result.
-- `--concurrency` controls **how many attempts per task**.
-
-> **Guard:** `--concurrency > 1` **requires** `--instance-ids` or
-> `--sample`.  Running *all* benchmark instances with high concurrency
-> is blocked — it would spawn hundreds of parallel containers and
-> overwhelm the host.
+For how `--concurrency` composes with `--sample`, `--instance-ids`,
+`--run-id`, and `--rerun-completed`, see
+[Run Directory and Attempt Rules](#run-directory-and-attempt-rules).
 
 **Examples of valid combinations:**
 

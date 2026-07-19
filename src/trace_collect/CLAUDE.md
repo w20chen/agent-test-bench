@@ -45,6 +45,7 @@ OPENROUTER_API_KEY=sk-... python -m trace_collect.cli \
 | `--prompt-template` | no | from YAML | Override; resolved as `configs/prompts/<benchmark_slug>/<name>.md` (hyphens → underscores) |
 | `--min-free-disk-gb` | no | `30.0` | Disk space preflight |
 | `--run-id` | no | auto | Resume an interrupted run (pass existing run dir) |
+| `--rerun-completed` | no | off | With an existing `--run-id`, run selected completed/exhausted instances again and append the next `attempt_N/` |
 | `--api-base` | no | from provider | Override API base URL |
 | `--api-key` | no | from env | Override API key |
 | `--capture-pip-runtime` / `--no-capture-pip-runtime` | no | on | Record compact `pip install` duration prediction artifacts under each attempt's `pip_runtime/` |

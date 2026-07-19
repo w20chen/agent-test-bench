@@ -353,10 +353,11 @@ def _next_pending_source_image(
     *,
     current_index: int,
     completed: set[str],
+    rerun_completed: bool = False,
 ) -> str | None:
     """Return the next incomplete task's source image, if any."""
     for next_task in tasks[current_index + 1 :]:
-        if next_task["instance_id"] in completed:
+        if next_task["instance_id"] in completed and not rerun_completed:
             continue
         source_image = _task_source_image(benchmark, next_task)
         if source_image:
@@ -638,6 +639,7 @@ async def _run_scaffold_tasks(
     min_free_disk_gb: float,
     monitoring_policy: MonitoringPolicy | None = None,
     concurrency: int = 1,
+    rerun_completed: bool = False,
     inner_factory,
     recording_provider: Any | None = None,
 ) -> Path:
@@ -662,7 +664,13 @@ async def _run_scaffold_tasks(
     run_dir.mkdir(parents=True, exist_ok=True)
     completed = load_completed_ids(run_dir)
     if completed:
-        logger.info("Resuming: %d tasks already completed", len(completed))
+        if rerun_completed:
+            logger.info(
+                "Rerun requested: %d completed/exhausted task(s) remain eligible",
+                len(completed),
+            )
+        else:
+            logger.info("Resuming: %d tasks already completed", len(completed))
 
     results: list[CollectedTaskResult] = []
     total = len(tasks)
@@ -693,7 +701,7 @@ async def _run_scaffold_tasks(
     ) as executor:
         for i, task in enumerate(tasks):
             instance_id = task["instance_id"]
-            if instance_id in completed:
+            if instance_id in completed and not rerun_completed:
                 logger.info(
                     "[%d/%d] SKIP %s (already completed)", i + 1, total, instance_id
                 )
@@ -728,6 +736,7 @@ async def _run_scaffold_tasks(
                 tasks,
                 current_index=i,
                 completed=completed,
+                rerun_completed=rerun_completed,
             )
 
             attempt_ctx = AttemptContext(
@@ -1108,6 +1117,7 @@ async def collect_traces(
     skip: int | None = None,
     instance_ids: list[str] | None = None,
     run_id: str | None = None,
+    rerun_completed: bool = False,
     max_context_tokens: int = 256_000,
     container_executable: str | None = None,
     mcp_config: str | None = None,
@@ -1337,6 +1347,7 @@ async def collect_traces(
                         "capture_python_script_runtime": (
                             capture_python_script_runtime
                         ),
+                        "rerun_completed": rerun_completed,
                     }
                     if record_internals:
                         run_config["record_internals"] = True
@@ -1356,6 +1367,7 @@ async def collect_traces(
             min_free_disk_gb=min_free_disk_gb,
             monitoring_policy=monitoring_policy,
             concurrency=concurrency,
+            rerun_completed=rerun_completed,
             inner_factory=make_inner,
             recording_provider=recording_provider,
         )

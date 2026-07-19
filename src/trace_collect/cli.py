@@ -236,6 +236,16 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Resume an interrupted run by passing its existing run directory path.",
     )
     parser.add_argument(
+        "--rerun-completed",
+        action="store_true",
+        help=(
+            "Run selected instances even if they already have a completed/"
+            "exhausted attempt in the chosen run directory; new outputs are "
+            "written to the next attempt_N directory. Normally used with an "
+            "existing --run-id."
+        ),
+    )
+    parser.add_argument(
         "--record-internals",
         action="store_true",
         help=(
@@ -902,6 +912,7 @@ def _run_collect(args: argparse.Namespace) -> None:
                     args.instance_ids.split(",") if args.instance_ids else None
                 ),
                 run_id=args.run_id,
+                rerun_completed=args.rerun_completed,
                 max_context_tokens=args.max_context_tokens,
                 mcp_config=args.mcp_config,
                 prompt_template=args.prompt_template,

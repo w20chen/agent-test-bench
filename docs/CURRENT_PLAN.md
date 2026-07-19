@@ -329,3 +329,61 @@ Review findings and fixes:
     --basetemp .tmp-tests\python-script-runtime-final` passed with 58 tests.
   - Modified-file `py_compile` passed.
   - `git diff --check` passed with Windows line-ending warnings only.
+
+## Rerun Completed Attempts Update
+
+Objective: allow an existing run directory to append new attempts for instances
+that already have a completed attempt, while preserving the default resume
+behavior.
+
+Plan:
+
+- Add an explicit CLI flag `--rerun-completed`.
+- Default behavior remains unchanged: completed/exhausted instances are skipped
+  on resume.
+- When `--rerun-completed` is set, selected instances run again and receive the
+  next `attempt_N` directory from `next_attempt_number()`.
+- Keep incomplete/error-only instances runnable under both modes.
+- Document the flag with the instance-scoped runtime DB workflow.
+- Add focused tests for default skip behavior and opt-in rerun behavior.
+
+Progress:
+
+- Added `--rerun-completed` to the collect CLI and threaded it through
+  `collect_traces()` / `_run_scaffold_tasks()`.
+- Default resume behavior remains unchanged.
+- Rerun mode leaves completed/exhausted instances eligible, allocates the next
+  `attempt_N`, records `rerun_completed` in trace run config, and keeps image
+  prefetch aligned with the rerun eligibility set.
+- Added tests for default completed skip and explicit rerun of both
+  `completed` and `exhausted` terminal statuses.
+- Independent reviewer found no critical/major issues; minor findings were
+  addressed by fixing rerun-mode prefetch, adding exhausted coverage, and
+  clarifying CLI/docs wording.
+- Validation:
+  - `python -m py_compile src\trace_collect\cli.py src\trace_collect\collector.py
+    tests\test_collector_runtime_mode.py`
+  - `python -m pytest tests\test_collector_runtime_mode.py
+    tests\test_collector_task_container_runtime.py
+    tests\test_collector_openclaw_metadata.py -q -p no:cacheprovider
+    --basetemp .tmp-tests\rerun-completed-final` passed with 33 tests.
+  - CLI parser smoke for default and enabled `rerun_completed` passed.
+  - `git diff --check` passed with Windows line-ending warnings only.
+
+## Trace Collect Parameter Documentation Update
+
+Objective: clarify how `--instance-ids`, `--skip`, `--sample`, `--run-id`,
+`--rerun-completed`, and `--concurrency` compose, without adding excessive
+implementation detail.
+
+Progress:
+
+- Added a concise "Run Directory and Attempt Rules" section to
+  `docs/trace-collect.md`.
+- Documented the three-step mental model:
+  task selection first, resume/rerun eligibility second, per-task attempt count
+  third.
+- Shortened the resume section to a small status table and linked it back to
+  the combination rules.
+- Replaced duplicated concurrency/selection explanation with a pointer to the
+  new combination rules.

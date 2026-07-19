@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+import json
 from pathlib import Path
 import subprocess
 import threading
@@ -36,6 +37,44 @@ def _write_trace(path: Path) -> None:
     path.write_text(
         '{"type":"trace_metadata","scaffold":"openclaw","trace_format_version":5}\n',
         encoding="utf-8",
+    )
+
+
+def _write_manifest(path: Path, *, status: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"status": status}), encoding="utf-8")
+
+
+def _benchmark(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            slug="swe-rebench",
+            harness_split="filtered",
+            trace_root=tmp_path / "traces",
+            default_prompt_template="cc_aligned",
+        ),
+        runtime_mode_for=lambda scaffold: "task_container_agent",
+        image_name_for=lambda task: task.get("image_name"),
+        viz_filename=lambda instance_id: f"{instance_id}.html",
+    )
+
+
+def _patch_image_ops(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "trace_collect.collector.ensure_source_image",
+        lambda source_image, *, container_executable: None,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.remove_image",
+        lambda image, *, container_executable: False,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.drop_cached_fixed_image",
+        lambda source_image: None,
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.prune_dangling_images",
+        lambda *, container_executable: None,
     )
 
 
@@ -184,6 +223,91 @@ def test_run_scaffold_tasks_allocates_next_attempt_dir(
         "attempt": int(expected_attempt_dir.removeprefix("attempt_")),
         "attempt_dir_name": expected_attempt_dir,
     }
+
+
+def test_run_scaffold_tasks_skips_completed_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    instance_id = "encode__httpx-2701"
+    _write_manifest(
+        run_dir / instance_id / "attempt_1" / "run_manifest.json",
+        status="completed",
+    )
+    called = False
+
+    async def fake_run_attempt(*args, **kwargs) -> AttemptResult:
+        nonlocal called
+        called = True
+        raise AssertionError("completed task should be skipped by default")
+
+    monkeypatch.setattr("trace_collect.collector.run_attempt", fake_run_attempt)
+
+    asyncio.run(
+        _run_scaffold_tasks(
+            benchmark=_benchmark(tmp_path),
+            tasks=[{"instance_id": instance_id, "image_name": "img"}],
+            run_dir=run_dir,
+            model="qwen-plus-latest",
+            scaffold="openclaw",
+            container_executable="docker",
+            prompt_template=None,
+            min_free_disk_gb=0.001,
+            inner_factory=lambda task: lambda ctx: None,
+        )
+    )
+
+    assert called is False
+
+
+@pytest.mark.parametrize("status", ["completed", "exhausted"])
+def test_run_scaffold_tasks_reruns_terminal_status_when_requested(
+    tmp_path: Path,
+    monkeypatch,
+    status: str,
+) -> None:
+    trace_path = tmp_path / "trace-source" / "trace.jsonl"
+    _write_trace(trace_path)
+    run_dir = tmp_path / "run"
+    instance_id = "encode__httpx-2701"
+    _write_manifest(
+        run_dir / instance_id / "attempt_1" / "run_manifest.json",
+        status=status,
+    )
+    _patch_image_ops(monkeypatch)
+    seen: dict[str, object] = {}
+
+    async def fake_run_attempt(
+        ctx,
+        *,
+        inner,
+        min_free_disk_gb,
+        container_executable,
+        **monitoring_kwargs,
+    ) -> AttemptResult:
+        seen["attempt"] = ctx.attempt
+        seen["attempt_dir_name"] = ctx.attempt_dir.name
+        return AttemptResult(success=True, exit_status="ok", trace_path=trace_path)
+
+    monkeypatch.setattr("trace_collect.collector.run_attempt", fake_run_attempt)
+
+    asyncio.run(
+        _run_scaffold_tasks(
+            benchmark=_benchmark(tmp_path),
+            tasks=[{"instance_id": instance_id, "image_name": "img"}],
+            run_dir=run_dir,
+            model="qwen-plus-latest",
+            scaffold="openclaw",
+            container_executable="docker",
+            prompt_template=None,
+            min_free_disk_gb=0.001,
+            rerun_completed=True,
+            inner_factory=lambda task: lambda ctx: None,
+        )
+    )
+
+    assert seen == {"attempt": 2, "attempt_dir_name": "attempt_2"}
 
 
 def test_run_scaffold_tasks_uses_max_sparse_attempt_dir(
@@ -531,14 +655,6 @@ def test_cleanup_task_images_force_cleanup_ignores_keep_images_threshold(
     monkeypatch.setattr(
         "trace_collect.collector.remove_image",
         lambda image, *, container_executable: removed.append(image) or True,
-    )
-    monkeypatch.setattr(
-        "trace_collect.collector.drop_cached_fixed_image",
-        lambda source_image: None,
-    )
-    monkeypatch.setattr(
-        "trace_collect.collector.prune_dangling_images",
-        lambda *, container_executable: None,
     )
 
     _cleanup_task_images(
