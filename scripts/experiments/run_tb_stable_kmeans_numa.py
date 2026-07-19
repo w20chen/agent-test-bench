@@ -49,7 +49,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -60,6 +63,68 @@ import numpy as np
 from joblib import Parallel, delayed
 from sklearn.cluster import KMeans
 from sklearn.datasets import make_blobs
+
+
+STABLE_KMEANS_IMPL = """
+from __future__ import annotations
+
+import copy
+import multiprocessing as mp
+import os
+import time
+
+import numpy as np
+from joblib import Parallel, delayed
+from sklearn.cluster import KMeans
+
+
+class StableKMeans:
+    def __init__(self, data, k_max, percent_subsampling=0.7, number_of_subsamples=20):
+        self.data = data
+        self.k_max = k_max
+        self.percent_subsampling = percent_subsampling
+        self.number_of_subsamples = number_of_subsamples
+        self.scores = {k: copy.deepcopy([]) for k in range(2, k_max)}
+
+    def fit_serial(self, verbose=True):
+        for k in range(2, self.k_max):
+            start = time.time()
+            for iteration in range(self.number_of_subsamples):
+                self.scores[k].append(float(k + iteration * 0.0))
+            if verbose:
+                print(f"K={k} done in {time.time() - start:.4f} seconds")
+
+    def fit_parallel(self, n_jobs=None, verbose=True):
+        if n_jobs is None:
+            n_jobs = mp.cpu_count()
+        os.environ["JOBLIB_START_METHOD"] = "spawn"
+
+        def compute_k(k):
+            return k, [float(k) for _ in range(self.number_of_subsamples)]
+
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(compute_k)(k) for k in range(2, self.k_max)
+        )
+        for k, scores in results:
+            self.scores[k] = scores
+            if verbose:
+                print(f"K={k} done")
+
+    def get_optimal_k(self):
+        return max(self.scores, key=lambda k: np.mean(self.scores[k]) if self.scores[k] else -1)
+
+    def get_stability_summary(self):
+        return {
+            k: {
+                "mean": float(np.mean(v)),
+                "std": float(np.std(v)),
+                "min": float(np.min(v)),
+                "max": float(np.max(v)),
+            }
+            for k, v in self.scores.items()
+            if v
+        }
+"""
 
 
 def _compute_score(
@@ -134,6 +199,58 @@ def _compute_k(
     return k, scores
 
 
+def _write_agent_like_files(workdir: Path, args: argparse.Namespace) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "stable_kmeans.py").write_text(STABLE_KMEANS_IMPL, encoding="utf-8")
+    (workdir / "experiment_config.json").write_text(
+        json.dumps(
+            {
+                "samples": args.samples,
+                "features": args.features,
+                "centers": args.centers,
+                "k_max": args.k_max,
+                "subsamples": args.subsamples,
+                "percent_subsampling": args.percent_subsampling,
+                "n_jobs": args.n_jobs,
+                "seed": args.seed,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (workdir / "test_implementation.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from stable_kmeans import StableKMeans\n\n"
+        "def test_files_exist():\n"
+        "    assert Path('stable_kmeans.py').exists()\n"
+        "    assert Path('experiment_config.json').exists()\n\n"
+        "def test_api_shape():\n"
+        "    assert hasattr(StableKMeans, 'fit_serial')\n"
+        "    assert hasattr(StableKMeans, 'fit_parallel')\n"
+        "    cfg = json.loads(Path('experiment_config.json').read_text())\n"
+        "    assert cfg['k_max'] > 2\n",
+        encoding="utf-8",
+    )
+
+
+def _run_agent_like_validation(workdir: Path) -> dict[str, object]:
+    completed = subprocess.run(
+        [os.sys.executable, "-m", "py_compile", "stable_kmeans.py", "test_implementation.py"],
+        cwd=workdir,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["serial", "parallel"], required=True)
@@ -152,6 +269,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    phase_times: dict[str, float] = {}
     if args.samples <= 0:
         raise ValueError("--samples must be positive")
     if args.features <= 0:
@@ -172,7 +290,16 @@ def main() -> None:
     if args.k_max - 1 > subsample_size:
         raise ValueError("--k-max - 1 must be <= subsample size")
 
-    start = time.perf_counter()
+    total_start = time.perf_counter()
+    phase_start = time.perf_counter()
+    task_workdir = Path(tempfile.mkdtemp(prefix="tb_stable_kmeans_agent_like_"))
+    _write_agent_like_files(task_workdir, args)
+    validation = _run_agent_like_validation(task_workdir)
+    if validation["returncode"] != 0:
+        raise RuntimeError(f"agent-like validation failed: {validation}")
+    phase_times["setup_and_validation_s"] = time.perf_counter() - phase_start
+
+    phase_start = time.perf_counter()
     data, _ = make_blobs(
         n_samples=args.samples,
         n_features=args.features,
@@ -181,7 +308,9 @@ def main() -> None:
         cluster_std=1.5,
     )
     data = np.ascontiguousarray(data, dtype=np.float32)
+    phase_times["data_generation_s"] = time.perf_counter() - phase_start
 
+    phase_start = time.perf_counter()
     k_values = list(range(2, args.k_max))
     if args.mode == "serial":
         results = [
@@ -209,8 +338,9 @@ def main() -> None:
             )
             for k in k_values
         )
+    phase_times["stable_kmeans_compute_s"] = time.perf_counter() - phase_start
 
-    elapsed = time.perf_counter() - start
+    phase_start = time.perf_counter()
     summary = {
         str(k): {
             "mean": float(np.mean(scores)),
@@ -221,6 +351,12 @@ def main() -> None:
         for k, scores in results
     }
     optimal_k = max(summary, key=lambda key: summary[key]["mean"])
+    (task_workdir / "performance_report.json").write_text(
+        json.dumps({"optimal_k": int(optimal_k), "summary": summary}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    phase_times["report_write_s"] = time.perf_counter() - phase_start
+    elapsed = time.perf_counter() - total_start
     print(
         json.dumps(
             {
@@ -235,6 +371,8 @@ def main() -> None:
                 "seed": args.seed,
                 "elapsed_s": elapsed,
                 "optimal_k": int(optimal_k),
+                "agent_like_workdir": str(task_workdir),
+                "phase_times": phase_times,
                 "summary": summary,
             },
             sort_keys=True,
