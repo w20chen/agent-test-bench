@@ -34,6 +34,7 @@ benchmark specifics from `configs/benchmarks/<slug>.yaml`.
   - [Why Collect Doesn't Need `--workers`](#why-collect-doesnt-need---workers)
   - [Choosing the Right Setting](#choosing-the-right-setting)
   - [Worker Architecture & Event-Loop Contention](#worker-architecture--event-loop-contention)
+  - [Worker Failure Isolation](#worker-failure-isolation)
 - [Timing & Chronometry](#timing--chronometry)
   - [Conceptual Time Windows](#conceptual-time-windows)
   - [Where To Find Timing Data](#where-to-find-timing-data)
@@ -922,6 +923,11 @@ container preparations across the whole run.
 > For the architectural comparison with collect mode, see
 > [Concurrency Models: Simulate vs Collect](#concurrency-models-simulate-vs-collect) above.
 
+`--workers` is primarily a measurement-isolation control. It splits replay
+sessions across processes so each worker has its own asyncio loop, reducing
+Python event-loop contention in timing-sensitive runs. It does not change the
+trace workload, command semantics, or shared machine resources.
+
 When many agents share a single asyncio event loop (`--workers 1`), two
 measurement distortions arise that affect timing accuracy:
 
@@ -970,6 +976,14 @@ via `concurrent.futures.ProcessPoolExecutor`.  Each worker independently
 loads, prepares, replays, and tears down its sessions, writing per-agent
 `trace.jsonl` files into the shared output directory.  HTML visualization
 auto-discovers worker-written directories.
+
+### Worker Failure Isolation
+
+Workers process independent chunks and write per-agent artifacts separately.
+Session failures are collected after each worker batch settles, so one failed
+session does not close shared outputs while other sessions are still writing.
+If an unrecovered worker exception occurs, the run still reports the failure,
+and artifacts from completed sessions remain available for inspection.
 
 ### Warm-Up Phase: Container Preparation
 
