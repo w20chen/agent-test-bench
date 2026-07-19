@@ -539,9 +539,11 @@ prediction prototype under `pytest_runtime/`.  Matching `exec-pytest` commands
 first run an explicit pre-execution `pytest --collect-only` command with a
 temporary pytest plugin to identify the nodeids available at prediction time.
 The collect-only invocation is run as an argument vector in the tool working
-directory, redirects pytest cache into the prediction artifact directory, and
-removes known output-producing/reporting flags such as `--junitxml`, `--html`,
-`--cov`, and `--cov-report` to avoid perturbing the target workspace. The
+directory using the same runtime environment preparation as the OpenClaw shell
+tool, including task-container `PYTHONUSERBASE` and PATH handling. It redirects
+pytest cache into the prediction artifact directory and removes known
+output-producing/reporting flags such as `--junitxml`, `--html`, `--cov`, and
+`--cov-report` to avoid perturbing the target workspace. The
 artifact cache override is placed after retained pytest args so user
 `cache_dir` overrides cannot redirect collect-only cache writes back into the
 target workspace. Cache-dependent selectors such as `--lf` / `--last-failed`

@@ -19,6 +19,7 @@ import subprocess
 import time
 from typing import Any
 
+from agents.openclaw.tools.exec_env import prepare_exec_env
 from trace_collect.exec_classifier import classify_exec_tool_name
 
 HIDDEN_RUNTIME_DIR_ARG = "__openclaw_pytest_runtime_dir"
@@ -601,13 +602,18 @@ def _run_pytest_collect_only(
     invocation_dir: Path,
     working_directory: str | None,
     timeout_s: float,
+    path_append: str = "",
 ) -> dict[str, Any]:
     collect_dir = invocation_dir / "collect_only"
     runtime_json = collect_dir / COLLECT_ONLY_JSON_FILENAME
     collect_dir.mkdir(parents=True, exist_ok=True)
     plugin_env = prepare_pytest_runtime_environment(invocation_dir=collect_dir)
     plugin_env["OPENCLAW_PYTEST_RUNTIME_JSON"] = str(runtime_json)
-    env = merge_pytest_runtime_environment(os.environ.copy(), plugin_env)
+    env = prepare_exec_env(
+        path_append,
+        isolate_runtime_env=bool(os.environ.get("OPENCLAW_TASK_USERBASE")),
+    )
+    env = merge_pytest_runtime_environment(env, plugin_env)
 
     collect_invocation = build_pytest_collect_only_invocation(
         command,
@@ -733,6 +739,7 @@ def prepare_pytest_runtime_prediction_before_tool(
     tool_name: str,
     tool_args: dict[str, Any],
     working_directory: str | Path | None = None,
+    path_append: str = "",
 ) -> PytestRuntimeRecord | None:
     """Prepare artifact directory and annotate pytest tool args for ExecTool."""
     if not is_pytest_tool_call(tool_name, tool_args):
@@ -760,6 +767,7 @@ def prepare_pytest_runtime_prediction_before_tool(
             invocation_dir=invocation_dir,
             working_directory=effective_working_directory,
             timeout_s=_collect_only_timeout_s(tool_args),
+            path_append=path_append,
         )
     else:
         collect_only = {

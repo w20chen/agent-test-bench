@@ -96,6 +96,7 @@ class TraceCollectorHook(AgentHook):
         pytest_runtime_dir: Path | None = None,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
+        exec_path_append: str = "",
     ) -> None:
         self.trace_file = trace_file
         self.instance_id = instance_id
@@ -123,6 +124,7 @@ class TraceCollectorHook(AgentHook):
         self._pip_runtime_dir = pip_runtime_dir
         self._pip_history_dir = pip_history_dir
         self._pip_runtime_by_tool_call: dict[str, PipRuntimeRecord] = {}
+        self._exec_path_append = exec_path_append
         self._flushed = False
         self._fh = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
 
@@ -222,6 +224,7 @@ class TraceCollectorHook(AgentHook):
                             if isinstance(tc.arguments, dict)
                             else {},
                             working_directory=self._pytest_project_root,
+                            path_append=self._exec_path_append,
                         )
                     except Exception as exc:
                         self.emit_event(
@@ -1026,6 +1029,7 @@ class SessionRunner:
             pytest_runtime_dir=pytest_runtime_dir,
             pip_runtime_dir=pip_runtime_dir,
             pip_history_dir=pip_history_dir,
+            exec_path_append=self.exec_config.path_append,
         )
 
         metadata = {

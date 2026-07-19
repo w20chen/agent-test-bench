@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from trace_collect import pytest_runtime_prediction as pred_mod
 from agents.openclaw._session_runner import TraceCollectorHook
 from agents.openclaw.tools.shell import ExecTool
 from trace_collect.pytest_runtime_prediction import (
@@ -903,6 +904,67 @@ def test_prepare_collect_only_distinguishes_empty_collection(tmp_path: Path) -> 
     }
     assert pending["pre_execution_nodeids"] == []
     assert pending["pre_execution_collected_count"] == 0
+
+
+def test_collect_only_uses_exec_tool_runtime_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    (project / "tests").mkdir(parents=True)
+    userbase = tmp_path / "userbase"
+    userbase_bin = userbase / "bin"
+    captured: dict[str, object] = {}
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(*args: object, **kwargs: object) -> _Completed:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        runtime_json = Path(str(env["OPENCLAW_PYTEST_RUNTIME_JSON"]))
+        runtime_json.parent.mkdir(parents=True, exist_ok=True)
+        runtime_json.write_text(
+            json.dumps(
+                {
+                    "collected_count": 1,
+                    "exit_code": 0,
+                    "tests": [
+                        {
+                            "nodeid": "tests/test_sample.py::test_one",
+                            "duration_s": 0.0,
+                            "outcome": "notrun",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        captured["env"] = env
+        return _Completed()
+
+    monkeypatch.setenv("OPENCLAW_TASK_USERBASE", str(userbase))
+    monkeypatch.setenv("PYTHONPATH", "host-pythonpath-should-not-leak")
+    monkeypatch.setattr(pred_mod.subprocess, "run", _fake_run)
+
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=tmp_path / "pytest_runtime",
+        iteration=1,
+        tool_call_id="call_env",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests"},
+        working_directory=project,
+        path_append=str(userbase_bin),
+    )
+
+    assert record is not None
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["PYTHONUSERBASE"] == str(userbase)
+    assert str(env["PATH"]).startswith(str(userbase_bin))
+    assert "host-pythonpath-should-not-leak" not in str(env.get("PYTHONPATH", ""))
 
 
 def test_three_prediction_methods_with_new_test_fallback() -> None:

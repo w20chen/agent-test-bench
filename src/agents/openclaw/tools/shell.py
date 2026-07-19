@@ -13,6 +13,11 @@ from typing import Any
 from loguru import logger
 
 from agents.openclaw.tools.base import Tool
+from agents.openclaw.tools.exec_env import (
+    TASK_TOOL_USERBASE_DEFAULT as _TASK_TOOL_USERBASE_DEFAULT,
+)
+from agents.openclaw.tools.exec_env import drop_path_entry as _drop_path_entry
+from agents.openclaw.tools.exec_env import prepare_exec_env as _prepare_exec_env
 from trace_collect.exec_classifier import classify_exec_tool_name
 from trace_collect.pytest_runtime_prediction import (
     HIDDEN_RUNTIME_DIR_ARG,
@@ -22,45 +27,6 @@ from trace_collect.pytest_runtime_prediction import (
 
 
 MAX_EXEC_TOOL_TIMEOUT_SEC = 600
-_TASK_TOOL_USERBASE_DEFAULT = "/tmp/openclaw-task-userbase"
-
-
-def _drop_path_entry(path_value: str, entry_to_drop: str) -> str:
-    if not path_value:
-        return path_value
-    sep = ":" if os.pathsep not in path_value and ":" in path_value else os.pathsep
-    drop = os.path.normcase(os.path.normpath(entry_to_drop))
-    kept = [
-        entry
-        for entry in path_value.split(sep)
-        if os.path.normcase(os.path.normpath(entry or ".")) != drop
-    ]
-    return sep.join(kept)
-
-
-def _prepare_exec_env(
-    path_append: str = "",
-    *,
-    isolate_runtime_env: bool = False,
-) -> dict[str, str]:
-    """Build an environment for shell commands."""
-    env = os.environ.copy()
-
-    if isolate_runtime_env:
-        env.pop("PYTHONPATH", None)
-        env.pop("PYTHONNOUSERSITE", None)
-        env["PYTHONUSERBASE"] = env.get(
-            "OPENCLAW_TASK_USERBASE",
-            _TASK_TOOL_USERBASE_DEFAULT,
-        )
-
-        bootstrap_bin = (
-            Path.home() / ".cache" / "task-container-bootstrap" / ".pyuserbase" / "bin"
-        )
-        env["PATH"] = _drop_path_entry(env.get("PATH", ""), str(bootstrap_bin))
-    if path_append:
-        env["PATH"] = path_append + os.pathsep + env.get("PATH", "")
-    return env
 
 
 # ---------------------------------------------------------------------------
