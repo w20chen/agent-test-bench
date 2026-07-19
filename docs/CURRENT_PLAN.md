@@ -231,3 +231,22 @@ Reviewer follow-up:
   task images/repos.
 - Added a short hash suffix to the instance scope directory to avoid sanitized
   `instance_id` collisions.
+
+## Pytest Collect-Only Prediction Update
+
+Objective: restore live per-test pytest prediction without hindsight leakage by
+collecting nodeids before the original pytest tool command runs.
+
+Plan:
+
+- Run a side-effect-minimized `pytest --collect-only` command during pytest
+  runtime prediction preparation, scoped to the tool working directory.
+- Use the pre-execution collected nodeids to compute test-count, per-test, and
+  unknown-test-fallback predictions before tool execution.
+- Record collect-only overhead in `pending.json`, `prediction.json`, compact
+  `predictions.jsonl`, realtime stdout, analyzer stdout, and analyzer CSV
+  output.
+- Keep the original pytest tool command itself unchanged; record the
+  collect-only phase as measured prediction overhead.
+- Run targeted tests and mandatory independent review because this touches the
+  trace/evaluation collection path.

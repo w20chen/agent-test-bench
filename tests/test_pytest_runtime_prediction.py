@@ -10,6 +10,7 @@ from agents.openclaw._session_runner import TraceCollectorHook
 from agents.openclaw.tools.shell import ExecTool
 from trace_collect.pytest_runtime_prediction import (
     HIDDEN_RUNTIME_DIR_ARG,
+    build_pytest_collect_only_invocation,
     compute_pytest_predictions,
     finalize_pytest_runtime_prediction,
     format_pytest_prediction_summary,
@@ -484,6 +485,88 @@ def test_prediction_json_includes_pytest_output_but_jsonl_stays_compact(
     assert "recommended" in prediction_jsonl["relative_error"]
 
 
+def test_pytest_finalize_uses_pre_execution_prediction_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    command = "python -m pytest tests/test_a.py"
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {},
+                "commands": {
+                    "pytest tests/test_a.py": {
+                        "durations": [3.0],
+                        "collected_counts": [1],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=1,
+        tool_call_id="call_snapshot",
+        tool_name="exec",
+        tool_args={"command": command},
+    )
+    assert record is not None
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    assert pending["predictions"]["prediction_recommended_s"] == pytest.approx(3.0)
+    assert pending["predictions"]["prediction_recommended_method"] == "last_run"
+    assert pending["predictions"]["prediction_reliability"]["level"] == "medium"
+
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_a.py::test_1": {"durations": [99.0]},
+                },
+                "commands": {
+                    "pytest tests/test_a.py": {
+                        "durations": [99.0],
+                        "collected_counts": [1],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (record.directory / "pytest_runtime.json").write_text(
+        json.dumps(
+            {
+                "collected_count": 1,
+                "exit_code": 0,
+                "tests": [
+                    {
+                        "nodeid": "tests/test_a.py::test_1",
+                        "duration_s": 0.01,
+                        "outcome": "passed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = finalize_pytest_runtime_prediction(
+        record,
+        prediction_root=root,
+        action_id="tool_1_call_snapshot",
+        ts_start=1.0,
+        ts_end=2.0,
+        duration_ms=1000.0,
+        success=True,
+        tool_result="Exit code: 0",
+    )
+
+    assert payload["prediction_recommended_s"] == pytest.approx(3.0)
+    assert payload["prediction_last_run_s"] == pytest.approx(3.0)
+    assert payload["prediction_per_test_s"] is None
+
+
 def test_notrun_tests_are_not_added_to_history(tmp_path: Path) -> None:
     invocation = tmp_path / "pytest_runtime" / "iter_0001_exec-pytest_call_a"
     invocation.mkdir(parents=True)
@@ -598,12 +681,84 @@ def test_unknown_history_records_only_tests_that_were_unknown(tmp_path: Path) ->
     assert history["unknown_tests"]["durations"] == pytest.approx([7.0])
 
 
+def test_unknown_history_uses_pre_execution_history_snapshot(tmp_path: Path) -> None:
+    root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_known.py::test_known": {"durations": [0.01]},
+                },
+                "commands": {},
+                "overheads": {},
+                "unknown_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=1,
+        tool_call_id="call_snapshot",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests"},
+    )
+    assert record is not None
+
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_known.py::test_known": {"durations": [0.01]},
+                    "tests/test_new.py::test_new": {"durations": [99.0]},
+                },
+                "commands": {},
+                "overheads": {},
+                "unknown_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (record.directory / "pytest_runtime.json").write_text(
+        json.dumps(
+            {
+                "collected_count": 1,
+                "exit_code": 0,
+                "tests": [
+                    {
+                        "nodeid": "tests/test_new.py::test_new",
+                        "duration_s": 2.0,
+                        "outcome": "passed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    finalize_pytest_runtime_prediction(
+        record,
+        prediction_root=root,
+        action_id="tool_1_call_snapshot",
+        ts_start=1.0,
+        ts_end=3.0,
+        duration_ms=2000.0,
+        success=True,
+        tool_result="Exit code: 0",
+    )
+
+    history = json.loads((root / "history.json").read_text(encoding="utf-8"))
+    assert history["unknown_tests"]["durations"] == pytest.approx([2.0])
+
+
 def test_realtime_summary_prints_all_prediction_errors() -> None:
     line = format_pytest_prediction_summary(
         {
             "iteration": 3,
             "collected_count": 2,
             "actual_duration_s": 10.0,
+            "collect_only_duration_s": 1.25,
             "prediction_last_run_s": 8.0,
             "prediction_test_count_s": 5.0,
             "prediction_per_test_s": 9.0,
@@ -622,6 +777,7 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     )
 
     assert line.startswith("[pytest-predict] ")
+    assert "collect_overhead=1.25s" in line
     assert "last=8.00s last_err=20.0%" in line
     assert "count=5.00s count_err=50.0%" in line
     assert "per_test=9.00s per_test_err=10.0%" in line
@@ -640,6 +796,113 @@ def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> 
     assert env["PYTEST_PLUGINS"].endswith(",openclaw_pytest_runtime_plugin")
     assert env["PYTHONPATH"].endswith("oldpath")
     assert env["OPENCLAW_PYTEST_RUNTIME_JSON"].endswith("pytest_runtime.json")
+
+
+def test_collect_only_invocation_strips_side_effect_output_flags(tmp_path: Path) -> None:
+    invocation = build_pytest_collect_only_invocation(
+        "cd project && python -m pytest tests --junitxml out.xml "
+        "--cov src --cov-report html --cache-clear -q",
+        working_directory=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert invocation is not None
+    joined = " ".join(invocation.argv)
+    assert "--collect-only" in invocation.argv
+    assert "--junitxml" not in invocation.argv
+    assert "--cov" not in invocation.argv
+    assert "--cov-report" not in invocation.argv
+    assert "--cache-clear" not in invocation.argv
+    assert "cache_dir=" in joined
+    assert Path(invocation.working_directory or "").name == "project"
+    assert invocation.warnings
+
+
+def test_collect_only_invocation_rejects_cache_dependent_selectors(
+    tmp_path: Path,
+) -> None:
+    invocation = build_pytest_collect_only_invocation(
+        "python -m pytest --lf tests",
+        working_directory=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert invocation is None
+
+
+def test_collect_only_invocation_uses_shell_timeout_prefix(tmp_path: Path) -> None:
+    invocation = build_pytest_collect_only_invocation(
+        "timeout 5 python -m pytest tests",
+        working_directory=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert invocation is not None
+    assert invocation.timeout_s == pytest.approx(5.0)
+    assert "timeout" not in invocation.argv
+
+
+def test_prepare_collect_only_records_nodeids_and_overhead(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    tests_dir = project / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_sample.py").write_text(
+        "\n".join(
+            [
+                "def test_one():",
+                "    assert True",
+                "def test_two():",
+                "    assert True",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    root = tmp_path / "pytest_runtime"
+
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=1,
+        tool_call_id="call_collect",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests -q", "timeout": 30},
+        working_directory=project,
+    )
+
+    assert record is not None
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    assert pending["collect_only"]["status"] == "collected"
+    assert pending["collect_only"]["duration_s"] >= 0
+    assert pending["prediction_overhead_s"] == pytest.approx(
+        pending["collect_only"]["duration_s"]
+    )
+    nodeids = {nodeid.replace("\\", "/") for nodeid in pending["pre_execution_nodeids"]}
+    assert any(nodeid.endswith("tests/test_sample.py::test_one") for nodeid in nodeids)
+    assert any(nodeid.endswith("tests/test_sample.py::test_two") for nodeid in nodeids)
+
+
+def test_prepare_collect_only_distinguishes_empty_collection(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "tests").mkdir(parents=True)
+    root = tmp_path / "pytest_runtime"
+
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=1,
+        tool_call_id="call_empty",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests -q", "timeout": 30},
+        working_directory=project,
+    )
+
+    assert record is not None
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    assert pending["collect_only"]["status"] in {
+        "collected_empty",
+        "collected_with_pytest_exit",
+    }
+    assert pending["pre_execution_nodeids"] == []
+    assert pending["pre_execution_collected_count"] == 0
 
 
 def test_three_prediction_methods_with_new_test_fallback() -> None:
@@ -751,6 +1014,7 @@ def test_small_project_generates_predictions_after_history(tmp_path: Path) -> No
             tool_call_id=f"call_{iteration}",
             tool_name="exec",
             tool_args=tool_args,
+            working_directory=project,
         )
         assert record is not None
         result = asyncio.run(tool.execute(**tool_args))
@@ -771,11 +1035,17 @@ def test_small_project_generates_predictions_after_history(tmp_path: Path) -> No
 
     first, second = payloads
     assert first["prediction_per_test_s"] is None
+    assert first["collect_only_duration_s"] is not None
+    assert first["pre_execution_collected_count"] == 3
     assert second["prediction_last_run_s"] == pytest.approx(0.1)
     assert second["prediction_test_count_s"] is not None
     assert second["prediction_per_test_s"] is not None
     assert second["prediction_recommended_method"] == "last_run"
     assert second["prediction_reliability"]["level"] == "high"
+    assert second["collect_only_duration_s"] is not None
+    assert second["total_duration_with_prediction_overhead_s"] == pytest.approx(
+        second["actual_duration_s"] + second["collect_only_duration_s"]
+    )
     assert (prediction_root / "history.json").exists()
     assert len((prediction_root / "predictions.jsonl").read_text().splitlines()) == 2
 

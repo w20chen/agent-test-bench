@@ -536,12 +536,25 @@ disable it.
 
 The same SWE-style OpenClaw collect path also records a minimal pytest runtime
 prediction prototype under `pytest_runtime/`.  Matching `exec-pytest` commands
-load a temporary pytest plugin that writes per-node `nodeid`, `duration_s`, and
-`outcome` data without modifying the target repository's tests.  After each
-pytest finishes, collect mode immediately prints a concise line like:
+first run an explicit pre-execution `pytest --collect-only` command with a
+temporary pytest plugin to identify the nodeids available at prediction time.
+The collect-only invocation is run as an argument vector in the tool working
+directory, redirects pytest cache into the prediction artifact directory, and
+removes known output-producing/reporting flags such as `--junitxml`, `--html`,
+`--cov`, and `--cov-report` to avoid perturbing the target workspace. The
+artifact cache override is placed after retained pytest args so user
+`cache_dir` overrides cannot redirect collect-only cache writes back into the
+target workspace. Cache-dependent selectors such as `--lf` / `--last-failed`
+are treated as unsupported for pre-execution nodeid prediction because dropping
+or redirecting their cache would change the selected test set. Shell `timeout`
+prefixes are enforced by the collect-only subprocess timeout. The
+original pytest tool command still runs afterward as requested by the agent and
+loads the same kind of temporary plugin to write per-node `nodeid`,
+`duration_s`, and `outcome` data. After each pytest finishes, collect mode
+immediately prints a concise line like:
 
 ```text
-[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9% recommended=per_test:215.70s rec_err=2.1% reliability=high
+[pytest-predict] iter=17 tests=32 actual=220.40s collect_overhead=4.20s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9% recommended=per_test:215.70s rec_err=2.1% reliability=high
 ```
 
 Artifacts are written as:
@@ -551,18 +564,40 @@ attempt_N/pytest_runtime/
   history.json
   predictions.jsonl
   iter_0017_exec-pytest_<tool_call_id>/
+    pending.json
+    collect_only/
+      pytest_collect_only.json
     pytest_runtime.json
     prediction.json
     instrumentation.json
 ```
 
-`prediction.json` preserves the actual wall duration, test collection,
-per-test durations/outcomes, the prediction baselines, absolute /
-relative errors, and `pytest_output.text`, which is the captured shell-tool
-output for that pytest invocation.  The prediction is computed from
-`history.json` before the current run is added, so the current pytest duration
-does not leak into its own prediction.  `predictions.jsonl` appends compact
-per-run rows and omits the full pytest output to keep aggregate scans cheap.
+`pending.json` snapshots the history-derived prediction before the pytest tool
+command executes, including the collect-only command metadata, pre-execution
+nodeids, and `prediction_overhead_s`. `prediction.json` then preserves the
+actual wall duration, test collection, per-test durations/outcomes, the
+pre-execution prediction baselines, absolute / relative errors, and
+`pytest_output.text`, which is the captured shell-tool output for that pytest
+invocation. `predictions.jsonl` appends compact per-run rows and omits the full
+pytest output to keep aggregate scans cheap.
+
+The extra prediction cost is reported explicitly:
+
+```text
+collect_only_duration_s                 wall time spent by pytest --collect-only
+prediction_overhead_s                   same value, carried as prediction overhead
+total_duration_with_prediction_overhead_s actual pytest runtime plus collect-only overhead
+```
+
+The analyzer prints average collect-only overhead across all finalized pytest
+rows with overhead metadata, including cold-start rows where no prediction was
+available. CSV export also includes those rows so prediction accuracy and
+prediction cost can be audited separately.
+
+Future unknown-test calibration is based on the same pre-execution history
+snapshot saved in `pending.json`, not on history changes observed after the
+tool starts.
+
 `prediction_last_run_s` is keyed by `normalized_command`.  Starting with
 `schema_version=4`, this key strips interpreter-path differences and stdout
 post-processing such as `| head`, `| tail`, and `| grep`, while preserving
@@ -614,6 +649,8 @@ rule-based selector designed to expose when history is trustworthy:
 ```text
 if Last Run is available and the previous same-command collected_count is known and changed by <=10%:
     use Last Run, reliability=high
+elif Last Run is available but the current test set is not known before execution:
+    use Last Run, reliability=medium
 elif Last Run is available but previous same-command collected_count is unavailable:
     use Last Run, reliability=medium
 elif Per-Test is available and at least 80% of tests have exact node history:

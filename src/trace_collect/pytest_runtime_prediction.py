@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import shlex
 import statistics
+import subprocess
+import time
 from typing import Any
 
 from trace_collect.exec_classifier import classify_exec_tool_name
@@ -25,11 +27,13 @@ HIDDEN_RUNTIME_ENABLED_ARG = "__openclaw_pytest_runtime_enabled"
 HISTORY_FILENAME = "history.json"
 PREDICTIONS_FILENAME = "predictions.jsonl"
 RUNTIME_JSON_FILENAME = "pytest_runtime.json"
+COLLECT_ONLY_JSON_FILENAME = "pytest_collect_only.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
 PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
 PREDICTION_SCHEMA_VERSION = 5
 HISTORY_SCHEMA_VERSION = 5
+DEFAULT_COLLECT_ONLY_TIMEOUT_S = 300.0
 KNOWN_NODE_HIGH_RATIO = 0.80
 KNOWN_OR_FILE_MEDIUM_RATIO = 0.80
 COMMAND_COUNT_STABLE_REL_DELTA = 0.10
@@ -76,6 +80,17 @@ class PytestRuntimeRecord:
     directory: Path
     command: str
     working_directory: str | None = None
+
+
+@dataclass(slots=True)
+class PytestCollectOnlyInvocation:
+    """Side-effect-minimized pytest collection command."""
+
+    argv: list[str]
+    working_directory: str | None
+    env_overrides: dict[str, str]
+    warnings: list[str]
+    timeout_s: float | None = None
 
 
 def _utc_now() -> str:
@@ -425,6 +440,267 @@ def prepare_pytest_runtime_environment(
     }
 
 
+def build_pytest_collect_only_invocation(
+    command: str,
+    *,
+    working_directory: str | Path | None,
+    artifact_dir: Path,
+) -> PytestCollectOnlyInvocation | None:
+    """Build a side-effect-minimized collection invocation for supported forms."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+
+    invocation_cwd = str(working_directory) if working_directory else None
+    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
+        cd_path = Path(tokens[1])
+        if not cd_path.is_absolute() and invocation_cwd:
+            cd_path = Path(invocation_cwd) / cd_path
+        invocation_cwd = str(cd_path)
+        tokens = tokens[3:]
+
+    if "&&" in tokens or ";" in tokens:
+        return None
+
+    timeout_override_s: float | None = None
+    if tokens and _shell_basename(tokens[0]) == "timeout":
+        if len(tokens) < 3:
+            return None
+        normalized_timeout = _normalize_timeout_value(tokens[1])
+        try:
+            timeout_override_s = float(normalized_timeout)
+        except ValueError:
+            return None
+        tokens = tokens[2:]
+
+    env_prefix: list[str] = []
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        env_prefix.append(tokens.pop(0))
+
+    pytest_idx: int | None = None
+    pytest_args_start: int | None = None
+    for idx, token in enumerate(tokens):
+        base = _shell_basename(token)
+        if base == "pytest":
+            pytest_idx = idx
+            pytest_args_start = idx + 1
+            break
+        if (
+            base.startswith("python")
+            and idx + 2 < len(tokens)
+            and tokens[idx + 1] == "-m"
+            and tokens[idx + 2] == "pytest"
+        ):
+            pytest_idx = idx
+            pytest_args_start = idx + 3
+            break
+    if pytest_idx is None or pytest_args_start is None:
+        return None
+    if any(tok not in env_prefix for tok in tokens[:pytest_idx]):
+        return None
+
+    invocation = tokens[:pytest_args_start]
+    parsed_pytest_args = _pytest_collect_only_args(tokens[pytest_args_start:])
+    if parsed_pytest_args is None:
+        return None
+    pytest_args, warnings = parsed_pytest_args
+    cache_dir = artifact_dir / ".pytest_cache"
+    if timeout_override_s is not None:
+        warnings.append("original timeout prefix enforced by subprocess timeout")
+    env_overrides: dict[str, str] = {}
+    for token in env_prefix:
+        key, value = token.split("=", 1)
+        env_overrides[key] = value
+    argv = [
+        *invocation,
+        "--collect-only",
+        *pytest_args,
+        "-o",
+        f"cache_dir={cache_dir}",
+    ]
+    return PytestCollectOnlyInvocation(
+        argv=argv,
+        working_directory=invocation_cwd,
+        env_overrides=env_overrides,
+        warnings=warnings,
+        timeout_s=timeout_override_s,
+    )
+
+
+def build_pytest_collect_only_command(command: str) -> str | None:
+    """Return a display string for the supported collect-only invocation."""
+    invocation = build_pytest_collect_only_invocation(
+        command,
+        working_directory=None,
+        artifact_dir=Path("."),
+    )
+    if invocation is None:
+        return None
+    return " ".join(shlex.quote(arg) for arg in invocation.argv)
+
+
+def _pytest_collect_only_args(pytest_args: list[str]) -> tuple[list[str], list[str]] | None:
+    kept: list[str] = []
+    warnings: list[str] = []
+    side_effect_value_flags = {
+        "--junitxml",
+        "--html",
+        "--cov",
+        "--cov-report",
+        "--cov-config",
+        "--basetemp",
+    }
+    side_effect_bool_flags = {
+        "--cache-clear",
+        "--cov-append",
+        "--self-contained-html",
+    }
+    cache_dependent_selectors = {
+        "--lf",
+        "--last-failed",
+        "--ff",
+        "--failed-first",
+        "--nf",
+        "--new-first",
+    }
+    idx = 0
+    while idx < len(pytest_args):
+        token = pytest_args[idx]
+        if token in _SHELL_STOP_TOKENS or _is_redirection_token(token):
+            break
+        split = _split_option_value(token)
+        option_name = split[0] if split is not None else token
+        if option_name in cache_dependent_selectors:
+            return None
+        if option_name in side_effect_bool_flags:
+            warnings.append(f"removed collect-only side-effect flag: {option_name}")
+            idx += 1
+            continue
+        if option_name in side_effect_value_flags:
+            warnings.append(f"removed collect-only side-effect flag: {option_name}")
+            idx += 1 if split is not None else 2
+            continue
+        kept.append(token)
+        idx += 1
+    return kept, warnings
+
+
+def _collect_only_timeout_s(tool_args: dict[str, Any]) -> float:
+    value = tool_args.get("timeout")
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return DEFAULT_COLLECT_ONLY_TIMEOUT_S
+
+
+def _run_pytest_collect_only(
+    *,
+    command: str,
+    invocation_dir: Path,
+    working_directory: str | None,
+    timeout_s: float,
+) -> dict[str, Any]:
+    collect_dir = invocation_dir / "collect_only"
+    runtime_json = collect_dir / COLLECT_ONLY_JSON_FILENAME
+    collect_dir.mkdir(parents=True, exist_ok=True)
+    plugin_env = prepare_pytest_runtime_environment(invocation_dir=collect_dir)
+    plugin_env["OPENCLAW_PYTEST_RUNTIME_JSON"] = str(runtime_json)
+    env = merge_pytest_runtime_environment(os.environ.copy(), plugin_env)
+
+    collect_invocation = build_pytest_collect_only_invocation(
+        command,
+        working_directory=working_directory,
+        artifact_dir=collect_dir,
+    )
+    if collect_invocation is not None:
+        env.update(collect_invocation.env_overrides)
+    effective_timeout_s = (
+        min(timeout_s, collect_invocation.timeout_s)
+        if collect_invocation is not None
+        and collect_invocation.timeout_s is not None
+        else timeout_s
+    )
+    started_wall = time.time()
+    started_mono = time.monotonic()
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "command": (
+            " ".join(shlex.quote(arg) for arg in collect_invocation.argv)
+            if collect_invocation is not None
+            else None
+        ),
+        "argv": collect_invocation.argv if collect_invocation is not None else [],
+        "ts_start": started_wall,
+        "timeout_s": effective_timeout_s,
+        "working_directory": (
+            collect_invocation.working_directory
+            if collect_invocation is not None
+            else working_directory
+        ),
+        "status": "unsupported_command" if collect_invocation is None else "started",
+        "nodeids": [],
+        "collected_count": 0,
+    }
+    if collect_invocation is None:
+        payload["ts_end"] = time.time()
+        payload["duration_s"] = time.monotonic() - started_mono
+        payload["warnings"] = ["unsupported collect-only command shape"]
+        return payload
+
+    try:
+        completed = subprocess.run(
+            collect_invocation.argv,
+            cwd=collect_invocation.working_directory or None,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=effective_timeout_s,
+            check=False,
+        )
+        payload["exit_code"] = completed.returncode
+        payload["stdout_length_chars"] = len(completed.stdout or "")
+        payload["stderr_length_chars"] = len(completed.stderr or "")
+        payload["stdout_preview"] = (completed.stdout or "")[:500]
+        payload["stderr_preview"] = (completed.stderr or "")[:500]
+        runtime_payload, runtime_warning = _load_json(runtime_json)
+        tests = _load_runtime_tests(runtime_payload)
+        nodeids = [str(test["nodeid"]) for test in tests]
+        payload["nodeids"] = nodeids
+        payload["collected_count"] = len(nodeids)
+        collection_observed = (
+            isinstance(runtime_payload.get("collected_count"), int)
+            or isinstance(runtime_payload.get("tests"), list)
+        )
+        if completed.returncode == 0:
+            payload["status"] = "collected" if nodeids else "collected_empty"
+        elif collection_observed:
+            payload["status"] = "collected_with_pytest_exit"
+        else:
+            payload["status"] = "failed"
+        payload["warnings"] = [
+            warning
+            for warning in [*collect_invocation.warnings, runtime_warning]
+            if warning
+        ]
+    except subprocess.TimeoutExpired as exc:
+        payload["status"] = "timeout"
+        payload["stdout_length_chars"] = len(exc.stdout or "")
+        payload["stderr_length_chars"] = len(exc.stderr or "")
+        payload["warnings"] = [
+            f"collect-only timed out after {effective_timeout_s:.1f}s"
+        ]
+    except Exception as exc:
+        payload["status"] = "error"
+        payload["warnings"] = [f"collect-only failed: {exc!r}"]
+    finally:
+        payload["ts_end"] = time.time()
+        payload["duration_s"] = time.monotonic() - started_mono
+    return payload
+
+
 def merge_pytest_runtime_environment(
     env: dict[str, str],
     overrides: dict[str, str],
@@ -456,6 +732,7 @@ def prepare_pytest_runtime_prediction_before_tool(
     tool_call_id: str,
     tool_name: str,
     tool_args: dict[str, Any],
+    working_directory: str | Path | None = None,
 ) -> PytestRuntimeRecord | None:
     """Prepare artifact directory and annotate pytest tool args for ExecTool."""
     if not is_pytest_tool_call(tool_name, tool_args):
@@ -469,6 +746,42 @@ def prepare_pytest_runtime_prediction_before_tool(
     invocation_dir.mkdir(parents=True, exist_ok=True)
     tool_args[HIDDEN_RUNTIME_DIR_ARG] = str(invocation_dir)
     tool_args[HIDDEN_RUNTIME_ENABLED_ARG] = True
+    effective_working_directory = str(
+        tool_args.get("working_dir")
+        or tool_args.get("working_directory")
+        or working_directory
+        or ""
+    )
+    history_path = prediction_root / HISTORY_FILENAME
+    history, history_warning = _load_json(history_path)
+    if effective_working_directory:
+        collect_only = _run_pytest_collect_only(
+            command=command,
+            invocation_dir=invocation_dir,
+            working_directory=effective_working_directory,
+            timeout_s=_collect_only_timeout_s(tool_args),
+        )
+    else:
+        collect_only = {
+            "schema_version": 1,
+            "command": None,
+            "working_directory": "",
+            "status": "skipped_missing_working_directory",
+            "nodeids": [],
+            "collected_count": 0,
+            "duration_s": 0.0,
+            "warnings": ["collect-only skipped because working directory is unknown"],
+        }
+    collect_nodeids = [
+        str(nodeid)
+        for nodeid in collect_only.get("nodeids", [])
+        if isinstance(nodeid, str)
+    ]
+    predictions = compute_pytest_predictions(
+        history=history,
+        command=command,
+        nodeids=collect_nodeids,
+    )
 
     record = {
         "schema_version": 1,
@@ -476,7 +789,37 @@ def prepare_pytest_runtime_prediction_before_tool(
         "iteration": iteration,
         "tool_call_id": tool_call_id,
         "command": command,
-        "working_directory": str(tool_args.get("working_dir") or tool_args.get("working_directory") or ""),
+        "working_directory": effective_working_directory,
+        "history_path": str(history_path),
+        "history_snapshot": history,
+        "collect_only": collect_only,
+        "pre_execution_nodeids": collect_nodeids,
+        "pre_execution_collected_count": len(collect_nodeids),
+        "prediction_overhead_s": collect_only.get("duration_s"),
+        "history_before": {
+            "test_count": len(_history_tests(history)),
+            "command_count": len(_history_commands(history)),
+            "project_test_median_s": predictions["project_test_median_s"],
+            "project_overhead_median_s": predictions["project_overhead_median_s"],
+            "project_unknown_test_median_s": predictions[
+                "project_unknown_test_median_s"
+            ],
+            "recommended_method": predictions["prediction_recommended_method"],
+            "reliability_level": predictions["prediction_reliability"]["level"],
+        },
+        "predictions": predictions,
+        "warnings": [
+            warning
+            for warning in [
+                history_warning,
+                *(
+                    str(warning)
+                    for warning in collect_only.get("warnings", [])
+                    if isinstance(warning, str)
+                ),
+            ]
+            if warning
+        ],
         "status": "pending_execution",
     }
     _write_json(invocation_dir / "pending.json", record)
@@ -486,6 +829,7 @@ def prepare_pytest_runtime_prediction_before_tool(
         iteration=iteration,
         directory=invocation_dir,
         command=command,
+        working_directory=effective_working_directory or None,
     )
 
 
@@ -679,7 +1023,14 @@ def compute_prediction_reliability(
     unknown_fallback = predictions.get("prediction_unknown_test_fallback_s")
 
     if total <= 0:
-        reasons.append("no_collected_tests")
+        if repeated_command and isinstance(last_run, (int, float)):
+            method = "last_run"
+            value = float(last_run)
+            level = "medium"
+            reasons.append("same_normalized_command_seen_before")
+            reasons.append("pre_execution_test_set_unknown")
+        else:
+            reasons.append("no_collected_tests")
     elif (
         repeated_command
         and isinstance(last_run, (int, float))
@@ -867,6 +1218,57 @@ def compute_pytest_predictions(
     return result
 
 
+def _empty_pytest_predictions(command: str) -> dict[str, Any]:
+    return {
+        "command_key": normalize_pytest_command(command),
+        "project_test_median_s": None,
+        "project_overhead_median_s": None,
+        "project_unknown_test_median_s": None,
+        "prediction_last_run_s": None,
+        "prediction_test_count_s": None,
+        "prediction_per_test_without_overhead_s": None,
+        "prediction_per_test_overhead_s": None,
+        "prediction_per_test_s": None,
+        "per_test_prediction_details": [],
+        "prediction_unknown_test_fallback_without_overhead_s": None,
+        "prediction_unknown_test_fallback_overhead_s": None,
+        "prediction_unknown_test_fallback_s": None,
+        "unknown_test_fallback_prediction_details": [],
+        "prediction_reliability": {
+            "level": "unavailable",
+            "reasons": ["pre_execution_prediction_missing"],
+            "known_node_ratio": 0.0,
+            "file_fallback_ratio": 0.0,
+            "project_fallback_ratio": 0.0,
+            "unknown_fallback_ratio": 0.0,
+            "unavailable_ratio": 0.0,
+            "repeated_command": False,
+            "previous_collected_count": None,
+            "collected_count_delta_ratio": None,
+            "recommended_method": "none",
+            "recommended_prediction_s": None,
+        },
+        "prediction_recommended_s": None,
+        "prediction_recommended_method": "none",
+    }
+
+
+def _coerce_pytest_predictions(value: Any, command: str) -> dict[str, Any]:
+    defaults = _empty_pytest_predictions(command)
+    if not isinstance(value, dict):
+        return defaults
+    merged = {**defaults, **value}
+    reliability = merged.get("prediction_reliability")
+    if isinstance(reliability, dict):
+        merged["prediction_reliability"] = {
+            **defaults["prediction_reliability"],
+            **reliability,
+        }
+    else:
+        merged["prediction_reliability"] = defaults["prediction_reliability"]
+    return merged
+
+
 def _bounded_append(values: list[Any], value: float) -> list[float]:
     clean = [float(v) for v in values if isinstance(v, (int, float)) and v >= 0]
     clean.append(float(value))
@@ -1000,9 +1402,10 @@ def finalize_pytest_runtime_prediction(
     tool_result: str,
     working_directory: str | None = None,
 ) -> dict[str, Any]:
-    """Compute, persist, and print prediction results for one pytest run."""
+    """Persist results for one pytest run using the pre-execution prediction."""
     history_path = prediction_root / HISTORY_FILENAME
     history, history_warning = _load_json(history_path)
+    pending, pending_warning = _load_json(record.directory / "pending.json")
     runtime_payload, runtime_warning = _load_json(record.directory / RUNTIME_JSON_FILENAME)
     instrumentation, instrumentation_warning = _load_json(
         record.directory / INSTRUMENTATION_FILENAME
@@ -1011,8 +1414,23 @@ def finalize_pytest_runtime_prediction(
     actual_duration_s = max(0.0, float(duration_ms) / 1000.0)
     tests = _load_runtime_tests(runtime_payload)
     nodeids = [str(test["nodeid"]) for test in tests]
-    predictions = compute_pytest_predictions(
-        history=history,
+    predictions = _coerce_pytest_predictions(pending.get("predictions"), record.command)
+    collect_only = pending.get("collect_only") if isinstance(pending.get("collect_only"), dict) else {}
+    collect_only_duration_s = collect_only.get("duration_s")
+    if not isinstance(collect_only_duration_s, (int, float)):
+        collect_only_duration_s = None
+    pre_execution_nodeids = [
+        str(nodeid)
+        for nodeid in pending.get("pre_execution_nodeids", [])
+        if isinstance(nodeid, str)
+    ]
+    pre_execution_history = (
+        pending.get("history_snapshot")
+        if isinstance(pending.get("history_snapshot"), dict)
+        else {}
+    )
+    history_update_predictions = compute_pytest_predictions(
+        history=pre_execution_history,
         command=record.command,
         nodeids=nodeids,
     )
@@ -1024,9 +1442,19 @@ def finalize_pytest_runtime_prediction(
 
     warnings = [
         warning
-        for warning in (history_warning, runtime_warning, instrumentation_warning)
+        for warning in (
+            pending_warning,
+            history_warning,
+            runtime_warning,
+            instrumentation_warning,
+        )
         if warning
     ]
+    warnings.extend(
+        str(warning)
+        for warning in pending.get("warnings", [])
+        if isinstance(warning, str)
+    )
     if not tests:
         warnings.append("pytest runtime JSON missing or contains no tests")
 
@@ -1073,6 +1501,16 @@ def finalize_pytest_runtime_prediction(
         ),
         "collected_tests": nodeids,
         "tests": tests,
+        "pre_execution_collected_count": len(pre_execution_nodeids),
+        "pre_execution_nodeids": pre_execution_nodeids,
+        "collect_only": collect_only,
+        "collect_only_duration_s": collect_only_duration_s,
+        "prediction_overhead_s": collect_only_duration_s,
+        "total_duration_with_prediction_overhead_s": (
+            actual_duration_s + float(collect_only_duration_s)
+            if collect_only_duration_s is not None
+            else None
+        ),
         "prediction_last_run_s": predictions["prediction_last_run_s"],
         "prediction_test_count_s": predictions["prediction_test_count_s"],
         "prediction_per_test_s": predictions["prediction_per_test_s"],
@@ -1100,9 +1538,11 @@ def finalize_pytest_runtime_prediction(
         "prediction_reliability": predictions["prediction_reliability"],
         "absolute_error": absolute_error,
         "relative_error": relative_error,
-        "history_before": {
-            "test_count": len(_history_tests(history)),
-            "command_count": len(_history_commands(history)),
+        "history_before": pending.get("history_before")
+        if isinstance(pending.get("history_before"), dict)
+        else {
+            "test_count": None,
+            "command_count": None,
             "project_test_median_s": predictions["project_test_median_s"],
             "project_overhead_median_s": predictions["project_overhead_median_s"],
             "project_unknown_test_median_s": predictions[
@@ -1130,7 +1570,9 @@ def finalize_pytest_runtime_prediction(
             command=record.command,
             total_duration_s=actual_duration_s,
             tests=tests,
-            per_test_prediction_details=predictions["per_test_prediction_details"],
+            per_test_prediction_details=history_update_predictions[
+                "per_test_prediction_details"
+            ],
         )
         _write_json(history_path, updated_history)
 
@@ -1155,6 +1597,7 @@ def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
     return (
         "[pytest-predict] "
         f"iter={payload.get('iteration')} tests={count} actual={_fmt(actual)} "
+        f"collect_overhead={_fmt(payload.get('collect_only_duration_s'))} "
         f"last={_fmt(payload.get('prediction_last_run_s'))} last_err={_err('last_run')} "
         f"count={_fmt(payload.get('prediction_test_count_s'))} count_err={_err('test_count')} "
         f"per_test={_fmt(payload.get('prediction_per_test_s'))} per_test_err={_err('per_test')} "

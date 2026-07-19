@@ -17,7 +17,10 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
                 "iteration": 1,
                 "command": "pytest tests/test_a.py",
                 "actual_duration_s": 10.0,
+                "collect_only_duration_s": 1.5,
+                "total_duration_with_prediction_overhead_s": 11.5,
                 "collected_count": 2,
+                "pre_execution_collected_count": 2,
                 "prediction_recommended_s": 9.0,
                 "prediction_recommended_method": "per_test",
                 "prediction_reliability": {
@@ -43,6 +46,16 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
                 "relative_error": {"per_test": 0.2},
             }
         )
+        + "\n"
+        + json.dumps(
+            {
+                "iteration": 3,
+                "command": "pytest tests/test_cold.py",
+                "actual_duration_s": 3.0,
+                "collect_only_duration_s": 0.5,
+                "total_duration_with_prediction_overhead_s": 3.5,
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -63,9 +76,13 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
     )
 
     assert "Recommended" in result.stdout
+    assert "Average collect-only overhead: 1.0s" in result.stdout
     assert "Reliability buckets:" in result.stdout
     assert "high" in result.stdout
     assert "unavailable runs=   1" in result.stdout
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "prediction_recommended_method" in csv_text
+    assert "collect_only_duration_s" in csv_text
+    assert "total_duration_with_prediction_overhead_s" in csv_text
+    assert "pytest tests/test_cold.py" in csv_text
     assert "per_test" in csv_text

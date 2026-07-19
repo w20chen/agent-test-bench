@@ -85,6 +85,15 @@ def _mean_actual(rows: list[dict[str, Any]]) -> float | None:
     return statistics.mean(values) if values else None
 
 
+def _mean_collect_only_overhead(rows: list[dict[str, Any]]) -> float | None:
+    values = [
+        float(row["collect_only_duration_s"])
+        for row in rows
+        if isinstance(row.get("collect_only_duration_s"), (int, float))
+    ]
+    return statistics.mean(values) if values else None
+
+
 def _fmt_seconds(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1f}"
 
@@ -100,7 +109,10 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "iteration",
         "command",
         "actual_duration_s",
+        "collect_only_duration_s",
+        "total_duration_with_prediction_overhead_s",
         "collected_count",
+        "pre_execution_collected_count",
         "prediction_last_run_s",
         "prediction_test_count_s",
         "prediction_per_test_s",
@@ -141,7 +153,14 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
                     "iteration": row.get("iteration"),
                     "command": row.get("command"),
                     "actual_duration_s": row.get("actual_duration_s"),
+                    "collect_only_duration_s": row.get("collect_only_duration_s"),
+                    "total_duration_with_prediction_overhead_s": row.get(
+                        "total_duration_with_prediction_overhead_s"
+                    ),
                     "collected_count": row.get("collected_count"),
+                    "pre_execution_collected_count": row.get(
+                        "pre_execution_collected_count"
+                    ),
                     "prediction_last_run_s": row.get("prediction_last_run_s"),
                     "prediction_test_count_s": row.get("prediction_test_count_s"),
                     "prediction_per_test_s": row.get("prediction_per_test_s"),
@@ -219,6 +238,12 @@ def main() -> None:
             for method, _ in METHODS
         )
     ]
+    finalized_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("actual_duration_s"), (int, float))
+        or isinstance(row.get("collect_only_duration_s"), (int, float))
+    ]
     long_rows = [
         row
         for row in valid_rows
@@ -231,6 +256,9 @@ def main() -> None:
     mean_actual = _mean_actual(valid_rows)
     if mean_actual is not None:
         print(f"Average actual runtime: {mean_actual:.1f}s")
+    mean_collect_only = _mean_collect_only_overhead(finalized_rows)
+    if mean_collect_only is not None:
+        print(f"Average collect-only overhead: {mean_collect_only:.1f}s")
     print()
     print(f"{'Method':<24} {'N':>6} {'MAE(s)':>10} {'MAPE':>10} {'Long MAPE':>12}")
     for method, label in METHODS:
@@ -257,7 +285,7 @@ def main() -> None:
         )
 
     if args.csv is not None:
-        _write_csv(valid_rows, args.csv)
+        _write_csv(finalized_rows, args.csv)
         print(f"\nCSV written to: {args.csv}")
 
 

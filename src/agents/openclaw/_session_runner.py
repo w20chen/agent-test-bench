@@ -221,6 +221,7 @@ class TraceCollectorHook(AgentHook):
                             tool_args=tc.arguments
                             if isinstance(tc.arguments, dict)
                             else {},
+                            working_directory=self._pytest_project_root,
                         )
                     except Exception as exc:
                         self.emit_event(
@@ -234,11 +235,12 @@ class TraceCollectorHook(AgentHook):
                         )
                         runtime_record = None
                     if runtime_record is not None:
-                        runtime_record.working_directory = (
-                            str(self._pytest_project_root)
-                            if self._pytest_project_root is not None
-                            else None
-                        )
+                        if runtime_record.working_directory is None:
+                            runtime_record.working_directory = (
+                                str(self._pytest_project_root)
+                                if self._pytest_project_root is not None
+                                else None
+                            )
                         self._pytest_runtime_by_tool_call[tc.id] = runtime_record
                 if self._pip_runtime_dir is not None:
                     try:
