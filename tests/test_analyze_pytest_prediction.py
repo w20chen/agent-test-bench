@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,16 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
                 "actual_duration_s": 3.0,
                 "collect_only_duration_s": 0.5,
                 "total_duration_with_prediction_overhead_s": 3.5,
+                "prediction_reliability": {"level": "coldstart"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "iteration": 4,
+                "command": "pytest tests/test_error.py",
+                "actual_duration_s": 1.0,
+                "prediction_reliability": {"level": "error"},
             }
         )
         + "\n",
@@ -79,10 +90,12 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
     assert "Average collect-only overhead: 1.0s" in result.stdout
     assert "Reliability buckets:" in result.stdout
     assert "high" in result.stdout
-    assert "unavailable runs=   1" in result.stdout
+    assert re.search(r"coldstart\s+runs=\s+1\b", result.stdout)
+    assert re.search(r"error\s+runs=\s+1\b", result.stdout)
     csv_text = csv_path.read_text(encoding="utf-8")
     assert "prediction_recommended_method" in csv_text
     assert "collect_only_duration_s" in csv_text
     assert "total_duration_with_prediction_overhead_s" in csv_text
     assert "pytest tests/test_cold.py" in csv_text
+    assert "pytest tests/test_error.py" in csv_text
     assert "per_test" in csv_text

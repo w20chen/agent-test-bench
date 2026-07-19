@@ -320,6 +320,34 @@ def test_recommended_marks_cold_start_unknown_fallback_low_reliability() -> None
     assert reliability["unknown_fallback_ratio"] == 1.0
 
 
+def test_recommended_marks_empty_collection_as_error() -> None:
+    predictions = compute_pytest_predictions(
+        history={},
+        command="python -m pytest tests/test_a.py",
+        nodeids=[],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_recommended_method"] == "none"
+    assert predictions["prediction_recommended_s"] is None
+    assert reliability["level"] == "error"
+    assert "no_collected_tests" in reliability["reasons"]
+
+
+def test_recommended_marks_pre_execution_history_miss_as_coldstart() -> None:
+    predictions = compute_pytest_predictions(
+        history={},
+        command="python -m pytest tests/test_a.py",
+        nodeids=["tests/test_a.py::test_new"],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_recommended_method"] == "none"
+    assert predictions["prediction_recommended_s"] is None
+    assert reliability["level"] == "coldstart"
+    assert "no_available_prediction" in reliability["reasons"]
+
+
 def test_per_test_prediction_adds_historical_overhead() -> None:
     history = {
         "tests": {
@@ -785,6 +813,36 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     assert "unknown=11.00s unknown_err=10.0%" in line
     assert "recommended=per_test:9.00s rec_err=10.0%" in line
     assert "reliability=high" in line
+
+
+def test_realtime_summary_prints_coldstart_and_error_reliability() -> None:
+    coldstart_line = format_pytest_prediction_summary(
+        {
+            "iteration": 1,
+            "collected_count": 1,
+            "actual_duration_s": 1.0,
+            "prediction_recommended_s": None,
+            "prediction_recommended_method": "none",
+            "prediction_reliability": {"level": "coldstart"},
+            "relative_error": {},
+        }
+    )
+    error_line = format_pytest_prediction_summary(
+        {
+            "iteration": 2,
+            "collected_count": 0,
+            "actual_duration_s": 1.0,
+            "prediction_recommended_s": None,
+            "prediction_recommended_method": "none",
+            "prediction_reliability": {"level": "error"},
+            "relative_error": {},
+        }
+    )
+
+    assert "recommended=none:n/a" in coldstart_line
+    assert "reliability=coldstart" in coldstart_line
+    assert "recommended=none:n/a" in error_line
+    assert "reliability=error" in error_line
 
 
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:

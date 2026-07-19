@@ -661,8 +661,11 @@ elif Per-Test is available and at least 80% of tests have node-or-file history:
     use Per-Test, reliability=medium
 elif Unknown-Test Fallback is available:
     use Unknown-Test Fallback, reliability=low
+elif pytest collected one or more test nodes but no pre-execution history can
+predict them yet:
+    mark as coldstart
 else:
-    prediction is unavailable
+    mark as error
 ```
 
 This layer is meant to reflect Code Agent behavior: repeated local pytest
@@ -687,9 +690,10 @@ PYTHONPATH=src python scripts/analyze_pytest_prediction.py traces/swe-rebench/<m
 ```
 
 The analyzer reports all baseline methods plus `Recommended`, then prints
-`high` / `medium` / `low` / `unavailable` reliability buckets.  With `--csv`,
-the exported rows include the recommended method, reliability level, fallback
-ratios, collected-count delta, and all absolute/relative errors.
+`high` / `medium` / `low` / `coldstart` / `error` reliability buckets.  Legacy
+rows without reliability metadata may still appear as `unavailable`.  With
+`--csv`, the exported rows include the recommended method, reliability level,
+fallback ratios, collected-count delta, and all absolute/relative errors.
 
 #### `pip install` Tool Invocation
 

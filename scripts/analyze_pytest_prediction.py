@@ -15,7 +15,7 @@ METHODS = (
     ("unknown_test_fallback", "Unknown-Test Fallback"),
     ("recommended", "Recommended"),
 )
-RELIABILITY_LEVELS = ("high", "medium", "low", "unavailable")
+RELIABILITY_LEVELS = ("high", "medium", "low", "coldstart", "error", "unavailable")
 
 
 def _iter_prediction_files(root: Path) -> list[Path]:
@@ -274,7 +274,7 @@ def main() -> None:
     for level in RELIABILITY_LEVELS:
         bucket = [
             row
-            for row in valid_rows
+            for row in finalized_rows
             if _reliability_level(row) == level
         ]
         print(

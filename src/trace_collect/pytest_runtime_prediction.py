@@ -1025,7 +1025,7 @@ def compute_prediction_reliability(
     reasons: list[str] = []
     method = "none"
     value: float | None = None
-    level = "unavailable"
+    level = "error"
     last_run = predictions.get("prediction_last_run_s")
     per_test = predictions.get("prediction_per_test_s")
     unknown_fallback = predictions.get("prediction_unknown_test_fallback_s")
@@ -1075,6 +1075,8 @@ def compute_prediction_reliability(
         level = "low"
         reasons.append("cold_start_or_project_fallback")
     else:
+        if total > 0:
+            level = "coldstart"
         reasons.append("no_available_prediction")
 
     if repeated_command and count_delta is not None and count_delta > COMMAND_COUNT_STABLE_REL_DELTA:
@@ -1243,7 +1245,7 @@ def _empty_pytest_predictions(command: str) -> dict[str, Any]:
         "prediction_unknown_test_fallback_s": None,
         "unknown_test_fallback_prediction_details": [],
         "prediction_reliability": {
-            "level": "unavailable",
+            "level": "error",
             "reasons": ["pre_execution_prediction_missing"],
             "known_node_ratio": 0.0,
             "file_fallback_ratio": 0.0,
