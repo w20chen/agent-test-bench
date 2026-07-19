@@ -12,7 +12,6 @@ from pathlib import Path
 import re
 import shlex
 import statistics
-import sys
 import time
 from typing import Any, Iterator
 
@@ -70,11 +69,6 @@ _VALUE_FLAGS = {
     "--target",
 }
 _STOP_TOKENS = {"|", "||", ">", ">>", "<", "2>", "2>>", "&>"}
-_ANSI_RESET = "\033[0m"
-_ANSI_BLUE = "\033[36m"
-_ANSI_GREEN = "\033[32m"
-_ANSI_YELLOW = "\033[33m"
-_ANSI_DIM = "\033[2m"
 
 
 @dataclass(slots=True)
@@ -102,17 +96,6 @@ class PipInstallCommand:
 
 def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _should_color_stdout() -> bool:
-    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
-        return False
-    isatty = getattr(sys.stdout, "isatty", None)
-    return bool(isatty()) if callable(isatty) else False
-
-
-def _ansi(text: str, color: str, *, enabled: bool) -> str:
-    return f"{color}{text}{_ANSI_RESET}" if enabled else text
 
 
 def _safe_component(value: str, *, fallback: str) -> str:
@@ -839,17 +822,13 @@ def finalize_pip_runtime_prediction(
         payload["warnings"].append(f"failed to update history: {exc!r}")
     _write_json(record.directory / PREDICTION_FILENAME, payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
-    summary = format_pip_prediction_summary(payload, color=_should_color_stdout())
+    summary = format_pip_prediction_summary(payload)
     if summary:
         print(summary, flush=True)
     return payload
 
 
-def format_pip_prediction_summary(
-    payload: dict[str, Any],
-    *,
-    color: bool = False,
-) -> str:
+def format_pip_prediction_summary(payload: dict[str, Any]) -> str:
     """Return a compact human-readable prediction line."""
 
     actual = payload.get("actual_duration_s")
@@ -864,31 +843,19 @@ def format_pip_prediction_summary(
         value = rel.get(method)
         return "n/a" if value is None else f"{float(value) * 100:.1f}%"
 
-    label = _ansi("[pip-predict]", _ANSI_BLUE, enabled=color)
-    actual_text = _ansi(_fmt(actual), _ANSI_GREEN, enabled=color)
-    recommended_text = _ansi(
-        f"{payload.get('prediction_recommended_method')}:"
-        f"{_fmt(payload.get('prediction_recommended_s'))}",
-        _ANSI_YELLOW,
-        enabled=color,
-    )
-    reliability_text = _ansi(
-        str((payload.get("prediction_reliability") or {}).get("level", "unavailable")),
-        _ANSI_DIM,
-        enabled=color,
-    )
     return (
-        f"{label} "
+        "[pip-predict] "
         f"iter={payload.get('iteration')} "
         f"packages={payload.get('package_count')} "
-        f"actual={actual_text} "
+        f"actual={_fmt(actual)} "
         f"last={_fmt(payload.get('prediction_last_run_s'))} "
         f"last_err={_err('last_run')} "
         f"package_count={_fmt(payload.get('prediction_package_count_s'))} "
         f"package_count_err={_err('package_count')} "
         f"global={_fmt(payload.get('prediction_global_median_s'))} "
         f"global_err={_err('global_median')} "
-        f"recommended={recommended_text} "
+        f"recommended={payload.get('prediction_recommended_method')}:"
+        f"{_fmt(payload.get('prediction_recommended_s'))} "
         f"rec_err={_err('recommended')} "
-        f"reliability={reliability_text}"
+        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'unavailable')}"
     )

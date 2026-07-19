@@ -15,7 +15,6 @@ from pathlib import Path
 import re
 import shlex
 import statistics
-import sys
 from typing import Any
 
 from trace_collect.exec_classifier import classify_exec_tool_name
@@ -34,11 +33,6 @@ HISTORY_SCHEMA_VERSION = 5
 KNOWN_NODE_HIGH_RATIO = 0.80
 KNOWN_OR_FILE_MEDIUM_RATIO = 0.80
 COMMAND_COUNT_STABLE_REL_DELTA = 0.10
-_ANSI_RESET = "\033[0m"
-_ANSI_MAGENTA = "\033[35m"
-_ANSI_GREEN = "\033[32m"
-_ANSI_YELLOW = "\033[33m"
-_ANSI_DIM = "\033[2m"
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._+-]+")
 _EXIT_CODE_RE = re.compile(r"Exit code:\s*(-?\d+)")
@@ -86,17 +80,6 @@ class PytestRuntimeRecord:
 
 def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _should_color_stdout() -> bool:
-    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
-        return False
-    isatty = getattr(sys.stdout, "isatty", None)
-    return bool(isatty()) if callable(isatty) else False
-
-
-def _ansi(text: str, color: str, *, enabled: bool) -> str:
-    return f"{color}{text}{_ANSI_RESET}" if enabled else text
 
 
 def _safe_component(value: str, *, fallback: str) -> str:
@@ -1151,18 +1134,11 @@ def finalize_pytest_runtime_prediction(
         )
         _write_json(history_path, updated_history)
 
-    print(
-        format_pytest_prediction_summary(payload, color=_should_color_stdout()),
-        flush=True,
-    )
+    print(format_pytest_prediction_summary(payload), flush=True)
     return detailed_payload
 
 
-def format_pytest_prediction_summary(
-    payload: dict[str, Any],
-    *,
-    color: bool = False,
-) -> str:
+def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
     """Return a concise realtime collect-mode summary line."""
     actual = payload.get("actual_duration_s")
     count = payload.get("collected_count")
@@ -1176,28 +1152,16 @@ def format_pytest_prediction_summary(
         value = rel.get(method)
         return "n/a" if value is None else f"{float(value) * 100:.1f}%"
 
-    label = _ansi("[pytest-predict]", _ANSI_MAGENTA, enabled=color)
-    actual_text = _ansi(_fmt(actual), _ANSI_GREEN, enabled=color)
-    recommended_text = _ansi(
-        f"{payload.get('prediction_recommended_method')}:"
-        f"{_fmt(payload.get('prediction_recommended_s'))}",
-        _ANSI_YELLOW,
-        enabled=color,
-    )
-    reliability_text = _ansi(
-        str((payload.get("prediction_reliability") or {}).get("level", "n/a")),
-        _ANSI_DIM,
-        enabled=color,
-    )
     return (
-        f"{label} "
-        f"iter={payload.get('iteration')} tests={count} actual={actual_text} "
+        "[pytest-predict] "
+        f"iter={payload.get('iteration')} tests={count} actual={_fmt(actual)} "
         f"last={_fmt(payload.get('prediction_last_run_s'))} last_err={_err('last_run')} "
         f"count={_fmt(payload.get('prediction_test_count_s'))} count_err={_err('test_count')} "
         f"per_test={_fmt(payload.get('prediction_per_test_s'))} per_test_err={_err('per_test')} "
         f"unknown={_fmt(payload.get('prediction_unknown_test_fallback_s'))} "
         f"unknown_err={_err('unknown_test_fallback')} "
-        f"recommended={recommended_text} "
+        f"recommended={payload.get('prediction_recommended_method')}:"
+        f"{_fmt(payload.get('prediction_recommended_s'))} "
         f"rec_err={_err('recommended')} "
-        f"reliability={reliability_text}"
+        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'n/a')}"
     )

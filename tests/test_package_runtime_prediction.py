@@ -8,7 +8,6 @@ from threading import Thread
 
 import pytest
 
-import trace_collect.package_runtime_prediction as pip_pred
 from trace_collect.package_runtime_prediction import (
     LOCK_STALE_AFTER_S,
     compute_pip_predictions,
@@ -21,14 +20,6 @@ from trace_collect.package_runtime_prediction import (
     seed_pip_history_from_shared,
     update_pip_history,
 )
-
-
-class _StdoutWithoutIsatty:
-    def write(self, data: str) -> int:
-        return len(data)
-
-    def flush(self) -> None:
-        return None
 
 
 def test_pip_install_command_recognition() -> None:
@@ -178,35 +169,6 @@ def test_format_pip_prediction_summary_includes_all_method_errors() -> None:
     assert "package_count=11.00s package_count_err=10.0%" in summary
     assert "global=8.00s global_err=20.0%" in summary
     assert "recommended=package_count:11.00s rec_err=10.0%" in summary
-
-
-def test_format_pip_prediction_summary_color_is_opt_in() -> None:
-    payload = {
-        "iteration": 4,
-        "package_count": 2,
-        "actual_duration_s": 10.0,
-        "prediction_last_run_s": 9.0,
-        "prediction_package_count_s": 11.0,
-        "prediction_global_median_s": 8.0,
-        "prediction_recommended_s": 11.0,
-        "prediction_recommended_method": "package_count",
-        "prediction_reliability": {"level": "medium"},
-        "relative_error": {},
-    }
-
-    plain = format_pip_prediction_summary(payload)
-    colored = format_pip_prediction_summary(payload, color=True)
-
-    assert "\033[" not in plain
-    assert "\033[" in colored
-    assert "[pip-predict]" in colored
-    assert "recommended=\033[" in colored
-
-
-def test_pip_color_detection_handles_tee_stdout_without_isatty(monkeypatch) -> None:
-    monkeypatch.setattr(pip_pred.sys, "stdout", _StdoutWithoutIsatty())
-
-    assert pip_pred._should_color_stdout() is False
 
 
 def test_update_history_skips_failed_runs_for_future_predictions() -> None:
