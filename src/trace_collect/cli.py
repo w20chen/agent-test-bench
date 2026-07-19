@@ -222,6 +222,15 @@ def parse_collect_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--capture-python-script-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write compact Python script runtime prediction artifacts. "
+            "Use --no-capture-python-script-runtime to disable. Default: enabled."
+        ),
+    )
+    parser.add_argument(
         "--run-id",
         default=None,
         help="Resume an interrupted run by passing its existing run directory path.",
@@ -900,6 +909,7 @@ def _run_collect(args: argparse.Namespace) -> None:
                 capture_pytest_scripts=args.capture_pytest_scripts,
                 capture_pytest_runtime=args.capture_pytest_runtime,
                 capture_pip_runtime=args.capture_pip_runtime,
+                capture_python_script_runtime=args.capture_python_script_runtime,
                 record_internals=args.record_internals,
                 resource_monitoring=args.resource_monitoring,
                 pmu_monitoring=args.pmu_monitoring,

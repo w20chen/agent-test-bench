@@ -48,6 +48,7 @@ OPENROUTER_API_KEY=sk-... python -m trace_collect.cli \
 | `--api-base` | no | from provider | Override API base URL |
 | `--api-key` | no | from env | Override API key |
 | `--capture-pip-runtime` / `--no-capture-pip-runtime` | no | on | Record compact `pip install` duration prediction artifacts under each attempt's `pip_runtime/` |
+| `--capture-python-script-runtime` / `--no-capture-python-script-runtime` | no | on | Record compact `python *.py` duration prediction artifacts under each attempt's `python_script_runtime/` |
 | `--record-internals` | no | off | OpenClaw-only: record sampled HF attention/MoE artifacts under each attempt's `recordings/`; forces model request concurrency to 1 |
 | `--resource-monitoring` | no | `auto` | `auto|on|off` for CPU, memory, disk, network, and context-switch sampling |
 | `--pmu-monitoring` | no | `auto` | `auto|on|off` for PMU metrics; explicit `on` is forbidden in concurrent execution |

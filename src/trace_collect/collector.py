@@ -53,6 +53,10 @@ from trace_collect.package_runtime_prediction import (
     merge_pip_predictions_into_shared_history,
     seed_pip_history_from_shared,
 )
+from trace_collect.python_script_runtime_prediction import (
+    merge_python_script_predictions_into_shared_history,
+    seed_python_script_history_from_shared,
+)
 from trace_collect.runtime.task_container import (
     bootstrap_task_container_python,
     preflight_task_container_runtime,
@@ -74,6 +78,16 @@ def _pip_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._+-]+", "_", instance_id).strip("._-")
     digest = hashlib.sha1(instance_id.encode("utf-8")).hexdigest()[:10]
     return run_dir.resolve() / "pip_runtime_db" / f"{safe or 'instance'}-{digest}"
+
+
+def _python_script_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._+-]+", "_", instance_id).strip("._-")
+    digest = hashlib.sha1(instance_id.encode("utf-8")).hexdigest()[:10]
+    return (
+        run_dir.resolve()
+        / "python_script_runtime_db"
+        / f"{safe or 'instance'}-{digest}"
+    )
 
 
 def _recording_server_public_host(
@@ -1102,6 +1116,7 @@ async def collect_traces(
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
     capture_pip_runtime: bool = True,
+    capture_python_script_runtime: bool = True,
     record_internals: bool = False,
     resource_monitoring: str = "auto",
     pmu_monitoring: str = "auto",
@@ -1275,6 +1290,7 @@ async def collect_traces(
                         capture_pytest_scripts=capture_pytest_scripts,
                         capture_pytest_runtime=capture_pytest_runtime,
                         capture_pip_runtime=capture_pip_runtime,
+                        capture_python_script_runtime=capture_python_script_runtime,
                     )
 
                 assert runner is not None
@@ -1293,6 +1309,17 @@ async def collect_traces(
                     run_task_kwargs["pip_history_dir"] = (
                         _pip_history_scope_dir(run_dir, instance_id)
                     )
+                if "capture_python_script_runtime" in run_task_params:
+                    run_task_kwargs["capture_python_script_runtime"] = (
+                        capture_python_script_runtime
+                    )
+                if (
+                    "python_script_history_dir" in run_task_params
+                    and capture_python_script_runtime
+                ):
+                    run_task_kwargs["python_script_history_dir"] = (
+                        _python_script_history_scope_dir(run_dir, instance_id)
+                    )
                 result = await runner.run_task(
                     task,
                     **run_task_kwargs,
@@ -1307,6 +1334,9 @@ async def collect_traces(
                         "capture_pytest_scripts": capture_pytest_scripts,
                         "capture_pytest_runtime": capture_pytest_runtime,
                         "capture_pip_runtime": capture_pip_runtime,
+                        "capture_python_script_runtime": (
+                            capture_python_script_runtime
+                        ),
                     }
                     if record_internals:
                         run_config["record_internals"] = True
@@ -1349,6 +1379,7 @@ def _normalize_openclaw_trace(
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
     capture_pip_runtime: bool = True,
+    capture_python_script_runtime: bool = True,
 ) -> None:
     """Copy an OpenClaw trace into the attempt dir, merging trace metadata."""
     lines = src.read_text(encoding="utf-8").splitlines()
@@ -1412,6 +1443,7 @@ def _normalize_openclaw_trace(
     run_config["capture_pytest_scripts"] = capture_pytest_scripts
     run_config["capture_pytest_runtime"] = capture_pytest_runtime
     run_config["capture_pip_runtime"] = capture_pip_runtime
+    run_config["capture_python_script_runtime"] = capture_python_script_runtime
     merged["run_config"] = run_config
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1474,6 +1506,7 @@ async def _run_openclaw_in_task_container(
     capture_pytest_scripts: bool = True,
     capture_pytest_runtime: bool = True,
     capture_pip_runtime: bool = True,
+    capture_python_script_runtime: bool = True,
 ) -> AttemptResult:
     fixed_image = ctx.fixed_image or task.get("image_name") or ""
     if not fixed_image:
@@ -1587,6 +1620,24 @@ async def _run_openclaw_in_task_container(
                 shared_history_root=pip_shared_history_dir,
                 attempt_prediction_root=pip_runtime_dir,
             )
+        python_script_runtime_dir = (
+            ctx.attempt_dir.resolve() / "python_script_runtime"
+            if capture_python_script_runtime
+            else None
+        )
+        python_script_shared_history_dir = (
+            _python_script_history_scope_dir(ctx.run_dir, ctx.instance_id)
+            if capture_python_script_runtime
+            else None
+        )
+        if (
+            python_script_runtime_dir is not None
+            and python_script_shared_history_dir is not None
+        ):
+            seed_python_script_history_from_shared(
+                shared_history_root=python_script_shared_history_dir,
+                attempt_prediction_root=python_script_runtime_dir,
+            )
         runtime = run_task_container_agent(
             container_id=container_id,
             timeout=(max_iterations * 120) + 300,
@@ -1634,6 +1685,11 @@ async def _run_openclaw_in_task_container(
                     if pip_runtime_dir is not None
                     else None
                 ),
+                "python_script_runtime_dir": (
+                    str(python_script_runtime_dir)
+                    if python_script_runtime_dir is not None
+                    else None
+                ),
                 "raw_stdout_path": str(stdout_path),
                 "raw_stderr_path": str(stderr_path),
                 "container_executable": container_executable,
@@ -1644,6 +1700,14 @@ async def _run_openclaw_in_task_container(
             merge_pip_predictions_into_shared_history(
                 shared_history_root=pip_shared_history_dir,
                 attempt_prediction_root=pip_runtime_dir,
+            )
+        if (
+            python_script_runtime_dir is not None
+            and python_script_shared_history_dir is not None
+        ):
+            merge_python_script_predictions_into_shared_history(
+                shared_history_root=python_script_shared_history_dir,
+                attempt_prediction_root=python_script_runtime_dir,
             )
         runtime_proof = {
             **asdict(proof),
@@ -1666,6 +1730,7 @@ async def _run_openclaw_in_task_container(
             capture_pytest_scripts=capture_pytest_scripts,
             capture_pytest_runtime=capture_pytest_runtime,
             capture_pip_runtime=capture_pip_runtime,
+            capture_python_script_runtime=capture_python_script_runtime,
         )
     finally:
         if _stats_sampler is not None:

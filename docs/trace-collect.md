@@ -768,6 +768,57 @@ Pip runtime prediction is enabled by default in collect mode; pass
 `--no-capture-pip-runtime` to disable `pip_runtime/` artifacts and realtime
 `[pip-predict]` stdout lines.
 
+#### Python Script Tool Invocation
+
+Collect mode also records compact runtime prediction artifacts for supported
+`python *.py` script commands under `python_script_runtime/`. This feature is
+passive: it does not wrap commands, inject environment variables, edit tool
+arguments, or change Python execution semantics. It intentionally excludes
+`python -c`, heredoc scripts, and `python -m ...`; only file-backed script
+invocations such as `python eval.py`, `python3 -u /app/explorer.py`, and
+`timeout 20 python3 script.py` are admitted.
+
+Python script prediction uses same-instance history shared across attempts.
+In task-container mode, the host seeds each attempt's local history mirror
+before the container starts and merges successful prediction rows back after
+the attempt finishes, matching the pip runtime history pattern.
+
+Artifacts are written as:
+
+```text
+python_script_runtime_db/
+  <instance_scope>/
+    history.json
+attempt_N/python_script_runtime/
+  predictions.jsonl
+  iter_0004_python-script_<tool_call_id>/
+    pending.json
+    prediction.json
+```
+
+The predictor uses only pre-execution history:
+
+```text
+if the same normalized script invocation has prior successful history:
+    use Last Run, reliability=high
+elif the same script path has prior successful history:
+    use Script Path Median, reliability=medium
+elif the same script basename has prior successful history:
+    use Basename Median, reliability=low
+elif any prior successful python-script duration exists for this instance:
+    use Global Median, reliability=low
+else:
+    prediction is unavailable
+```
+
+History is updated only for successful commands. Commands with nonzero
+`Exit code` and commands containing `||` fallback chains are recorded but do
+not enter history, because the final shell status may mask a failed script run.
+
+Python script runtime prediction is enabled by default in collect mode; pass
+`--no-capture-python-script-runtime` to disable `python_script_runtime/`
+artifacts and realtime `[python-script-predict]` stdout lines.
+
 ---
 
 ## Simulate: Trace Replay

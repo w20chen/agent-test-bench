@@ -33,6 +33,11 @@ from trace_collect.package_runtime_prediction import (
     finalize_pip_runtime_prediction,
     prepare_pip_runtime_prediction_before_tool,
 )
+from trace_collect.python_script_runtime_prediction import (
+    PythonScriptRuntimeRecord,
+    finalize_python_script_runtime_prediction,
+    prepare_python_script_runtime_prediction_before_tool,
+)
 from trace_collect.pytest_script_capture import (
     PytestCaptureRecord,
     capture_pytest_scripts_before_tool,
@@ -96,6 +101,8 @@ class TraceCollectorHook(AgentHook):
         pytest_runtime_dir: Path | None = None,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
+        python_script_runtime_dir: Path | None = None,
+        python_script_history_dir: Path | None = None,
         exec_path_append: str = "",
     ) -> None:
         self.trace_file = trace_file
@@ -124,6 +131,11 @@ class TraceCollectorHook(AgentHook):
         self._pip_runtime_dir = pip_runtime_dir
         self._pip_history_dir = pip_history_dir
         self._pip_runtime_by_tool_call: dict[str, PipRuntimeRecord] = {}
+        self._python_script_runtime_dir = python_script_runtime_dir
+        self._python_script_history_dir = python_script_history_dir
+        self._python_script_runtime_by_tool_call: dict[
+            str, PythonScriptRuntimeRecord
+        ] = {}
         self._exec_path_append = exec_path_append
         self._flushed = False
         self._fh = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
@@ -276,6 +288,42 @@ class TraceCollectorHook(AgentHook):
                                 else None
                             )
                         self._pip_runtime_by_tool_call[tc.id] = pip_runtime_record
+                if self._python_script_runtime_dir is not None:
+                    try:
+                        python_script_record = (
+                            prepare_python_script_runtime_prediction_before_tool(
+                                prediction_root=self._python_script_runtime_dir,
+                                history_root=self._python_script_history_dir,
+                                iteration=context.iteration,
+                                tool_call_id=tc.id,
+                                tool_name=tc.name,
+                                tool_args=tc.arguments
+                                if isinstance(tc.arguments, dict)
+                                else {},
+                                working_directory=self._pytest_project_root,
+                            )
+                        )
+                    except Exception as exc:
+                        self.emit_event(
+                            TOOL,
+                            "python_script_runtime_prediction_error",
+                            {
+                                "tool_call_id": tc.id,
+                                "error": repr(exc),
+                            },
+                            iteration=context.iteration,
+                        )
+                        python_script_record = None
+                    if python_script_record is not None:
+                        if python_script_record.working_directory is None:
+                            python_script_record.working_directory = (
+                                str(self._pytest_project_root)
+                                if self._pytest_project_root is not None
+                                else None
+                            )
+                        self._python_script_runtime_by_tool_call[tc.id] = (
+                            python_script_record
+                        )
                 is_mcp = tc.name.startswith("mcp_")
                 args_preview_obj = (
                     sanitize_tool_args_for_trace(tc.arguments)
@@ -578,6 +626,37 @@ class TraceCollectorHook(AgentHook):
                         self.emit_event(
                             TOOL,
                             "pip_runtime_prediction_error",
+                            {
+                                "tool_call_id": tc_id,
+                                "action_id": action_id,
+                                "error": repr(exc),
+                            },
+                            iteration=context.iteration,
+                            ts=tool_ts_end,
+                        )
+                python_script_record = self._python_script_runtime_by_tool_call.pop(
+                    tc_id,
+                    None,
+                )
+                if python_script_record is not None:
+                    try:
+                        finalize_python_script_runtime_prediction(
+                            python_script_record,
+                            prediction_root=self._python_script_runtime_dir
+                            or python_script_record.directory.parent,
+                            history_root=self._python_script_history_dir,
+                            action_id=action_id,
+                            ts_start=tool_ts_start,
+                            ts_end=tool_ts_end,
+                            duration_ms=round(duration_ms, 1),
+                            success=tool_ok,
+                            tool_result=tool_content,
+                            working_directory=python_script_record.working_directory,
+                        )
+                    except Exception as exc:
+                        self.emit_event(
+                            TOOL,
+                            "python_script_runtime_prediction_error",
                             {
                                 "tool_call_id": tc_id,
                                 "action_id": action_id,
@@ -993,6 +1072,9 @@ class SessionRunner:
         capture_pip_runtime: bool = False,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
+        capture_python_script_runtime: bool = False,
+        python_script_runtime_dir: Path | None = None,
+        python_script_history_dir: Path | None = None,
     ) -> SessionRunResult:
         workspace.mkdir(parents=True, exist_ok=True)
         iid = instance_id or session_key
@@ -1005,7 +1087,12 @@ class SessionRunner:
         )
         pytest_project_root = (
             effective_project_workspace
-            if capture_pytest_scripts or capture_pytest_runtime or capture_pip_runtime
+            if (
+                capture_pytest_scripts
+                or capture_pytest_runtime
+                or capture_pip_runtime
+                or capture_python_script_runtime
+            )
             else None
         )
         pytest_runtime_dir = (
@@ -1019,6 +1106,14 @@ class SessionRunner:
             else None
         )
         pip_history_dir = pip_history_dir if capture_pip_runtime else None
+        python_script_runtime_dir = (
+            (python_script_runtime_dir or trace_file.parent / "python_script_runtime")
+            if capture_python_script_runtime
+            else None
+        )
+        python_script_history_dir = (
+            python_script_history_dir if capture_python_script_runtime else None
+        )
         trace_hook = TraceCollectorHook(
             trace_file,
             iid,
@@ -1029,6 +1124,8 @@ class SessionRunner:
             pytest_runtime_dir=pytest_runtime_dir,
             pip_runtime_dir=pip_runtime_dir,
             pip_history_dir=pip_history_dir,
+            python_script_runtime_dir=python_script_runtime_dir,
+            python_script_history_dir=python_script_history_dir,
             exec_path_append=self.exec_config.path_append,
         )
 

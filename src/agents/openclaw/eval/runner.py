@@ -179,6 +179,9 @@ class SWEBenchRunner:
         capture_pip_runtime: bool = True,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
+        capture_python_script_runtime: bool = True,
+        python_script_runtime_dir: Path | None = None,
+        python_script_history_dir: Path | None = None,
     ) -> EvalResult:
         """Run a single evaluation task inside the prepared task container."""
         ws = task.workspace_dir
@@ -214,6 +217,9 @@ class SWEBenchRunner:
             capture_pip_runtime=capture_pip_runtime,
             pip_runtime_dir=pip_runtime_dir,
             pip_history_dir=pip_history_dir,
+            capture_python_script_runtime=capture_python_script_runtime,
+            python_script_runtime_dir=python_script_runtime_dir,
+            python_script_history_dir=python_script_history_dir,
         )
 
         content = result.content

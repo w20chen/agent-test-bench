@@ -250,3 +250,82 @@ Plan:
   collect-only phase as measured prediction overhead.
 - Run targeted tests and mandatory independent review because this touches the
   trace/evaluation collection path.
+
+## Python Script Runtime Prediction Update
+
+Objective: add an instance-scoped runtime predictor for `python *.py` tool
+commands, with history shared across attempts for the same benchmark instance.
+
+Plan:
+
+- Add `src/trace_collect/python_script_runtime_prediction.py`.
+- Recognize Python script invocations such as `python foo.py`,
+  `python3 -u eval.py`, `timeout 20 python3 /path/script.py`, and commands with
+  preceding `cd` / environment / venv activation segments.
+- Keep original command execution unchanged.
+- Write attempt-local artifacts under `attempt_N/python_script_runtime/`.
+- Store shared history under `run_dir/python_script_runtime_db/<instance_id>/`,
+  seeded into each attempt and merged back after successful prediction rows.
+- Predict from same instance history only, with fallbacks:
+  - same normalized invocation last run;
+  - same script path median;
+  - same script basename median;
+  - instance-global python-script median.
+- Update history only for successful commands without `||` fallback chains.
+- Add focused unit and wiring tests, then run mandatory independent review
+  because this touches trace/evaluation collection.
+
+Progress:
+
+- Added `trace_collect.python_script_runtime_prediction` with conservative
+  `python *.py` recognition, pre-execution prediction snapshots, bounded
+  history, shared-history seed/merge helpers, and realtime summary output.
+- Wired OpenClaw TraceCollectorHook, EvalRunner, task-container entrypoint,
+  collector, CLI, and trace metadata.
+- Added docs for artifact layout and CLI disable flag.
+- Added focused tests for recognition, fallback order, failed/or-chain history
+  exclusion, cross-attempt history reuse, trace hook artifact writing, and
+  task-container seed/merge wiring.
+- Validation so far:
+  - `python -m py_compile` for modified Python files passed.
+  - `python -m pytest tests\test_python_script_runtime_prediction.py
+    tests\test_session_runner_actions.py
+    tests\test_collector_task_container_runtime.py -q -p no:cacheprovider
+    --basetemp .tmp-tests\python-script-runtime-focused` passed with 19 tests.
+  - `python -m pytest tests\test_openclaw_runtime_selection.py
+    tests\test_collector_openclaw_metadata.py
+    tests\test_package_runtime_prediction.py -q -p no:cacheprovider
+    --basetemp .tmp-tests\python-script-runtime-expanded` passed with 29 tests.
+
+Review findings and fixes:
+
+- Reviewer found one major issue: compound shell commands could contaminate
+  python-script history by recording full tool wall time for `python script.py`
+  plus follow-up commands, or by masking failure through `; true` / pipelines.
+- Fixed by preserving artifacts but excluding commands with follow-up shell
+  segments from history updates; commands with `||` remain excluded.
+- Reviewer minor findings fixed:
+  - `python -V foo.py` / `python --version foo.py` are no longer recognized as
+    script runs;
+  - shared-history merge skips rows already finalized directly against shared
+    history to avoid double-add helper misuse.
+- Re-review found the same contamination class for nontrivial prefix work such
+  as `make data && python eval.py`. Fixed by tracking prefix work separately:
+  only `cd`, venv activation, comments/blanks, and pure env-assignment prefix
+  segments are considered history-safe.
+- Final re-review found unquoted newlines and single `&` were not treated as
+  shell separators. Fixed by splitting on newline and background `&`, with
+  regression tests for newline follow-ups and background commands.
+- Re-validation:
+  - `python -m pytest tests\test_python_script_runtime_prediction.py -q
+    -p no:cacheprovider --basetemp
+    .tmp-tests\python-script-runtime-regression3` passed with 16 tests.
+  - `python -m pytest tests\test_python_script_runtime_prediction.py
+    tests\test_session_runner_actions.py
+    tests\test_collector_task_container_runtime.py
+    tests\test_openclaw_runtime_selection.py
+    tests\test_collector_openclaw_metadata.py
+    tests\test_package_runtime_prediction.py -q -p no:cacheprovider
+    --basetemp .tmp-tests\python-script-runtime-final` passed with 58 tests.
+  - Modified-file `py_compile` passed.
+  - `git diff --check` passed with Windows line-ending warnings only.

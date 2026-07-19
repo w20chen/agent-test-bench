@@ -183,6 +183,17 @@ async def _run_openclaw(request: dict[str, Any]) -> dict[str, Any]:
             if request.get("pip_history_dir")
             else None
         ),
+        capture_python_script_runtime=bool(request.get("python_script_runtime_dir")),
+        python_script_runtime_dir=(
+            Path(request["python_script_runtime_dir"])
+            if request.get("python_script_runtime_dir")
+            else None
+        ),
+        python_script_history_dir=(
+            Path(request["python_script_history_dir"])
+            if request.get("python_script_history_dir")
+            else None
+        ),
     )
     total_llm_ms, total_tool_ms, total_tokens = _trace_summary_totals(
         Path(request["trace_file"])
