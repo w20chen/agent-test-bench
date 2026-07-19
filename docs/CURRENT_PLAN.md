@@ -133,3 +133,30 @@ finalizing.
 - Third review found no critical or major issues. Remaining minor limitation:
   the `PYTHONPATH` detector is conservative and may skip some harmless commands,
   which reduces collection coverage but does not alter benchmark semantics.
+
+## Reliability Update
+
+- Added schema v5 reliability and recommended prediction fields.
+- Added command `collected_counts` history, updated only for runs with observed
+  test nodes.
+- Added a rule-based selector: stable same-command Last Run, high-coverage
+  Per-Test, medium node-or-file Per-Test, then low-confidence Unknown fallback.
+- Updated realtime stdout, prediction artifacts, analyzer output, CSV export,
+  and trace-collect docs.
+- Validation so far:
+  - `python -m py_compile src\trace_collect\pytest_runtime_prediction.py
+    scripts\analyze_pytest_prediction.py tests\test_pytest_runtime_prediction.py
+    tests\test_analyze_pytest_prediction.py`
+  - `python -m pytest tests\test_pytest_runtime_prediction.py
+    tests\test_pytest_script_capture.py tests\test_session_runner_actions.py
+    tests\test_openclaw_eval_runner.py tests\test_analyze_pytest_prediction.py
+    -q -p no:cacheprovider --basetemp .tmp-tests\pytest-reliability-final`
+    passed with 43 tests.
+- Review found one major issue: old command history without collected counts
+  made Last Run reliability too confident. Fixed by downgrading that path to
+  `medium`.
+- Reviewer minor findings fixed:
+  - missing reliability in old schema rows is counted as `unavailable`;
+  - realtime stdout docs include recommended/reliability;
+  - added tests for old history, medium file fallback, old-schema analyzer
+    buckets, and JSONL recommended fields.

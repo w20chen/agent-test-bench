@@ -28,8 +28,11 @@ RUNTIME_JSON_FILENAME = "pytest_runtime.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
 PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
-PREDICTION_SCHEMA_VERSION = 4
-HISTORY_SCHEMA_VERSION = 4
+PREDICTION_SCHEMA_VERSION = 5
+HISTORY_SCHEMA_VERSION = 5
+KNOWN_NODE_HIGH_RATIO = 0.80
+KNOWN_OR_FILE_MEDIUM_RATIO = 0.80
+COMMAND_COUNT_STABLE_REL_DELTA = 0.10
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._+-]+")
 _EXIT_CODE_RE = re.compile(r"Exit code:\s*(-?\d+)")
@@ -548,6 +551,28 @@ def global_unknown_test_median(history: dict[str, Any]) -> float | None:
     return _median(durations if isinstance(durations, list) else [])
 
 
+def _last_command_collected_count(command_rec: Any) -> int | None:
+    if not isinstance(command_rec, dict):
+        return None
+    counts = command_rec.get("collected_counts")
+    if isinstance(counts, list):
+        for value in reversed(counts):
+            if isinstance(value, int) and value > 0:
+                return value
+            if isinstance(value, float) and value > 0 and value.is_integer():
+                return int(value)
+    value = command_rec.get("last_observed_test_count")
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _collected_count_delta_ratio(current: int, previous: int | None) -> float | None:
+    if previous is None or previous <= 0:
+        return None
+    return abs(float(current) - float(previous)) / float(previous)
+
+
 def file_history_median(history: dict[str, Any], file_path: str) -> float | None:
     values: list[float] = []
     for nodeid, rec in _history_tests(history).items():
@@ -604,6 +629,118 @@ def predict_test_duration_with_unknown_fallback(
     if project_median is not None:
         return project_median, "project"
     return None, "unavailable"
+
+
+def _source_ratio(source_counts: dict[str, int], source: str, total: int) -> float:
+    return 0.0 if total <= 0 else source_counts.get(source, 0) / total
+
+
+def compute_prediction_reliability(
+    *,
+    nodeids: list[str],
+    command_rec: dict[str, Any] | None,
+    predictions: dict[str, Any],
+) -> dict[str, Any]:
+    """Choose an interpretable recommended prediction from pre-run history."""
+    total = len(nodeids)
+    per_test_details = predictions.get("per_test_prediction_details")
+    unknown_details = predictions.get("unknown_test_fallback_prediction_details")
+    per_sources = [
+        str(detail.get("source") or "unavailable")
+        for detail in (per_test_details if isinstance(per_test_details, list) else [])
+        if isinstance(detail, dict)
+    ]
+    unknown_sources = [
+        str(detail.get("source") or "unavailable")
+        for detail in (unknown_details if isinstance(unknown_details, list) else [])
+        if isinstance(detail, dict)
+    ]
+    per_counts = {source: per_sources.count(source) for source in set(per_sources)}
+    unknown_counts = {
+        source: unknown_sources.count(source) for source in set(unknown_sources)
+    }
+    known_node_ratio = _source_ratio(per_counts, "nodeid", total)
+    file_fallback_ratio = _source_ratio(per_counts, "file", total)
+    project_fallback_ratio = _source_ratio(per_counts, "project", total)
+    unavailable_ratio = _source_ratio(per_counts, "unavailable", total)
+    unknown_fallback_ratio = _source_ratio(unknown_counts, "unknown", total)
+    known_or_file_ratio = known_node_ratio + file_fallback_ratio
+
+    previous_count = _last_command_collected_count(command_rec)
+    count_delta = _collected_count_delta_ratio(total, previous_count)
+    repeated_command = isinstance(predictions.get("prediction_last_run_s"), (int, float))
+
+    reasons: list[str] = []
+    method = "none"
+    value: float | None = None
+    level = "unavailable"
+    last_run = predictions.get("prediction_last_run_s")
+    per_test = predictions.get("prediction_per_test_s")
+    unknown_fallback = predictions.get("prediction_unknown_test_fallback_s")
+
+    if total <= 0:
+        reasons.append("no_collected_tests")
+    elif (
+        repeated_command
+        and isinstance(last_run, (int, float))
+        and count_delta is not None
+        and count_delta <= COMMAND_COUNT_STABLE_REL_DELTA
+    ):
+        method = "last_run"
+        value = float(last_run)
+        level = "high"
+        reasons.append("same_normalized_command_seen_before")
+        reasons.append("collected_count_stable")
+    elif repeated_command and isinstance(last_run, (int, float)) and count_delta is None:
+        method = "last_run"
+        value = float(last_run)
+        level = "medium"
+        reasons.append("same_normalized_command_seen_before")
+        reasons.append("previous_collected_count_unavailable")
+    elif isinstance(per_test, (int, float)) and known_node_ratio >= KNOWN_NODE_HIGH_RATIO:
+        method = "per_test"
+        value = float(per_test)
+        level = "high"
+        reasons.append("known_node_ratio_high")
+    elif (
+        isinstance(per_test, (int, float))
+        and known_or_file_ratio >= KNOWN_OR_FILE_MEDIUM_RATIO
+    ):
+        method = "per_test"
+        value = float(per_test)
+        level = "medium"
+        reasons.append("known_or_file_ratio_high")
+    elif isinstance(unknown_fallback, (int, float)):
+        method = "unknown_test_fallback"
+        value = float(unknown_fallback)
+        level = "low"
+        reasons.append("cold_start_or_project_fallback")
+    else:
+        reasons.append("no_available_prediction")
+
+    if repeated_command and count_delta is not None and count_delta > COMMAND_COUNT_STABLE_REL_DELTA:
+        reasons.append("same_command_collected_count_changed")
+    if project_fallback_ratio > 0:
+        reasons.append("project_fallback_used")
+    if unknown_fallback_ratio > 0:
+        reasons.append("unknown_test_fallback_used")
+    if unavailable_ratio > 0:
+        reasons.append("some_tests_unavailable")
+
+    return {
+        "level": level,
+        "reasons": reasons,
+        "known_node_ratio": known_node_ratio,
+        "file_fallback_ratio": file_fallback_ratio,
+        "project_fallback_ratio": project_fallback_ratio,
+        "unknown_fallback_ratio": unknown_fallback_ratio,
+        "unavailable_ratio": unavailable_ratio,
+        "repeated_command": repeated_command,
+        "previous_collected_count": previous_count,
+        "collected_count_delta_ratio": count_delta,
+        "recommended_method": method,
+        "recommended_prediction_s": value,
+    }
 
 
 def compute_pytest_predictions(
@@ -703,7 +840,7 @@ def compute_pytest_predictions(
         else unknown_without_overhead
     )
 
-    return {
+    result = {
         "command_key": command_key,
         "project_test_median_s": project_median,
         "project_overhead_median_s": overhead_median,
@@ -719,6 +856,15 @@ def compute_pytest_predictions(
         "prediction_unknown_test_fallback_s": unknown_with_overhead,
         "unknown_test_fallback_prediction_details": unknown_fallback_values,
     }
+    reliability = compute_prediction_reliability(
+        nodeids=nodeids,
+        command_rec=command_rec if isinstance(command_rec, dict) else None,
+        predictions=result,
+    )
+    result["prediction_reliability"] = reliability
+    result["prediction_recommended_s"] = reliability["recommended_prediction_s"]
+    result["prediction_recommended_method"] = reliability["recommended_method"]
+    return result
 
 
 def _bounded_append(values: list[Any], value: float) -> list[float]:
@@ -778,6 +924,10 @@ def update_pytest_history(
         command_rec["durations"] = _bounded_append(
             command_rec.get("durations") or [],
             total_duration_s,
+        )
+        command_rec["collected_counts"] = _bounded_append(
+            command_rec.get("collected_counts") or [],
+            float(observed_test_count),
         )
         command_rec["last_seen_at"] = updated["updated_at"]
         command_rec["last_observed_test_count"] = observed_test_count
@@ -885,6 +1035,7 @@ def finalize_pytest_runtime_prediction(
         "test_count": predictions["prediction_test_count_s"],
         "per_test": predictions["prediction_per_test_s"],
         "unknown_test_fallback": predictions["prediction_unknown_test_fallback_s"],
+        "recommended": predictions["prediction_recommended_s"],
     }
     absolute_error = {
         key: _absolute_error(value, actual_duration_s)
@@ -942,6 +1093,11 @@ def finalize_pytest_runtime_prediction(
         "unknown_test_fallback_prediction_details": predictions[
             "unknown_test_fallback_prediction_details"
         ],
+        "prediction_recommended_s": predictions["prediction_recommended_s"],
+        "prediction_recommended_method": predictions[
+            "prediction_recommended_method"
+        ],
+        "prediction_reliability": predictions["prediction_reliability"],
         "absolute_error": absolute_error,
         "relative_error": relative_error,
         "history_before": {
@@ -952,6 +1108,8 @@ def finalize_pytest_runtime_prediction(
             "project_unknown_test_median_s": predictions[
                 "project_unknown_test_median_s"
             ],
+            "recommended_method": predictions["prediction_recommended_method"],
+            "reliability_level": predictions["prediction_reliability"]["level"],
         },
         "warnings": warnings,
     }
@@ -1001,5 +1159,9 @@ def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
         f"count={_fmt(payload.get('prediction_test_count_s'))} count_err={_err('test_count')} "
         f"per_test={_fmt(payload.get('prediction_per_test_s'))} per_test_err={_err('per_test')} "
         f"unknown={_fmt(payload.get('prediction_unknown_test_fallback_s'))} "
-        f"unknown_err={_err('unknown_test_fallback')}"
+        f"unknown_err={_err('unknown_test_fallback')} "
+        f"recommended={payload.get('prediction_recommended_method')}:"
+        f"{_fmt(payload.get('prediction_recommended_s'))} "
+        f"rec_err={_err('recommended')} "
+        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'n/a')}"
     )

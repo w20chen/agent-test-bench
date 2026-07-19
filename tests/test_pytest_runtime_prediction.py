@@ -174,7 +174,10 @@ def test_prediction_methods_do_not_use_current_run() -> None:
             "tests/test_a.py::test_2": {"durations": [2.0]},
         },
         "commands": {
-            "pytest tests/test_a.py": {"durations": [4.0]},
+            "pytest tests/test_a.py": {
+                "durations": [4.0],
+                "collected_counts": [2],
+            },
         },
     }
 
@@ -187,6 +190,9 @@ def test_prediction_methods_do_not_use_current_run() -> None:
     assert predictions["prediction_last_run_s"] == pytest.approx(4.0)
     assert predictions["prediction_test_count_s"] == pytest.approx(3.0)
     assert predictions["prediction_per_test_s"] == pytest.approx(3.0)
+    assert predictions["prediction_recommended_s"] == pytest.approx(4.0)
+    assert predictions["prediction_recommended_method"] == "last_run"
+    assert predictions["prediction_reliability"]["level"] == "high"
 
 
 def test_command_history_ignores_runs_without_observed_tests() -> None:
@@ -198,6 +204,118 @@ def test_command_history_ignores_runs_without_observed_tests() -> None:
     )
 
     assert history["commands"] == {}
+
+
+def test_command_history_records_collected_counts_for_observed_runs() -> None:
+    history = update_pytest_history(
+        history={},
+        command="python -m pytest tests/test_a.py -v",
+        total_duration_s=1.5,
+        tests=[
+            {"nodeid": "tests/test_a.py::test_1", "duration_s": 0.1},
+            {"nodeid": "tests/test_a.py::test_2", "duration_s": 0.2},
+        ],
+    )
+
+    command = history["commands"]["pytest tests/test_a.py"]
+    assert command["durations"] == [1.5]
+    assert command["collected_counts"] == [2.0]
+    assert command["last_observed_test_count"] == 2
+
+
+def test_recommended_uses_per_test_when_last_run_count_changes() -> None:
+    history = {
+        "tests": {
+            "tests/test_a.py::test_1": {"durations": [1.0]},
+            "tests/test_a.py::test_2": {"durations": [2.0]},
+        },
+        "commands": {
+            "pytest tests/test_a.py": {
+                "durations": [100.0],
+                "collected_counts": [10],
+            }
+        },
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_a.py",
+        nodeids=["tests/test_a.py::test_1", "tests/test_a.py::test_2"],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_last_run_s"] == pytest.approx(100.0)
+    assert predictions["prediction_recommended_method"] == "per_test"
+    assert predictions["prediction_recommended_s"] == pytest.approx(3.0)
+    assert reliability["level"] == "high"
+    assert reliability["collected_count_delta_ratio"] == pytest.approx(0.8)
+    assert "same_command_collected_count_changed" in reliability["reasons"]
+
+
+def test_recommended_last_run_without_collected_count_is_medium() -> None:
+    history = {
+        "tests": {
+            "tests/test_a.py::test_1": {"durations": [1.0]},
+        },
+        "commands": {
+            "pytest tests/test_a.py": {"durations": [2.0]},
+        },
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_a.py",
+        nodeids=["tests/test_a.py::test_1"],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_recommended_method"] == "last_run"
+    assert predictions["prediction_recommended_s"] == pytest.approx(2.0)
+    assert reliability["level"] == "medium"
+    assert "previous_collected_count_unavailable" in reliability["reasons"]
+
+
+def test_recommended_uses_medium_file_history_path() -> None:
+    history = {
+        "tests": {
+            "tests/test_a.py::test_existing": {"durations": [1.0]},
+        },
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_a.py",
+        nodeids=["tests/test_a.py::test_new"],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_recommended_method"] == "per_test"
+    assert predictions["prediction_recommended_s"] == pytest.approx(1.0)
+    assert reliability["level"] == "medium"
+    assert reliability["file_fallback_ratio"] == 1.0
+
+
+def test_recommended_marks_cold_start_unknown_fallback_low_reliability() -> None:
+    history = {
+        "tests": {
+            "tests/test_known.py::test_fast": {"durations": [0.1]},
+        },
+        "overheads": {"durations": [1.0]},
+        "unknown_tests": {"durations": [5.0]},
+    }
+
+    predictions = compute_pytest_predictions(
+        history=history,
+        command="python -m pytest tests/test_new.py",
+        nodeids=["tests/test_new.py::test_new"],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_recommended_method"] == "unknown_test_fallback"
+    assert predictions["prediction_recommended_s"] == pytest.approx(6.0)
+    assert reliability["level"] == "low"
+    assert reliability["known_node_ratio"] == 0.0
+    assert reliability["unknown_fallback_ratio"] == 1.0
 
 
 def test_per_test_prediction_adds_historical_overhead() -> None:
@@ -301,10 +419,10 @@ def test_missing_and_corrupt_history_degrade_safely(tmp_path: Path) -> None:
     assert payload["prediction_last_run_s"] is None
     assert payload["prediction_test_count_s"] is None
     assert payload["prediction_per_test_s"] is None
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["warnings"]
     history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
-    assert history["schema_version"] == 4
+    assert history["schema_version"] == 5
     assert history["tests"]["tests/test_a.py::test_1"]["durations"] == [0.01]
     assert history["overheads"]["durations"] == pytest.approx([0.19])
 
@@ -360,6 +478,10 @@ def test_prediction_json_includes_pytest_output_but_jsonl_stays_compact(
         "test output\nExit code: 0"
     )
     assert "pytest_output" not in prediction_jsonl
+    assert prediction_jsonl["prediction_recommended_method"] == "none"
+    assert "prediction_reliability" in prediction_jsonl
+    assert "recommended" in prediction_jsonl["absolute_error"]
+    assert "recommended" in prediction_jsonl["relative_error"]
 
 
 def test_notrun_tests_are_not_added_to_history(tmp_path: Path) -> None:
@@ -486,11 +608,15 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
             "prediction_test_count_s": 5.0,
             "prediction_per_test_s": 9.0,
             "prediction_unknown_test_fallback_s": 11.0,
+            "prediction_recommended_s": 9.0,
+            "prediction_recommended_method": "per_test",
+            "prediction_reliability": {"level": "high"},
             "relative_error": {
                 "last_run": 0.2,
                 "test_count": 0.5,
                 "per_test": 0.1,
                 "unknown_test_fallback": 0.1,
+                "recommended": 0.1,
             },
         }
     )
@@ -500,6 +626,8 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     assert "count=5.00s count_err=50.0%" in line
     assert "per_test=9.00s per_test_err=10.0%" in line
     assert "unknown=11.00s unknown_err=10.0%" in line
+    assert "recommended=per_test:9.00s rec_err=10.0%" in line
+    assert "reliability=high" in line
 
 
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:
@@ -646,6 +774,8 @@ def test_small_project_generates_predictions_after_history(tmp_path: Path) -> No
     assert second["prediction_last_run_s"] == pytest.approx(0.1)
     assert second["prediction_test_count_s"] is not None
     assert second["prediction_per_test_s"] is not None
+    assert second["prediction_recommended_method"] == "last_run"
+    assert second["prediction_reliability"]["level"] == "high"
     assert (prediction_root / "history.json").exists()
     assert len((prediction_root / "predictions.jsonl").read_text().splitlines()) == 2
 

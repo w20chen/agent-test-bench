@@ -13,7 +13,9 @@ METHODS = (
     ("test_count", "Test Count"),
     ("per_test", "Per-Test Historical"),
     ("unknown_test_fallback", "Unknown-Test Fallback"),
+    ("recommended", "Recommended"),
 )
+RELIABILITY_LEVELS = ("high", "medium", "low", "unavailable")
 
 
 def _iter_prediction_files(root: Path) -> list[Path]:
@@ -44,6 +46,14 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 def _available_rows(rows: list[dict[str, Any]], method: str) -> list[dict[str, Any]]:
     key = f"prediction_{method}_s"
     return [row for row in rows if isinstance(row.get(key), (int, float))]
+
+
+def _reliability_level(row: dict[str, Any]) -> str:
+    reliability = row.get("prediction_reliability")
+    if not isinstance(reliability, dict):
+        return "unavailable"
+    level = reliability.get("level")
+    return str(level) if level in RELIABILITY_LEVELS else "unavailable"
 
 
 def _mae(rows: list[dict[str, Any]], method: str) -> float | None:
@@ -99,14 +109,24 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "prediction_unknown_test_fallback_s",
         "prediction_unknown_test_fallback_without_overhead_s",
         "prediction_unknown_test_fallback_overhead_s",
+        "prediction_recommended_s",
+        "prediction_recommended_method",
+        "prediction_reliability_level",
+        "known_node_ratio",
+        "file_fallback_ratio",
+        "project_fallback_ratio",
+        "unknown_fallback_ratio",
+        "collected_count_delta_ratio",
         "absolute_error_last_run",
         "absolute_error_test_count",
         "absolute_error_per_test",
         "absolute_error_unknown_test_fallback",
+        "absolute_error_recommended",
         "relative_error_last_run",
         "relative_error_test_count",
         "relative_error_per_test",
         "relative_error_unknown_test_fallback",
+        "relative_error_recommended",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -114,6 +134,7 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         for row in rows:
             abs_err = row.get("absolute_error") or {}
             rel_err = row.get("relative_error") or {}
+            reliability = row.get("prediction_reliability") or {}
             writer.writerow(
                 {
                     "source": row.get("_source"),
@@ -139,18 +160,36 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
                     "prediction_unknown_test_fallback_overhead_s": row.get(
                         "prediction_unknown_test_fallback_overhead_s"
                     ),
+                    "prediction_recommended_s": row.get("prediction_recommended_s"),
+                    "prediction_recommended_method": row.get(
+                        "prediction_recommended_method"
+                    ),
+                    "prediction_reliability_level": reliability.get("level"),
+                    "known_node_ratio": reliability.get("known_node_ratio"),
+                    "file_fallback_ratio": reliability.get("file_fallback_ratio"),
+                    "project_fallback_ratio": reliability.get(
+                        "project_fallback_ratio"
+                    ),
+                    "unknown_fallback_ratio": reliability.get(
+                        "unknown_fallback_ratio"
+                    ),
+                    "collected_count_delta_ratio": reliability.get(
+                        "collected_count_delta_ratio"
+                    ),
                     "absolute_error_last_run": abs_err.get("last_run"),
                     "absolute_error_test_count": abs_err.get("test_count"),
                     "absolute_error_per_test": abs_err.get("per_test"),
                     "absolute_error_unknown_test_fallback": abs_err.get(
                         "unknown_test_fallback"
                     ),
+                    "absolute_error_recommended": abs_err.get("recommended"),
                     "relative_error_last_run": rel_err.get("last_run"),
                     "relative_error_test_count": rel_err.get("test_count"),
                     "relative_error_per_test": rel_err.get("per_test"),
                     "relative_error_unknown_test_fallback": rel_err.get(
                         "unknown_test_fallback"
                     ),
+                    "relative_error_recommended": rel_err.get("recommended"),
                 }
             )
 
@@ -201,6 +240,20 @@ def main() -> None:
             f"{_fmt_seconds(_mae(valid_rows, method)):>10} "
             f"{_fmt_percent(_mape(valid_rows, method)):>10} "
             f"{_fmt_percent(_mape(long_rows, method)):>12}"
+        )
+    print()
+    print("Reliability buckets:")
+    for level in RELIABILITY_LEVELS:
+        bucket = [
+            row
+            for row in valid_rows
+            if _reliability_level(row) == level
+        ]
+        print(
+            f"  {level:<11} "
+            f"runs={len(bucket):>4} "
+            f"recommended_MAPE={_fmt_percent(_mape(bucket, 'recommended')):>8} "
+            f"recommended_MAE={_fmt_seconds(_mae(bucket, 'recommended')):>8}"
         )
 
     if args.csv is not None:

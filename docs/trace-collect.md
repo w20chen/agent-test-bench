@@ -534,7 +534,7 @@ load a temporary pytest plugin that writes per-node `nodeid`, `duration_s`, and
 pytest finishes, collect mode immediately prints a concise line like:
 
 ```text
-[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9%
+[pytest-predict] iter=17 tests=32 actual=220.40s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9% recommended=per_test:215.70s rec_err=2.1% reliability=high
 ```
 
 Artifacts are written as:
@@ -577,6 +577,56 @@ tests: node/file predictions are reused when available, but completely unseen
 tests use the median duration of earlier tests that were also unknown at
 prediction time, then add the same overhead term.
 
+Starting with `schema_version=5`, each row also includes an agent-aware
+recommended prediction and reliability explanation:
+
+```json
+{
+  "prediction_recommended_s": 215.7,
+  "prediction_recommended_method": "last_run",
+  "prediction_reliability": {
+    "level": "high",
+    "known_node_ratio": 0.92,
+    "file_fallback_ratio": 0.08,
+    "project_fallback_ratio": 0.0,
+    "unknown_fallback_ratio": 0.0,
+    "repeated_command": true,
+    "previous_collected_count": 32,
+    "collected_count_delta_ratio": 0.0,
+    "reasons": [
+      "same_normalized_command_seen_before",
+      "collected_count_stable"
+    ]
+  }
+}
+```
+
+The recommended prediction is not a weighted ensemble.  It is a small
+rule-based selector designed to expose when history is trustworthy:
+
+```text
+if Last Run is available and the previous same-command collected_count is known and changed by <=10%:
+    use Last Run, reliability=high
+elif Last Run is available but previous same-command collected_count is unavailable:
+    use Last Run, reliability=medium
+elif Per-Test is available and at least 80% of tests have exact node history:
+    use Per-Test, reliability=high
+elif Per-Test is available and at least 80% of tests have node-or-file history:
+    use Per-Test, reliability=medium
+elif Unknown-Test Fallback is available:
+    use Unknown-Test Fallback, reliability=low
+else:
+    prediction is unavailable
+```
+
+This layer is meant to reflect Code Agent behavior: repeated local pytest
+commands are usually best predicted by the previous same command, while changed
+test sets rely more on per-node history.  Cold-start tests are still predicted
+when possible, but are explicitly marked low reliability instead of being
+treated as equally trustworthy.  The command history stores both `durations`
+and `collected_counts`, and both are updated only for runs where at least one
+real test node was observed.
+
 Commands that explicitly assign or export `PYTHONPATH` are skipped by this
 prototype's runtime instrumentation, because that shell assignment can hide the
 temporary pytest plugin from pytest while still inheriting plugin-related
@@ -589,6 +639,11 @@ Summarize a run directory with:
 ```bash
 PYTHONPATH=src python scripts/analyze_pytest_prediction.py traces/swe-rebench/<model>/<run>
 ```
+
+The analyzer reports all baseline methods plus `Recommended`, then prints
+`high` / `medium` / `low` / `unavailable` reliability buckets.  With `--csv`,
+the exported rows include the recommended method, reliability level, fallback
+ratios, collected-count delta, and all absolute/relative errors.
 
 ---
 
