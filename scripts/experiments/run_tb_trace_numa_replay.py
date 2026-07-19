@@ -134,19 +134,31 @@ def build_command(args: argparse.Namespace, strategy: Strategy, output_dir: Path
 
 
 def read_trace_metadata(source_trace: Path) -> dict[str, object]:
+    metadata, _agent_id = read_trace_metadata_and_agent_id(source_trace)
+    return metadata
+
+
+def read_trace_metadata_and_agent_id(source_trace: Path) -> tuple[dict[str, object], str | None]:
+    metadata: dict[str, object] | None = None
     with source_trace.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             record = json.loads(line)
-            if record.get("type") != "trace_metadata":
-                raise SystemExit(f"first non-empty record is not trace_metadata: {source_trace}")
-            return record
+            if metadata is None:
+                if record.get("type") != "trace_metadata":
+                    raise SystemExit(f"first non-empty record is not trace_metadata: {source_trace}")
+                metadata = record
+                continue
+            if record.get("type") == "action" and record.get("agent_id"):
+                return metadata, str(record["agent_id"])
+    if metadata is not None:
+        return metadata, None
     raise SystemExit(f"empty trace: {source_trace}")
 
 
 def synthesize_task_source_from_trace(source_trace: Path, output_root: Path) -> Path:
-    metadata = read_trace_metadata(source_trace)
+    metadata, replay_agent_id = read_trace_metadata_and_agent_id(source_trace)
     instance_id = str(metadata.get("instance_id") or metadata.get("task_source_id") or "")
     task_source_path = str(metadata.get("task_source_path") or "")
     if not instance_id:
@@ -182,8 +194,15 @@ def synthesize_task_source_from_trace(source_trace: Path, output_root: Path) -> 
         "image_name": None,
         "docker_image": None,
     }
+    tasks = [task]
+    if replay_agent_id and replay_agent_id != instance_id:
+        alias = dict(task)
+        alias["instance_id"] = replay_agent_id
+        alias["task_id"] = instance_id
+        alias["trace_instance_id"] = instance_id
+        tasks.append(alias)
     task_source = output_root / "task_source.auto.json"
-    task_source.write_text(json.dumps([task], indent=2) + "\n", encoding="utf-8")
+    task_source.write_text(json.dumps(tasks, indent=2) + "\n", encoding="utf-8")
     return task_source
 
 
