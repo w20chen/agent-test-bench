@@ -133,6 +133,73 @@ def build_command(args: argparse.Namespace, strategy: Strategy, output_dir: Path
     return command
 
 
+def read_trace_metadata(source_trace: Path) -> dict[str, object]:
+    with source_trace.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("type") != "trace_metadata":
+                raise SystemExit(f"first non-empty record is not trace_metadata: {source_trace}")
+            return record
+    raise SystemExit(f"empty trace: {source_trace}")
+
+
+def synthesize_task_source_from_trace(source_trace: Path, output_root: Path) -> Path:
+    metadata = read_trace_metadata(source_trace)
+    instance_id = str(metadata.get("instance_id") or metadata.get("task_source_id") or "")
+    task_source_path = str(metadata.get("task_source_path") or "")
+    if not instance_id:
+        raise SystemExit("trace metadata has no instance_id; pass --task-source explicitly")
+    if not task_source_path:
+        raise SystemExit("trace metadata has no task_source_path; pass --task-source explicitly")
+    task_path = Path(task_source_path).expanduser()
+    if not task_path.exists():
+        inferred = infer_terminal_bench_task_path(source_trace, instance_id)
+        if inferred is None:
+            raise SystemExit(
+                f"trace task_source_path does not exist on this host: {task_path}. "
+                "Pass --task-source pointing at a valid terminal-bench tasks.json."
+            )
+        task_path = inferred
+
+    task = {
+        "instance_id": instance_id,
+        "task_id": str(metadata.get("task_source_id") or instance_id),
+        "dataset_root": str(task_path.parent),
+        "problem_statement": "",
+        "max_agent_timeout_sec": metadata.get("run_config", {}).get("global_agent_timeout_sec", 7200.0)
+        if isinstance(metadata.get("run_config"), dict)
+        else 7200.0,
+        "max_test_timeout_sec": 1800.0,
+        "task_source_kind": metadata.get("task_source_kind", "terminal_bench_trace"),
+        "task_source_id": metadata.get("task_source_id", instance_id),
+        "task_source_path": str(task_path),
+        "tb_dataset": metadata.get("tb_dataset"),
+        "tb_version": metadata.get("tb_version"),
+        "tb_registry_source": metadata.get("tb_registry_source"),
+        "repo": None,
+        "image_name": None,
+        "docker_image": None,
+    }
+    task_source = output_root / "task_source.auto.json"
+    task_source.write_text(json.dumps([task], indent=2) + "\n", encoding="utf-8")
+    return task_source
+
+
+def infer_terminal_bench_task_path(source_trace: Path, instance_id: str) -> Path | None:
+    for parent in [source_trace.parent, *source_trace.parents]:
+        candidates = [
+            parent / "_terminal_bench_run" / "_dataset_no_asciinema" / instance_id,
+            parent / "_dataset_no_asciinema" / instance_id,
+            parent / instance_id,
+        ]
+        for candidate in candidates:
+            if (candidate / "task.yaml").exists():
+                return candidate.resolve()
+    return None
+
+
 def expand_cpuset(cpuset: str) -> list[int]:
     cpus: list[int] = []
     for part in cpuset.split(","):
@@ -162,6 +229,8 @@ def main() -> None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_root = args.output_root / timestamp
     output_root.mkdir(parents=True, exist_ok=True)
+    if args.task_source is None:
+        args.task_source = synthesize_task_source_from_trace(args.source_trace, output_root)
 
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{REPO_ROOT / 'src'}{os.pathsep}{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
