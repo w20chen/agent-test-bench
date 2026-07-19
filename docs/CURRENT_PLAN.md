@@ -387,3 +387,27 @@ Progress:
   the combination rules.
 - Replaced duplicated concurrency/selection explanation with a pointer to the
   new combination rules.
+
+## Pip Redirection Parser Fix
+
+Objective: prevent shell redirection syntax from polluting pip package counts
+and normalized command keys.
+
+Progress:
+
+- Confirmed real rows such as `pip install -e . 2>&1 | tail -20` were parsed as
+  packages `[".", "2>&1"]`, inflating `package_count` and fragmenting history.
+- Added shell-redirection token detection for combined forms including
+  `2>&1`, `2>pip.log`, `>>pip.log`, `&>pip.log`, and input redirection.
+- Added parametrized regression tests.
+- Independent reviewer found no critical/major issues; minor adjacent-form test
+  coverage was added.
+- Validation:
+  - `python -m pytest tests\test_package_runtime_prediction.py -q
+    -p no:cacheprovider --basetemp .tmp-tests\pip-redirection-final` passed
+    with 23 tests.
+  - `python -m py_compile src\trace_collect\package_runtime_prediction.py
+    tests\test_package_runtime_prediction.py`
+  - `git diff --check -- src\trace_collect\package_runtime_prediction.py
+    tests\test_package_runtime_prediction.py` passed with Windows line-ending
+    warnings only.

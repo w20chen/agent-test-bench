@@ -69,6 +69,7 @@ _VALUE_FLAGS = {
     "--target",
 }
 _STOP_TOKENS = {"|", "||", ">", ">>", "<", "2>", "2>>", "&>"}
+_REDIRECTION_TOKEN_RE = re.compile(r"^(?:\d*)?(?:<|>|>>|<>|>&|<&|&>|&>>).*$")
 
 
 @dataclass(slots=True)
@@ -328,6 +329,10 @@ def _pip_install_tokens(
     return None
 
 
+def _is_shell_redirection_token(token: str) -> bool:
+    return token in _STOP_TOKENS or _REDIRECTION_TOKEN_RE.fullmatch(token) is not None
+
+
 def parse_pip_install_command(
     command: str,
     *,
@@ -348,7 +353,7 @@ def parse_pip_install_command(
     idx = 0
     while idx < len(args):
         token = args[idx]
-        if token in _STOP_TOKENS:
+        if _is_shell_redirection_token(token):
             break
         split_name, split_value = (
             token.split("=", 1)

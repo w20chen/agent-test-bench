@@ -45,6 +45,24 @@ def test_normalize_pip_install_sorts_packages_and_ignores_output_flags() -> None
     assert parsed.packages == ["numpy", "requests"]
 
 
+@pytest.mark.parametrize(
+    "redirection",
+    ["2>&1 | tail -20", "2>pip.log", ">>pip.log", "&>pip.log", "<requirements.txt"],
+)
+def test_normalize_pip_install_stops_at_shell_redirection(
+    redirection: str,
+) -> None:
+    parsed = parse_pip_install_command(
+        f"cd /testbed && pip install -e . {redirection}",
+        working_directory="/unused",
+    )
+
+    assert parsed is not None
+    assert parsed.normalized_command == "pip install . -e"
+    assert parsed.package_count == 1
+    assert parsed.packages == ["."]
+
+
 def test_normalize_pip_install_hashes_requirement_file(tmp_path: Path) -> None:
     requirements = tmp_path / "requirements.txt"
     requirements.write_text(
