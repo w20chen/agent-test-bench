@@ -91,7 +91,8 @@ def _utc_now() -> str:
 def _should_color_stdout() -> bool:
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return False
-    return sys.stdout.isatty()
+    isatty = getattr(sys.stdout, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
 
 
 def _ansi(text: str, color: str, *, enabled: bool) -> str:

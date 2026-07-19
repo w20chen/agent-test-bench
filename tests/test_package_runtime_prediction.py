@@ -8,6 +8,7 @@ from threading import Thread
 
 import pytest
 
+import trace_collect.package_runtime_prediction as pip_pred
 from trace_collect.package_runtime_prediction import (
     LOCK_STALE_AFTER_S,
     compute_pip_predictions,
@@ -20,6 +21,14 @@ from trace_collect.package_runtime_prediction import (
     seed_pip_history_from_shared,
     update_pip_history,
 )
+
+
+class _StdoutWithoutIsatty:
+    def write(self, data: str) -> int:
+        return len(data)
+
+    def flush(self) -> None:
+        return None
 
 
 def test_pip_install_command_recognition() -> None:
@@ -192,6 +201,12 @@ def test_format_pip_prediction_summary_color_is_opt_in() -> None:
     assert "\033[" in colored
     assert "[pip-predict]" in colored
     assert "recommended=\033[" in colored
+
+
+def test_pip_color_detection_handles_tee_stdout_without_isatty(monkeypatch) -> None:
+    monkeypatch.setattr(pip_pred.sys, "stdout", _StdoutWithoutIsatty())
+
+    assert pip_pred._should_color_stdout() is False
 
 
 def test_update_history_skips_failed_runs_for_future_predictions() -> None:

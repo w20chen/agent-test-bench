@@ -8,6 +8,7 @@ import pytest
 
 from agents.openclaw._session_runner import TraceCollectorHook
 from agents.openclaw.tools.shell import ExecTool
+import trace_collect.pytest_runtime_prediction as pytest_pred
 from trace_collect.pytest_runtime_prediction import (
     HIDDEN_RUNTIME_DIR_ARG,
     compute_pytest_predictions,
@@ -25,6 +26,14 @@ from trace_collect.pytest_runtime_prediction import (
     prepare_pytest_runtime_prediction_before_tool,
     update_pytest_history,
 )
+
+
+class _StdoutWithoutIsatty:
+    def write(self, data: str) -> int:
+        return len(data)
+
+    def flush(self) -> None:
+        return None
 
 
 class _StubResponse:
@@ -652,6 +661,12 @@ def test_realtime_summary_color_is_opt_in() -> None:
     assert "\033[" in colored
     assert "[pytest-predict]" in colored
     assert "recommended=\033[" in colored
+
+
+def test_pytest_color_detection_handles_tee_stdout_without_isatty(monkeypatch) -> None:
+    monkeypatch.setattr(pytest_pred.sys, "stdout", _StdoutWithoutIsatty())
+
+    assert pytest_pred._should_color_stdout() is False
 
 
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:
