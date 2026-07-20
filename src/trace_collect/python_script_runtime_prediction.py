@@ -973,7 +973,7 @@ def format_python_script_prediction_summary(payload: dict[str, Any]) -> str:
 
     def _strat(label: str, pred_key: str, err_key: str) -> str:
         val = payload.get(pred_key)
-        arrow = "\u2192" if err_key == recommended else " "
+        arrow = "\u2192" if (err_key == recommended and val is not None) else " "
         return f"{arrow}{label}={_s(val)}({_pct(err_key)})"
 
     parts = [
