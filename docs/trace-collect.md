@@ -178,7 +178,7 @@ The repo also ships a standalone CLI for one-shot prompts without the harness:
 PYTHONPATH=src python -m agents.openclaw \
     --prompt "Write a Python script to download web page and parse title" \
     --provider deepseek \
-    --model deepseek-chat \
+    --model deepseek-v4-flash \
     --workspace ./workspace
 ```
 
@@ -1346,7 +1346,7 @@ placements from the full configured core list. Interleaved phases split the
 configured core list inside each LLC cluster, alternating A/B assignments so a
 cluster such as `0,2,4,6` receives two A cores and two B cores.
 
-Recommended inspected cases from `C:\Users\29068\Desktop\agent_datasets`:
+Recommended inspected cases from `swe-rebench`:
 
 | Role | Case | Observed duration | Rationale |
 |---|---|---:|---|
@@ -1356,8 +1356,8 @@ Recommended inspected cases from `C:\Users\29068\Desktop\agent_datasets`:
 Example:
 
 ```bash
-export SOURCE_TRACES_DIR_A=/mnt/c/Users/29068/Desktop/agent_datasets/swe-rebench/AI4S2S__lilio-49/attempt_1
-export SOURCE_TRACES_DIR_B=/mnt/c/Users/29068/Desktop/agent_datasets/swe-rebench/Azure__azure-cli-2955/attempt_1
+export SOURCE_TRACES_DIR_A=/path/to/dataset/swe-rebench/AI4S2S__lilio-49/attempt_1
+export SOURCE_TRACES_DIR_B=/path/to/dataset/swe-rebench/Azure__azure-cli-2955/attempt_1
 export WORKLOAD_A_LABEL=cpu-memory-heavy
 export WORKLOAD_B_LABEL=llm-heavy
 export SWEEP_VALUES="40 80 160 320"
@@ -1656,7 +1656,7 @@ the agent and stops it (SIGINT) when the agent finishes.
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
     --provider openai \
-    --model deepseek-chat \
+    --model deepseek-v4-flash \
     --benchmark swe-rebench \
     --scaffold openclaw \
     --container docker \

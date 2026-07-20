@@ -1,8 +1,7 @@
 # Runtime Prediction
 
 > Predicts execution time for pip install, Python script, and pytest commands
-> using bounded history collected from prior attempts.  Predictions are
-> passive: they do not modify tool commands or the execution environment.
+> using bounded history collected from prior attempts.
 
 ---
 

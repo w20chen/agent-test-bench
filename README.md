@@ -153,6 +153,7 @@ the [simulate section](docs/trace-collect.md#simulate-trace-replay).
 | [VTune Profiling](docs/vtune-profiling.md) | Per-tool VTune setup, architecture, and output format |
 | [Script Inventory](docs/scripts.md) | Purpose and stability of scripts under `scripts/` |
 | [Kunpeng LLC Experiments](docs/kunpeng-llc-experiments.md) | LLC-related experiments on Kunpeng |
+| [Runtime Prediction](docs/runtime-prediction.md) | Predicting execution time for pip install, Python script, and pytest commands |
 
 ## Supported Benchmarks
 
