@@ -4,7 +4,7 @@
 > For benchmark descriptions, see [Benchmarks](benchmarks.md).
 > For environment setup, see [Getting Started](getting-started.md).
 
-Run an agent scaffold on a benchmark and record a canonical v5 JSONL trace per
+Run an agent scaffold on a benchmark and record a canonical JSONL trace per
 task. The CLI requires an explicit `--provider` and `--model` and loads
 benchmark specifics from `configs/benchmarks/<slug>.yaml`.
 
@@ -71,8 +71,7 @@ PYTHONPATH=src python -m trace_collect.cli \
 
 ### CLI Flags Reference
 
-The table below lists the most commonly used flags. For the complete
-reference, see `src/trace_collect/CLAUDE.md`.
+The table below lists the most commonly used flags.
 
 | Flag | Description |
 |------|-------------|
@@ -96,9 +95,6 @@ reference, see `src/trace_collect/CLAUDE.md`.
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |
 | `--model` | Model identifier |
-
-See `src/trace_collect/CLAUDE.md` for the complete flag reference, provider
-registry, checkpointing behavior, and trace schema v5 layout.
 
 ### Task Selection Rules
 
@@ -187,9 +183,9 @@ PYTHONPATH=src python -m agents.openclaw \
 ```
 
 Use `--async` for background runs and `--status --session-id <id>` to check
-progress (see `openclaw --help`).
+progress (see `python -m agents.openclaw --help`).
 
-### Deep Research Bench
+### [Deep Research Bench](https://huggingface.co/datasets/muset-ai/DeepResearch-Bench-Dataset)
 
 The deep research benchmark is a host-mode benchmark — it does not require
 Docker containers. The following example demonstrates a typical invocation:
@@ -221,8 +217,7 @@ Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
 
 Use `--run-id <path>` to write into an existing run directory. This is the
 normal way to resume an interrupted run or to append extra attempts while
-keeping run-scoped history databases such as `pip_runtime_db/` and
-`python_script_runtime_db/` / `pytest_runtime_db/`.
+keeping run-scoped history databases such as `pip_runtime_db/`, `python_script_runtime_db/`, and `pytest_runtime_db/`.
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
@@ -231,7 +226,7 @@ PYTHONPATH=src python -m trace_collect.cli \
     --benchmark swe-rebench \
     --scaffold openclaw \
     --mcp-config none \
-    --run-id traces/swe-rebench/deepseek-v4-flash/20260624T180504
+    --run-id traces/swe-rebench/deepseek-v4-flash/<timestamp>
 ```
 
 By default, terminal instances are skipped. Add `--rerun-completed` when you
@@ -244,7 +239,7 @@ PYTHONPATH=src python -m trace_collect.cli \
     --benchmark swe-rebench \
     --scaffold openclaw \
     --mcp-config none \
-    --run-id traces/swe-rebench/deepseek-v4-flash/20260624T180504 \
+    --run-id traces/swe-rebench/deepseek-v4-flash/<timestamp> \
     --rerun-completed
 ```
 
@@ -488,297 +483,10 @@ row per captured pytest invocation for downstream timing analysis.  This is
 enabled by default in collect mode; pass `--no-capture-pytest-scripts` to
 disable it.
 
-The same SWE-style OpenClaw collect path also records a minimal pytest runtime
-prediction prototype under `pytest_runtime/`.  Matching `exec-pytest` commands
-first run an explicit pre-execution `pytest --collect-only` command with a
-temporary pytest plugin to identify the nodeids available at prediction time.
-The collect-only invocation is run as an argument vector in the tool working
-directory using the same runtime environment preparation as the OpenClaw shell
-tool, including task-container `PYTHONUSERBASE` and PATH handling. It redirects
-pytest cache into the prediction artifact directory and removes known
-output-producing/reporting flags such as `--junitxml`, `--html`, `--cov`, and
-`--cov-report` to avoid perturbing the target workspace. The
-artifact cache override is placed after retained pytest args so user
-`cache_dir` overrides cannot redirect collect-only cache writes back into the
-target workspace. Cache-dependent selectors such as `--lf` / `--last-failed`
-are treated as unsupported for pre-execution nodeid prediction because dropping
-or redirecting their cache would change the selected test set. Shell `timeout`
-prefixes are enforced by the collect-only subprocess timeout. The
-original pytest tool command still runs afterward as requested by the agent and
-loads the same kind of temporary plugin to write per-node `nodeid`,
-`duration_s`, and `outcome` data. After each pytest finishes, collect mode
-immediately prints a concise line like:
-
-```text
-[pytest-predict] iter=17 tests=32 actual=220.40s collect_overhead=4.20s last=205.10s last_err=6.9% count=143.80s count_err=34.8% per_test=215.70s per_test_err=2.1% unknown=218.40s unknown_err=0.9% recommended=per_test:215.70s rec_err=2.1% reliability=high
-```
-
-Artifacts are written as:
-
-```text
-pytest_runtime_db/
-  <instance_scope>/history.json
-  family/<family_scope>/history.json
-attempt_N/pytest_runtime/
-  history.json
-  predictions.jsonl
-  iter_0017_exec-pytest_<tool_call_id>/
-    pending.json
-    collect_only/
-      pytest_collect_only.json
-    pytest_runtime.json
-    prediction.json
-    instrumentation.json
-```
-
-In task-container mode, pytest prediction keeps two run-scoped history buckets:
-an exact instance bucket and a conservative family bucket. Attempts seed their
-local `history.json` from the instance bucket when it exists; otherwise they use
-the family bucket for cold-start sharing across related tasks. Successful rows
-are merged back into both buckets after the attempt finishes.
-
-`pending.json` snapshots the history-derived prediction before the pytest tool
-command executes, including the collect-only command metadata, pre-execution
-nodeids, and `prediction_overhead_s`. `prediction.json` then preserves the
-actual wall duration, test collection, per-test durations/outcomes, the
-pre-execution prediction baselines, absolute / relative errors, and
-`pytest_output.text`, which is the captured shell-tool output for that pytest
-invocation. `predictions.jsonl` appends compact per-run rows and omits the full
-pytest output to keep aggregate scans cheap.
-
-The extra prediction cost is reported explicitly:
-
-```text
-collect_only_duration_s                 wall time spent by pytest --collect-only
-prediction_overhead_s                   same value, carried as prediction overhead
-total_duration_with_prediction_overhead_s actual pytest runtime plus collect-only overhead
-```
-
-The analyzer prints average collect-only overhead across all finalized pytest
-rows with overhead metadata, including cold-start rows where no prediction was
-available. CSV export also includes those rows so prediction accuracy and
-prediction cost can be audited separately.
-
-Future unknown-test calibration is based on the same pre-execution history
-snapshot saved in `pending.json`, not on history changes observed after the
-tool starts.
-
-`prediction_last_run_s` is keyed by `normalized_command`.  Starting with
-`schema_version=4`, this key strips interpreter-path differences and stdout
-post-processing such as `| head`, `| tail`, and `| grep`, while preserving
-timeout values, test targets, `-k` / `-m` selectors, plugin/config flags, and
-selection-changing flags such as `--ignore`.  Order-independent targets and
-ignore/deselect flags are sorted before the key is written; this keys by the
-selected test set, not by pytest execution order.  Command-level Last Run
-history is updated only when the runtime plugin observes at least one test
-node, so early failures that produce no pytest runtime JSON do not pollute
-later command-duration predictions.  Starting with
-`schema_version=2`, `prediction_per_test_s` is an
-overhead-adjusted per-test estimate: the sum of historical node/file/project
-test durations plus the recent median pytest overhead, where overhead is
-`actual_duration_s - sum(observed test duration_s)`.  The unadjusted sum is
-kept as `prediction_per_test_without_overhead_s`, and the added overhead is
-kept as `prediction_per_test_overhead_s`.  Starting with `schema_version=3`,
-`prediction_unknown_test_fallback_s` adds a fourth baseline for cold-start
-tests: node/file predictions are reused when available, but completely unseen
-tests use the median duration of earlier tests that were also unknown at
-prediction time, then add the same overhead term.
-
-Starting with `schema_version=5`, each row also includes an agent-aware
-recommended prediction and reliability explanation:
-
-```json
-{
-  "prediction_recommended_s": 215.7,
-  "prediction_recommended_method": "last_run",
-  "prediction_reliability": {
-    "level": "high",
-    "known_node_ratio": 0.92,
-    "file_fallback_ratio": 0.08,
-    "project_fallback_ratio": 0.0,
-    "unknown_fallback_ratio": 0.0,
-    "repeated_command": true,
-    "previous_collected_count": 32,
-    "collected_count_delta_ratio": 0.0,
-    "reasons": [
-      "same_normalized_command_seen_before",
-      "collected_count_stable"
-    ]
-  }
-}
-```
-
-The recommended prediction is not a weighted ensemble.  It is a small
-rule-based selector designed to expose when history is trustworthy:
-
-```text
-if Last Run is available and the previous same-command collected_count is known and changed by <=10%:
-    use Last Run, reliability=high
-elif Last Run is available but the current test set is not known before execution:
-    use Last Run, reliability=medium
-elif Last Run is available but previous same-command collected_count is unavailable:
-    use Last Run, reliability=medium
-elif Per-Test is available and at least 80% of tests have exact node history:
-    use Per-Test, reliability=high
-elif Per-Test is available and at least 80% of tests have node-or-file history:
-    use Per-Test, reliability=medium
-elif Unknown-Test Fallback is available:
-    use Unknown-Test Fallback, reliability=low
-elif pytest collected one or more test nodes but no pre-execution history can
-predict them yet:
-    mark as coldstart
-else:
-    mark as error
-```
-
-This layer is meant to reflect Code Agent behavior: repeated local pytest
-commands are usually best predicted by the previous same command, while changed
-test sets rely more on per-node history.  Cold-start tests are still predicted
-when possible, but are explicitly marked low reliability instead of being
-treated as equally trustworthy.  The command history stores both `durations`
-and `collected_counts`, and both are updated only for runs where at least one
-real test node was observed.
-
-Commands that explicitly assign or export `PYTHONPATH` are skipped by this
-prototype's runtime instrumentation, because that shell assignment can hide the
-temporary pytest plugin from pytest while still inheriting plugin-related
-environment variables.  Runtime prediction is enabled by default in collect
-mode; pass `--no-capture-pytest-runtime` to disable plugin injection,
-prediction artifacts, and realtime `[pytest-predict]` stdout lines.
-
-Summarize a run directory with:
-
-```bash
-PYTHONPATH=src python scripts/analyze_pytest_prediction.py traces/swe-rebench/<model>/<run>
-```
-
-The analyzer reports all baseline methods plus `Recommended`, then prints
-`high` / `medium` / `low` / `coldstart` / `error` reliability buckets.  Legacy
-rows without reliability metadata may still appear as `unavailable`.  With
-`--csv`, the exported rows include the recommended method, reliability level,
-fallback ratios, collected-count delta, and all absolute/relative errors.
-
-#### `pip install` Tool Invocation
-
-The OpenClaw collect path also records compact runtime prediction artifacts for
-supported `pip install` commands under `pip_runtime/`. This is a passive
-trace-collection feature: it does not wrap the command, inject environment
-variables, modify tool arguments, or change package installation semantics.
-It recognizes common forms such as `pip install ...`, `pip3 install ...`, and
-`python -m pip install ...`.
-
-Pip prediction learns from run-scoped history databases. In task-container
-mode, the host keeps an exact instance bucket plus a conservative family bucket
-built from available task metadata such as repo, image-family label, Python
-version, and install config. Attempts seed local history from the instance bucket when
-available, otherwise from the family bucket; successful prediction rows are
-merged back into both. Per-attempt directories still hold the invocation
-artifacts needed for audit.
-
-After each supported invocation finishes, collect mode prints one summary line
-with all simple baselines and their relative errors:
-
-```text
-[pip-predict] iter=4 packages=2 actual=10.00s last=9.00s last_err=10.0% package_count=11.00s package_count_err=10.0% global=8.00s global_err=20.0% recommended=package_count:11.00s rec_err=10.0% reliability=medium
-```
-
-Artifacts are written as:
-
-```text
-pip_runtime_db/
-  <instance_scope>/history.json
-  family/<family_scope>/history.json
-attempt_N/pip_runtime/
-  predictions.jsonl
-  iter_0004_exec-pip_<tool_call_id>/
-    pending.json
-    prediction.json
-```
-
-`<instance_scope>` and `<family_scope>` are filesystem-safe labels with short
-hash suffixes to avoid collisions between different raw scope values.
-
-`pending.json` snapshots the normalized command and predictions before the pip
-command executes, including the history path used for that prediction.
-`prediction.json` then adds the observed wall duration, exit code, success
-metadata, absolute / relative errors, and whether the run was admitted into
-history. `predictions.jsonl` appends the same compact per-run rows for
-aggregate scans.
-
-The predictor intentionally keeps only three simple baselines:
-
-```text
-if the same normalized pip command has prior successful history:
-    use Last Run, reliability=high
-elif package_count is available and prior per-package history exists:
-    use Package Count, reliability=medium
-elif any prior successful pip install duration exists:
-    use Global Median, reliability=low
-else:
-    prediction is unavailable
-```
-
-`normalized_command` sorts explicit package arguments and hashes readable
-requirement files, so `python -m pip install -r requirements.txt` is keyed by
-the dependency file content rather than by the raw shell spelling. The shared
-history is updated only for successful installs. Commands with nonzero
-`Exit code` do not enter history, and commands containing `||` fallback chains
-are recorded but excluded from history updates because the final shell status
-can mask a failed pip invocation.
-
-Pip runtime prediction is enabled by default in collect mode; pass
-`--no-capture-pip-runtime` to disable `pip_runtime/` artifacts and realtime
-`[pip-predict]` stdout lines.
-
-#### Python Script Tool Invocation
-
-Collect mode also records compact runtime prediction artifacts for supported
-`python *.py` script commands under `python_script_runtime/`. This feature is
-passive: it does not wrap commands, inject environment variables, edit tool
-arguments, or change Python execution semantics. It intentionally excludes
-`python -c`, heredoc scripts, and `python -m ...`; only file-backed script
-invocations such as `python eval.py`, `python3 -u /app/explorer.py`, and
-`timeout 20 python3 script.py` are admitted.
-
-Python script prediction uses the same two-bucket sharing pattern as pip:
-instance history is preferred, family history is used for cold starts, and
-successful rows are merged into both after the attempt finishes.
-
-Artifacts are written as:
-
-```text
-python_script_runtime_db/
-  <instance_scope>/history.json
-  family/<family_scope>/history.json
-attempt_N/python_script_runtime/
-  predictions.jsonl
-  iter_0004_python-script_<tool_call_id>/
-    pending.json
-    prediction.json
-```
-
-The predictor uses only pre-execution history:
-
-```text
-if the same normalized script invocation has prior successful history:
-    use Last Run, reliability=high
-elif the same script path has prior successful history:
-    use Script Path Median, reliability=medium
-elif the same script basename has prior successful history:
-    use Basename Median, reliability=low
-elif any prior successful python-script duration exists for this instance:
-    use Global Median, reliability=low
-else:
-    prediction is unavailable
-```
-
-History is updated only for successful commands. Commands with nonzero
-`Exit code` and commands containing `||` fallback chains are recorded but do
-not enter history, because the final shell status may mask a failed script run.
-
-Python script runtime prediction is enabled by default in collect mode; pass
-`--no-capture-python-script-runtime` to disable `python_script_runtime/`
-artifacts and realtime `[python-script-predict]` stdout lines.
+Collect mode also records minimal runtime prediction artifacts for pytest,
+pip install, and Python script commands.  Prediction algorithms, artifact
+layouts, CLI flags, knowledge-base reuse, and the analysis script are documented
+in [Runtime Prediction](runtime-prediction.md).
 
 ---
 
