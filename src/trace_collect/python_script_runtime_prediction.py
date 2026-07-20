@@ -464,11 +464,20 @@ def _history_tool(history: dict[str, Any]) -> dict[str, Any]:
 def compute_python_script_predictions(
     *,
     history: dict[str, Any],
+    family_history: dict[str, Any] | None = None,
     normalized_command: str,
     script_path: str,
     script_basename: str,
 ) -> dict[str, Any]:
-    """Compute instance-scoped Python script runtime predictions."""
+    """Compute instance-scoped Python script runtime predictions.
+
+    Baselines (cascading priority):
+    1. ``last_run`` (instance history, ``high``)
+    2. ``family_last_run`` (same-repo siblings, ``medium``) — NEW
+    3. ``script_path_median`` (``medium``)
+    4. ``basename_median`` (``low``)
+    5. ``global_median`` (``low``)
+    """
 
     command_rec = _history_commands(history).get(normalized_command)
     command_durations = (
@@ -482,6 +491,22 @@ def compute_python_script_predictions(
         if command_durations and isinstance(command_durations[-1], (int, float))
         else None
     )
+
+    family_last_run: float | None = None
+    if family_history is not None:
+        family_command_rec = _history_commands(family_history).get(normalized_command)
+        family_durations = (
+            family_command_rec.get("durations")
+            if isinstance(family_command_rec, dict)
+            and isinstance(family_command_rec.get("durations"), list)
+            else []
+        )
+        family_last_run = (
+            float(family_durations[-1])
+            if family_durations and isinstance(family_durations[-1], (int, float))
+            else None
+        )
+
     script_rec = _history_scripts(history).get(script_path)
     script_median = _median(
         script_rec.get("durations")
@@ -505,6 +530,10 @@ def compute_python_script_predictions(
         recommended = last_run
         method = "last_run"
         reliability = "high"
+    elif family_last_run is not None:
+        recommended = family_last_run
+        method = "family_last_run"
+        reliability = "medium"
     elif script_median is not None:
         recommended = script_median
         method = "script_path_median"
@@ -519,6 +548,7 @@ def compute_python_script_predictions(
         reliability = "low" if global_median is not None else "unavailable"
     return {
         "prediction_last_run_s": last_run,
+        "prediction_family_last_run_s": family_last_run,
         "prediction_script_path_median_s": script_median,
         "prediction_basename_median_s": basename_median,
         "prediction_global_median_s": global_median,
@@ -573,6 +603,7 @@ def prepare_python_script_runtime_prediction_before_tool(
     *,
     prediction_root: Path,
     history_root: Path | None = None,
+    family_history_root: Path | None = None,
     iteration: int,
     tool_call_id: str,
     tool_name: str,
@@ -602,8 +633,17 @@ def prepare_python_script_runtime_prediction_before_tool(
     invocation_dir.mkdir(parents=True, exist_ok=True)
     history_path = _history_path(history_root, prediction_root)
     history, history_warning = _load_json(history_path)
+    family_history: dict[str, Any] | None = None
+    if family_history_root is not None:
+        family_history_path = _history_path(family_history_root, prediction_root)
+        family_history, _family_warning = _load_json(family_history_path)
+    else:
+        family_history_path = prediction_root / "family_history.json"
+        if family_history_path.exists():
+            family_history, _family_warning = _load_json(family_history_path)
     predictions = compute_python_script_predictions(
         history=history,
+        family_history=family_history,
         normalized_command=parsed.normalized_command,
         script_path=parsed.script_path,
         script_basename=parsed.script_basename,
@@ -656,6 +696,28 @@ def seed_python_script_history_from_shared(
         return
     if history:
         _write_json(attempt_history_path, history)
+
+
+def seed_python_script_family_history_from_shared(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Copy shared family Python script history into ``family_history.json``."""
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    attempt_family_path = attempt_prediction_root / "family_history.json"
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+    if warning:
+        return
+    if history:
+        attempt_family_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = attempt_family_path.with_name(
+            f".{attempt_family_path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}"
+        )
+        tmp_path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(attempt_family_path)
 
 
 def merge_python_script_predictions_into_shared_history(
@@ -796,6 +858,7 @@ def finalize_python_script_runtime_prediction(
         if isinstance(pending.get("predictions"), dict)
         else {
             "prediction_last_run_s": None,
+            "prediction_family_last_run_s": None,
             "prediction_script_path_median_s": None,
             "prediction_basename_median_s": None,
             "prediction_global_median_s": None,
@@ -806,6 +869,7 @@ def finalize_python_script_runtime_prediction(
     )
     prediction_values = {
         "last_run": predictions["prediction_last_run_s"],
+        "family_last_run": predictions["prediction_family_last_run_s"],
         "script_path_median": predictions["prediction_script_path_median_s"],
         "basename_median": predictions["prediction_basename_median_s"],
         "global_median": predictions["prediction_global_median_s"],
@@ -891,35 +955,38 @@ def finalize_python_script_runtime_prediction(
 
 
 def format_python_script_prediction_summary(payload: dict[str, Any]) -> str:
-    """Return a compact human-readable prediction line."""
+    """Return a compact human-readable prediction line showing all strategies."""
 
     actual = payload.get("actual_duration_s")
     if not isinstance(actual, (int, float)):
         return ""
     rel = payload.get("relative_error") or {}
+    recommended = payload.get("prediction_recommended_method", "?")
+    reliability = (payload.get("prediction_reliability") or {}).get("level", "?")
 
-    def _fmt(value: Any) -> str:
-        return "n/a" if value is None else f"{float(value):.2f}s"
+    def _s(value: Any) -> str:
+        return "?" if value is None else f"{float(value):.1f}s"
 
-    def _err(method: str) -> str:
-        value = rel.get(method)
-        return "n/a" if value is None else f"{float(value) * 100:.1f}%"
+    def _pct(method: str) -> str:
+        v = rel.get(method)
+        return "?" if v is None else f"{float(v) * 100:+.1f}%"
 
-    return (
-        "[python-script-predict] "
-        f"iter={payload.get('iteration')} "
-        f"script={payload.get('script_basename')} "
-        f"actual={_fmt(actual)} "
-        f"last={_fmt(payload.get('prediction_last_run_s'))} "
-        f"last_err={_err('last_run')} "
-        f"script={_fmt(payload.get('prediction_script_path_median_s'))} "
-        f"script_err={_err('script_path_median')} "
-        f"basename={_fmt(payload.get('prediction_basename_median_s'))} "
-        f"basename_err={_err('basename_median')} "
-        f"global={_fmt(payload.get('prediction_global_median_s'))} "
-        f"global_err={_err('global_median')} "
-        f"recommended={payload.get('prediction_recommended_method')}:"
-        f"{_fmt(payload.get('prediction_recommended_s'))} "
-        f"rec_err={_err('recommended')} "
-        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'unavailable')}"
-    )
+    def _strat(label: str, pred_key: str, err_key: str) -> str:
+        val = payload.get(pred_key)
+        if val is None:
+            return ""
+        arrow = "\u2192" if err_key == recommended else " "
+        return f"{arrow}{label}={_s(val)}({_pct(err_key)})"
+
+    parts = [
+        f"[py-predict] #{payload.get('iteration')}",
+        f"{payload.get('script_basename')}",
+        f"| {_s(actual)} actual",
+        _strat("last", "prediction_last_run_s", "last_run"),
+        _strat("fam", "prediction_family_last_run_s", "family_last_run"),
+        _strat("path", "prediction_script_path_median_s", "script_path_median"),
+        _strat("name", "prediction_basename_median_s", "basename_median"),
+        _strat("glob", "prediction_global_median_s", "global_median"),
+        f"| {reliability}",
+    ]
+    return " ".join(p for p in parts if p)

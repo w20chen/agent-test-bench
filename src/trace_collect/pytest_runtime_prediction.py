@@ -776,6 +776,7 @@ def prepare_pytest_runtime_prediction_before_tool(
     *,
     prediction_root: Path,
     history_root: Path | None = None,
+    family_history_root: Path | None = None,
     iteration: int,
     tool_call_id: str,
     tool_name: str,
@@ -803,6 +804,14 @@ def prepare_pytest_runtime_prediction_before_tool(
     )
     history_path = _history_path(history_root, prediction_root)
     history, history_warning = _load_json(history_path)
+    family_history: dict[str, Any] | None = None
+    if family_history_root is not None:
+        family_history_path = _history_path(family_history_root, prediction_root)
+        family_history, _family_warning = _load_json(family_history_path)
+    else:
+        family_history_path = prediction_root / "family_history.json"
+        if family_history_path.exists():
+            family_history, _family_warning = _load_json(family_history_path)
     if effective_working_directory:
         collect_only = _run_pytest_collect_only(
             command=command,
@@ -829,6 +838,7 @@ def prepare_pytest_runtime_prediction_before_tool(
     ]
     predictions = compute_pytest_predictions(
         history=history,
+        family_history=family_history,
         command=command,
         nodeids=collect_nodeids,
     )
@@ -1036,6 +1046,7 @@ def compute_prediction_reliability(
     nodeids: list[str],
     command_rec: dict[str, Any] | None,
     predictions: dict[str, Any],
+    family_last_run: float | None = None,
 ) -> dict[str, Any]:
     """Choose an interpretable recommended prediction from pre-run history."""
     total = len(nodeids)
@@ -1100,6 +1111,11 @@ def compute_prediction_reliability(
         level = "medium"
         reasons.append("same_normalized_command_seen_before")
         reasons.append("previous_collected_count_unavailable")
+    elif isinstance(family_last_run, (int, float)):
+        method = "family_last_run"
+        value = float(family_last_run)
+        level = "medium"
+        reasons.append("family_last_run_fallback")
     elif isinstance(per_test, (int, float)) and known_node_ratio >= KNOWN_NODE_HIGH_RATIO:
         method = "per_test"
         value = float(per_test)
@@ -1151,6 +1167,7 @@ def compute_prediction_reliability(
 def compute_pytest_predictions(
     *,
     history: dict[str, Any],
+    family_history: dict[str, Any] | None = None,
     command: str,
     nodeids: list[str],
 ) -> dict[str, Any]:
@@ -1170,6 +1187,21 @@ def compute_pytest_predictions(
         if command_durations and isinstance(command_durations[-1], (int, float))
         else None
     )
+
+    family_last_run: float | None = None
+    if family_history is not None:
+        family_command_rec = _history_commands(family_history).get(command_key)
+        family_durations = (
+            family_command_rec.get("durations")
+            if isinstance(family_command_rec, dict)
+            and isinstance(family_command_rec.get("durations"), list)
+            else []
+        )
+        family_last_run = (
+            float(family_durations[-1])
+            if family_durations and isinstance(family_durations[-1], (int, float))
+            else None
+        )
     test_count = (
         len(nodeids) * project_median
         if project_median is not None and nodeids
@@ -1251,6 +1283,7 @@ def compute_pytest_predictions(
         "project_overhead_median_s": overhead_median,
         "project_unknown_test_median_s": unknown_median,
         "prediction_last_run_s": last_run,
+        "prediction_family_last_run_s": family_last_run,
         "prediction_test_count_s": test_count,
         "prediction_per_test_without_overhead_s": per_test_without_overhead,
         "prediction_per_test_overhead_s": overhead_used,
@@ -1265,6 +1298,7 @@ def compute_pytest_predictions(
         nodeids=nodeids,
         command_rec=command_rec if isinstance(command_rec, dict) else None,
         predictions=result,
+        family_last_run=family_last_run,
     )
     result["prediction_reliability"] = reliability
     result["prediction_recommended_s"] = reliability["recommended_prediction_s"]
@@ -1279,6 +1313,7 @@ def _empty_pytest_predictions(command: str) -> dict[str, Any]:
         "project_overhead_median_s": None,
         "project_unknown_test_median_s": None,
         "prediction_last_run_s": None,
+        "prediction_family_last_run_s": None,
         "prediction_test_count_s": None,
         "prediction_per_test_without_overhead_s": None,
         "prediction_per_test_overhead_s": None,
@@ -1423,6 +1458,28 @@ def seed_pytest_history_from_shared(
         return
     if history:
         _write_json(attempt_history_path, history)
+
+
+def seed_pytest_family_history_from_shared(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Copy shared family pytest history into ``family_history.json``."""
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    attempt_family_path = attempt_prediction_root / "family_history.json"
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+    if warning:
+        return
+    if history:
+        attempt_family_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = attempt_family_path.with_name(
+            f".{attempt_family_path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}"
+        )
+        tmp_path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(attempt_family_path)
 
 
 def merge_pytest_predictions_into_shared_history(
@@ -1591,6 +1648,7 @@ def finalize_pytest_runtime_prediction(
 
     prediction_values = {
         "last_run": predictions["prediction_last_run_s"],
+        "family_last_run": predictions["prediction_family_last_run_s"],
         "test_count": predictions["prediction_test_count_s"],
         "per_test": predictions["prediction_per_test_s"],
         "unknown_test_fallback": predictions["prediction_unknown_test_fallback_s"],
@@ -1726,30 +1784,38 @@ def finalize_pytest_runtime_prediction(
 
 
 def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
-    """Return a concise realtime collect-mode summary line."""
+    """Return a concise realtime collect-mode summary line showing all strategies."""
     actual = payload.get("actual_duration_s")
     count = payload.get("collected_count")
-
-    def _fmt(value: Any) -> str:
-        return "n/a" if value is None else f"{float(value):.2f}s"
-
     rel = payload.get("relative_error") or {}
+    recommended = payload.get("prediction_recommended_method", "?")
+    reliability = (payload.get("prediction_reliability") or {}).get("level", "?")
+    overhead = payload.get("collect_only_duration_s")
 
-    def _err(method: str) -> str:
-        value = rel.get(method)
-        return "n/a" if value is None else f"{float(value) * 100:.1f}%"
+    def _s(value: Any) -> str:
+        return "?" if value is None else f"{float(value):.1f}s"
 
-    return (
-        "[pytest-predict] "
-        f"iter={payload.get('iteration')} tests={count} actual={_fmt(actual)} "
-        f"collect_overhead={_fmt(payload.get('collect_only_duration_s'))} "
-        f"last={_fmt(payload.get('prediction_last_run_s'))} last_err={_err('last_run')} "
-        f"count={_fmt(payload.get('prediction_test_count_s'))} count_err={_err('test_count')} "
-        f"per_test={_fmt(payload.get('prediction_per_test_s'))} per_test_err={_err('per_test')} "
-        f"unknown={_fmt(payload.get('prediction_unknown_test_fallback_s'))} "
-        f"unknown_err={_err('unknown_test_fallback')} "
-        f"recommended={payload.get('prediction_recommended_method')}:"
-        f"{_fmt(payload.get('prediction_recommended_s'))} "
-        f"rec_err={_err('recommended')} "
-        f"reliability={(payload.get('prediction_reliability') or {}).get('level', 'n/a')}"
-    )
+    def _pct(method: str) -> str:
+        v = rel.get(method)
+        return "?" if v is None else f"{float(v) * 100:+.1f}%"
+
+    def _strat(label: str, pred_key: str, err_key: str) -> str:
+        val = payload.get(pred_key)
+        if val is None:
+            return ""
+        arrow = "\u2192" if err_key == recommended else " "
+        return f"{arrow}{label}={_s(val)}({_pct(err_key)})"
+
+    parts = [
+        f"[pytest-predict] #{payload.get('iteration')}",
+        f"tests={count}",
+        f"| {_s(actual)} actual",
+        f"(collect {_s(overhead)})",
+        _strat("last", "prediction_last_run_s", "last_run"),
+        _strat("fam", "prediction_family_last_run_s", "family_last_run"),
+        _strat("count", "prediction_test_count_s", "test_count"),
+        _strat("per", "prediction_per_test_s", "per_test"),
+        _strat("unk", "prediction_unknown_test_fallback_s", "unknown_test_fallback"),
+        f"| {reliability}",
+    ]
+    return " ".join(p for p in parts if p)

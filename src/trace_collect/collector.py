@@ -52,14 +52,17 @@ from trace_collect.monitoring import (
 from trace_collect.package_runtime_prediction import (
     merge_pip_predictions_into_shared_history,
     seed_pip_history_from_shared,
+    seed_pip_family_history_from_shared,
 )
 from trace_collect.pytest_runtime_prediction import (
     merge_pytest_predictions_into_shared_history,
     seed_pytest_history_from_shared,
+    seed_pytest_family_history_from_shared,
 )
 from trace_collect.python_script_runtime_prediction import (
     merge_python_script_predictions_into_shared_history,
     seed_python_script_history_from_shared,
+    seed_python_script_family_history_from_shared,
 )
 from trace_collect.runtime.task_container import (
     bootstrap_task_container_python,
@@ -115,31 +118,17 @@ def _pytest_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
 
 
 def _task_family_scope(task: dict[str, Any], instance_id: str) -> str:
+    """Build a coarse family key for cross-instance history sharing.
+
+    Family scope is intentionally minimal: **only repo**.  Image family,
+    Python version, and install config are deliberately excluded so that
+    all instances of the same repository share a single history bucket.
+    This maximises the chance of a cold-start hit.
+    """
     repo = task.get("repo")
-    image = task.get("image_name") or task.get("source_image") or task.get("image")
-    python_version = task.get("python_version") or task.get("python")
-    install_config = task.get("install_config")
-    if isinstance(install_config, (dict, list)):
-        install_label = hashlib.sha1(
-            json.dumps(install_config, sort_keys=True, ensure_ascii=False).encode(
-                "utf-8"
-            )
-        ).hexdigest()[:10]
-    elif isinstance(install_config, str) and install_config:
-        install_label = hashlib.sha1(install_config.encode("utf-8")).hexdigest()[:10]
-    else:
-        install_label = None
-    image_family = None
-    if isinstance(image, str) and image:
-        image_family = image.rsplit(":", 1)[0]
-        image_family = re.sub(r"[-_.]\d+$", "", image_family)
-    parts = [
-        f"repo={repo}" if isinstance(repo, str) and repo else None,
-        f"image={image_family}" if image_family else None,
-        f"python={python_version}" if python_version else None,
-        f"install={install_label}" if install_label else None,
-    ]
-    return "|".join(part for part in parts if part) or f"instance={instance_id}"
+    if isinstance(repo, str) and repo:
+        return f"repo={repo}"
+    return f"instance={instance_id}"
 
 
 def _family_history_scope_dir(
@@ -154,21 +143,6 @@ def _family_history_scope_dir(
         "family",
         _task_family_scope(task, instance_id),
     )
-
-
-def _history_file_exists(history_dir: Path) -> bool:
-    return (history_dir / "history.json").exists()
-
-
-def _preferred_seed_history_dir(
-    instance_history_dir: Path,
-    family_history_dir: Path | None,
-) -> Path:
-    if _history_file_exists(instance_history_dir):
-        return instance_history_dir
-    if family_history_dir is not None and _history_file_exists(family_history_dir):
-        return family_history_dir
-    return instance_history_dir
 
 
 def _recording_server_public_host(
@@ -1398,11 +1372,19 @@ async def collect_traces(
                     run_task_kwargs["pytest_history_dir"] = (
                         _pytest_history_scope_dir(run_dir, instance_id)
                     )
+                if "pytest_family_history_dir" in run_task_params and capture_pytest_runtime:
+                    run_task_kwargs["pytest_family_history_dir"] = (
+                        _family_history_scope_dir(run_dir, "pytest", task, instance_id)
+                    )
                 if "capture_pip_runtime" in run_task_params:
                     run_task_kwargs["capture_pip_runtime"] = capture_pip_runtime
                 if "pip_history_dir" in run_task_params and capture_pip_runtime:
                     run_task_kwargs["pip_history_dir"] = (
                         _pip_history_scope_dir(run_dir, instance_id)
+                    )
+                if "pip_family_history_dir" in run_task_params and capture_pip_runtime:
+                    run_task_kwargs["pip_family_history_dir"] = (
+                        _family_history_scope_dir(run_dir, "pip", task, instance_id)
                     )
                 if "capture_python_script_runtime" in run_task_params:
                     run_task_kwargs["capture_python_script_runtime"] = (
@@ -1414,6 +1396,13 @@ async def collect_traces(
                 ):
                     run_task_kwargs["python_script_history_dir"] = (
                         _python_script_history_scope_dir(run_dir, instance_id)
+                    )
+                if (
+                    "python_script_family_history_dir" in run_task_params
+                    and capture_python_script_runtime
+                ):
+                    run_task_kwargs["python_script_family_history_dir"] = (
+                        _family_history_scope_dir(run_dir, "python_script", task, instance_id)
                     )
                 result = await runner.run_task(
                     task,
@@ -1719,12 +1708,14 @@ async def _run_openclaw_in_task_container(
         )
         if pip_runtime_dir is not None and pip_shared_history_dir is not None:
             seed_pip_history_from_shared(
-                shared_history_root=_preferred_seed_history_dir(
-                    pip_shared_history_dir,
-                    pip_family_history_dir,
-                ),
+                shared_history_root=pip_shared_history_dir,
                 attempt_prediction_root=pip_runtime_dir,
             )
+            if pip_family_history_dir is not None:
+                seed_pip_family_history_from_shared(
+                    shared_history_root=pip_family_history_dir,
+                    attempt_prediction_root=pip_runtime_dir,
+                )
         python_script_runtime_dir = (
             ctx.attempt_dir.resolve() / "python_script_runtime"
             if capture_python_script_runtime
@@ -1750,12 +1741,14 @@ async def _run_openclaw_in_task_container(
             and python_script_shared_history_dir is not None
         ):
             seed_python_script_history_from_shared(
-                shared_history_root=_preferred_seed_history_dir(
-                    python_script_shared_history_dir,
-                    python_script_family_history_dir,
-                ),
+                shared_history_root=python_script_shared_history_dir,
                 attempt_prediction_root=python_script_runtime_dir,
             )
+            if python_script_family_history_dir is not None:
+                seed_python_script_family_history_from_shared(
+                    shared_history_root=python_script_family_history_dir,
+                    attempt_prediction_root=python_script_runtime_dir,
+                )
         pytest_runtime_dir = (
             ctx.attempt_dir.resolve() / "pytest_runtime"
             if capture_pytest_runtime
@@ -1773,12 +1766,14 @@ async def _run_openclaw_in_task_container(
         )
         if pytest_runtime_dir is not None and pytest_shared_history_dir is not None:
             seed_pytest_history_from_shared(
-                shared_history_root=_preferred_seed_history_dir(
-                    pytest_shared_history_dir,
-                    pytest_family_history_dir,
-                ),
+                shared_history_root=pytest_shared_history_dir,
                 attempt_prediction_root=pytest_runtime_dir,
             )
+            if pytest_family_history_dir is not None:
+                seed_pytest_family_history_from_shared(
+                    shared_history_root=pytest_family_history_dir,
+                    attempt_prediction_root=pytest_runtime_dir,
+                )
         runtime = run_task_container_agent(
             container_id=container_id,
             timeout=(max_iterations * 120) + 300,

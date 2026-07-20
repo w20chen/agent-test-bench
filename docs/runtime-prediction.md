@@ -21,13 +21,13 @@ Each database has **two bucket levels**:
 | Bucket | Location | Scope | Used when |
 |--------|----------|-------|-----------|
 | **Instance** | `<tool>_runtime_db/<instance>/history.json` | This exact task instance | Attempt N+1 reads attempt 1..N |
-| **Family** | `<tool>_runtime_db/family/<family>/history.json` | Tasks sharing repo, image family, Python version, install config | No instance history exists yet (cold start) |
+| **Family** | `<tool>_runtime_db/family/<family>/history.json` | All tasks sharing the same repository | Cross-instance cold start |
 
-**Seed (before each attempt):** instance history if available → family history if available → empty (pure cold start).
+**Seed (before each attempt):** instance history is always seeded into `history.json`.  Family history is independently seeded into `family_history.json` when available — the two signals are stored separately and used side-by-side in prediction.
 
 **Merge (after each attempt):** successful prediction rows write to **both** instance and family buckets.
 
-Family scope is built from task metadata: `repo`, `image` (family label with version suffix stripped), `python_version`, and a SHA1 hash of `install_config`.  When metadata is sparse the scope degrades gracefully to per-instance, preventing incorrect cross-task sharing.
+Family scope is intentionally minimal: **only repo**.  Image family, Python version, and install config are deliberately excluded so that all instances of the same repository share a single history bucket — maximising the chance of a cold-start hit.
 
 All history containers are bounded to **5 entries** per key (FIFO).  File-based exclusivity locks (`O_CREAT | O_EXCL`) protect concurrent access with 600 s stale-lock cleanup.
 
@@ -41,20 +41,22 @@ All history containers are bounded to **5 entries** per key (FIFO).  File-based 
 
 **Command normalization:** strips output and boolean flags, sorts package specs, hashes requirement-file contents.  Commands with `||` chains are recorded but excluded from history.
 
-**Three baselines** (cascading priority):
+**Four baselines** (cascading priority):
 
-| Priority | Method | Uses |
-|----------|--------|------|
-| 1 | **Last Run** (reliability `high`) | Most recent duration for the same normalised command |
-| 2 | **Package Count** (`medium`) | `package_count × per_package_median` |
-| 3 | **Global Median** (`low`) | Median of all successful pip install durations |
+| Priority | Method | Reliability | Uses |
+|----------|--------|-------------|------|
+| 1 | **Last Run** | `high` | Most recent duration for the same normalised command (this instance) |
+| 2 | **Family Last Run** | `medium` | Most recent duration for the same command from sibling instances (same repo) |
+| 3 | **Package Count** | `medium` | `package_count × per_package_median` |
+| 4 | **Global Median** | `low` | Median of all successful pip install durations |
 
 **CLI flags:** `--capture-pip-runtime` / `--no-capture-pip-runtime` (default: on).
 
 **Realtime output:**
 ```text
-[pip-predict] iter=4 packages=2 actual=10.00s last=9.00s last_err=10.0% ...
+[pip-predict] #4 pkgs=2 | 10.0s actual →last=9.0s(+10.0%) fam=9.5s(+5.3%) pkgs=11.0s(-9.1%) glob=12.0s(-16.7%) | high
 ```
+All strategies are displayed with their relative errors; `→` marks the recommended (selected) strategy.
 
 **Artifacts:**
 ```text
@@ -75,14 +77,15 @@ attempt_N/pip_runtime/
 
 **Command normalization:** strips interpreter flags (`-b`, `-O`, `-W all`), environment variables, and `cd` preludes.  Extracts `script_path` and `script_basename`.
 
-**Four baselines** (cascading priority):
+**Five baselines** (cascading priority):
 
-| Priority | Method | Uses |
-|----------|--------|------|
-| 1 | **Last Run** (`high`) | Most recent duration for the same normalised command |
-| 2 | **Script Path Median** (`medium`) | Median of all runs of the same script path |
-| 3 | **Basename Median** (`low`) | Median of all runs sharing the same filename |
-| 4 | **Global Median** (`low`) | Median of all successful Python script runs |
+| Priority | Method | Reliability | Uses |
+|----------|--------|-------------|------|
+| 1 | **Last Run** | `high` | Most recent duration for the same normalised command (this instance) |
+| 2 | **Family Last Run** | `medium` | Most recent duration for the same command from sibling instances (same repo) |
+| 3 | **Script Path Median** | `medium` | Median of all runs of the same script path |
+| 4 | **Basename Median** | `low` | Median of all runs sharing the same filename |
+| 5 | **Global Median** | `low` | Median of all successful Python script runs |
 
 Only successful, standalone runs (not `or`-chains, not pipes) enter history.
 
@@ -142,11 +145,12 @@ Each test's prediction source is classified (nodeid/file/project/unknown/unavail
 |----------|-----------|--------|-------------|
 | 1 | Same command + collected-count delta ≤ 10% | Last Run | `high` |
 | 2 | Same command + previous count unknown | Last Run | `medium` |
-| 3 | No tests collected + command was seen before | Last Run | `medium` |
-| 4 | ≥ 80% tests have exact nodeid history | Per-Test | `high` |
-| 5 | ≥ 80% tests have nodeid or same-file history | Per-Test | `medium` |
-| 6 | Cold-start unknown-test fallback available | Unknown | `low` |
-| 7 | No prediction possible | none | `coldstart` / `error` |
+| 3 | Same command available from sibling instance (same repo) | Family Last Run | `medium` |
+| 4 | No tests collected + command was seen before | Last Run | `medium` |
+| 5 | ≥ 80% tests have exact nodeid history | Per-Test | `high` |
+| 6 | ≥ 80% tests have nodeid or same-file history | Per-Test | `medium` |
+| 7 | Cold-start unknown-test fallback available | Unknown | `low` |
+| 8 | No prediction possible | none | `coldstart` / `error` |
 
 Key thresholds: `KNOWN_NODE_HIGH_RATIO = 0.80`, `KNOWN_OR_FILE_MEDIUM_RATIO = 0.80`, `COMMAND_COUNT_STABLE_REL_DELTA = 0.10`.
 
@@ -166,9 +170,9 @@ Reports all baseline methods plus `Recommended`, then prints `high` / `medium` /
 
 **Realtime output:**
 ```text
-[pytest-predict] iter=17 tests=32 actual=220.40s collect_overhead=4.20s \
-  last=205.10s last_err=6.9% ... recommended=per_test:215.70s rec_err=2.1% reliability=high
+[pytest-predict] #17 tests=32 | 220.4s actual (collect 4.2s) →last=205.1s(+6.9%) fam=210.0s(+5.0%) count=230.0s(-4.2%) per=215.7s(+2.1%) unk=240.0s(-8.2%) | high
 ```
+All strategies are displayed with their relative errors; `→` marks the recommended (selected) strategy.
 
 **Artifacts:**
 ```text

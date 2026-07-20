@@ -11,7 +11,6 @@ from trace_collect.attempt_pipeline import AttemptContext
 from trace_collect.collector import (
     _family_history_scope_dir,
     _pip_history_scope_dir,
-    _preferred_seed_history_dir,
     _pytest_history_scope_dir,
     _python_script_history_scope_dir,
     _run_openclaw_in_task_container,
@@ -113,26 +112,6 @@ def test_family_history_scope_groups_related_tasks(tmp_path: Path) -> None:
     assert first == second
     assert first != third
     assert first.parent.name == "family"
-
-
-def test_preferred_seed_history_uses_family_only_when_available(tmp_path: Path) -> None:
-    instance_dir = _pytest_history_scope_dir(tmp_path / "run", "encode__httpx-2701")
-    family_dir = _family_history_scope_dir(
-        tmp_path / "run",
-        "pytest",
-        {"repo": "encode/httpx", "image_name": "swerebench/example"},
-        "encode__httpx-2701",
-    )
-
-    assert _preferred_seed_history_dir(instance_dir, family_dir) == instance_dir
-
-    family_dir.mkdir(parents=True)
-    (family_dir / "history.json").write_text("{}", encoding="utf-8")
-    assert _preferred_seed_history_dir(instance_dir, family_dir) == family_dir
-
-    instance_dir.mkdir(parents=True)
-    (instance_dir / "history.json").write_text("{}", encoding="utf-8")
-    assert _preferred_seed_history_dir(instance_dir, family_dir) == instance_dir
 
 
 def test_run_openclaw_in_task_container_normalizes_trace_on_host(
