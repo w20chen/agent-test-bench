@@ -7,6 +7,7 @@ JSON artifacts.  It does not change benchmark labels or use oracle data.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -17,7 +18,7 @@ import shlex
 import statistics
 import subprocess
 import time
-from typing import Any
+from typing import Any, Iterator
 
 from agents.openclaw.tools.exec_env import prepare_exec_env
 from trace_collect.exec_classifier import classify_exec_tool_name
@@ -34,6 +35,7 @@ PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
 PREDICTION_SCHEMA_VERSION = 5
 HISTORY_SCHEMA_VERSION = 5
+LOCK_STALE_AFTER_S = 600.0
 DEFAULT_COLLECT_ONLY_TIMEOUT_S = 300.0
 KNOWN_NODE_HIGH_RATIO = 0.80
 KNOWN_OR_FILE_MEDIUM_RATIO = 0.80
@@ -81,6 +83,7 @@ class PytestRuntimeRecord:
     directory: Path
     command: str
     working_directory: str | None = None
+    history_root: Path | None = None
 
 
 @dataclass(slots=True)
@@ -127,6 +130,44 @@ def _load_json(path: Path) -> tuple[dict[str, Any], str | None]:
     if not isinstance(loaded, dict):
         return {}, f"{path.name} is not a JSON object"
     return loaded, None
+
+
+def _history_path(history_root: Path | None, prediction_root: Path) -> Path:
+    return (history_root or prediction_root) / HISTORY_FILENAME
+
+
+@contextmanager
+def _history_lock(history_path: Path, timeout_s: float = 30.0) -> Iterator[None]:
+    lock_path = history_path.with_suffix(f"{history_path.suffix}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout_s
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age_s = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age_s = 0.0
+            if age_s > LOCK_STALE_AFTER_S:
+                try:
+                    lock_path.unlink()
+                    continue
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {lock_path}")
+            time.sleep(0.05)
+    try:
+        os.write(fd, _utc_now().encode("utf-8"))
+        yield
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _median(values: list[float]) -> float | None:
@@ -734,6 +775,7 @@ def merge_pytest_runtime_environment(
 def prepare_pytest_runtime_prediction_before_tool(
     *,
     prediction_root: Path,
+    history_root: Path | None = None,
     iteration: int,
     tool_call_id: str,
     tool_name: str,
@@ -759,7 +801,7 @@ def prepare_pytest_runtime_prediction_before_tool(
         or working_directory
         or ""
     )
-    history_path = prediction_root / HISTORY_FILENAME
+    history_path = _history_path(history_root, prediction_root)
     history, history_warning = _load_json(history_path)
     if effective_working_directory:
         collect_only = _run_pytest_collect_only(
@@ -799,6 +841,7 @@ def prepare_pytest_runtime_prediction_before_tool(
         "command": command,
         "working_directory": effective_working_directory,
         "history_path": str(history_path),
+        "history_scope": "shared" if history_root is not None else "attempt",
         "history_snapshot": history,
         "collect_only": collect_only,
         "pre_execution_nodeids": collect_nodeids,
@@ -838,6 +881,7 @@ def prepare_pytest_runtime_prediction_before_tool(
         directory=invocation_dir,
         command=command,
         working_directory=effective_working_directory or None,
+        history_root=history_root,
     )
 
 
@@ -1364,6 +1408,81 @@ def update_pytest_history(
     return updated
 
 
+def seed_pytest_history_from_shared(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Copy shared pytest history into an attempt-local prediction directory."""
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    attempt_history_path = _history_path(None, attempt_prediction_root)
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+    if warning:
+        return
+    if history:
+        _write_json(attempt_history_path, history)
+
+
+def merge_pytest_predictions_into_shared_history(
+    *,
+    shared_history_root: Path,
+    attempt_prediction_root: Path,
+) -> None:
+    """Merge successful attempt-local pytest prediction rows into shared history."""
+
+    predictions_path = attempt_prediction_root / PREDICTIONS_FILENAME
+    if not predictions_path.exists():
+        return
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in predictions_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                loaded = json.loads(line)
+                if isinstance(loaded, dict):
+                    rows.append(loaded)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not rows:
+        return
+
+    shared_history_path = _history_path(shared_history_root, attempt_prediction_root)
+    with _history_lock(shared_history_path):
+        history, warning = _load_json(shared_history_path)
+        if warning:
+            history = {}
+        for row in rows:
+            if row.get("history_updated") is not True:
+                continue
+            if row.get("history_scope") == "shared":
+                continue
+            command = row.get("command")
+            total_duration_s = row.get("actual_duration_s")
+            tests = row.get("tests")
+            details = row.get("history_update_per_test_prediction_details")
+            if not isinstance(details, list):
+                details = row.get("per_test_prediction_details")
+            if not (
+                isinstance(command, str)
+                and isinstance(total_duration_s, (int, float))
+                and isinstance(tests, list)
+            ):
+                continue
+            history = update_pytest_history(
+                history=history,
+                command=command,
+                total_duration_s=float(total_duration_s),
+                tests=[test for test in tests if isinstance(test, dict)],
+                per_test_prediction_details=[
+                    detail for detail in details if isinstance(detail, dict)
+                ]
+                if isinstance(details, list)
+                else None,
+            )
+        _write_json(shared_history_path, history)
+
+
 def _relative_error(prediction: float | None, actual: float) -> float | None:
     if prediction is None or actual <= 0:
         return None
@@ -1404,6 +1523,7 @@ def finalize_pytest_runtime_prediction(
     record: PytestRuntimeRecord,
     *,
     prediction_root: Path,
+    history_root: Path | None = None,
     action_id: str,
     ts_start: float,
     ts_end: float,
@@ -1413,7 +1533,8 @@ def finalize_pytest_runtime_prediction(
     working_directory: str | None = None,
 ) -> dict[str, Any]:
     """Persist results for one pytest run using the pre-execution prediction."""
-    history_path = prediction_root / HISTORY_FILENAME
+    effective_history_root = history_root or record.history_root
+    history_path = _history_path(effective_history_root, prediction_root)
     history, history_warning = _load_json(history_path)
     pending, pending_warning = _load_json(record.directory / "pending.json")
     runtime_payload, runtime_warning = _load_json(record.directory / RUNTIME_JSON_FILENAME)
@@ -1504,6 +1625,9 @@ def finalize_pytest_runtime_prediction(
         "actual_duration_s": actual_duration_s,
         "exit_code": exit_code,
         "success": success,
+        "history_updated": bool(tests),
+        "history_path": str(history_path),
+        "history_scope": "shared" if effective_history_root is not None else "attempt",
         "collected_count": (
             runtime_payload.get("collected_count")
             if isinstance(runtime_payload.get("collected_count"), int)
@@ -1529,6 +1653,9 @@ def finalize_pytest_runtime_prediction(
         ],
         "prediction_per_test_overhead_s": predictions["prediction_per_test_overhead_s"],
         "per_test_prediction_details": predictions["per_test_prediction_details"],
+        "history_update_per_test_prediction_details": history_update_predictions[
+            "per_test_prediction_details"
+        ],
         "prediction_unknown_test_fallback_s": predictions[
             "prediction_unknown_test_fallback_s"
         ],
@@ -1563,6 +1690,26 @@ def finalize_pytest_runtime_prediction(
         },
         "warnings": warnings,
     }
+    if tests:
+        try:
+            with _history_lock(history_path):
+                locked_history, locked_warning = _load_json(history_path)
+                if locked_warning and locked_warning not in payload["warnings"]:
+                    payload["warnings"].append(locked_warning)
+                updated_history = update_pytest_history(
+                    history=locked_history,
+                    command=record.command,
+                    total_duration_s=actual_duration_s,
+                    tests=tests,
+                    per_test_prediction_details=history_update_predictions[
+                        "per_test_prediction_details"
+                    ],
+                )
+                _write_json(history_path, updated_history)
+        except Exception as exc:
+            payload["history_updated"] = False
+            payload["warnings"].append(f"failed to update history: {exc!r}")
+
     detailed_payload: dict[str, Any] = {
         **payload,
         "pytest_output": {
@@ -1573,18 +1720,6 @@ def finalize_pytest_runtime_prediction(
     }
     _write_json(record.directory / "prediction.json", detailed_payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
-
-    if tests:
-        updated_history = update_pytest_history(
-            history=history,
-            command=record.command,
-            total_duration_s=actual_duration_s,
-            tests=tests,
-            per_test_prediction_details=history_update_predictions[
-                "per_test_prediction_details"
-            ],
-        )
-        _write_json(history_path, updated_history)
 
     print(format_pytest_prediction_summary(payload), flush=True)
     return detailed_payload

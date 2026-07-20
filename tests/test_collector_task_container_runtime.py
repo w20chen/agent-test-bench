@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 from trace_collect.attempt_pipeline import AttemptContext
 from trace_collect.collector import (
+    _family_history_scope_dir,
     _pip_history_scope_dir,
+    _preferred_seed_history_dir,
+    _pytest_history_scope_dir,
     _python_script_history_scope_dir,
     _run_openclaw_in_task_container,
 )
@@ -86,6 +89,52 @@ def test_python_script_history_scope_dir_avoids_sanitized_instance_collisions(
     assert second.name.startswith("a_b-")
 
 
+def test_family_history_scope_groups_related_tasks(tmp_path: Path) -> None:
+    task_a = {
+        "repo": "encode/httpx",
+        "image_name": "swerebench/example-1:latest",
+        "python_version": "3.11",
+    }
+    task_b = {
+        "repo": "encode/httpx",
+        "image_name": "swerebench/example-2:latest",
+        "python_version": "3.11",
+    }
+    task_c = {
+        "repo": "django/django",
+        "image_name": "swerebench/example-1:latest",
+        "python_version": "3.11",
+    }
+
+    first = _family_history_scope_dir(tmp_path / "run", "pip", task_a, "a")
+    second = _family_history_scope_dir(tmp_path / "run", "pip", task_b, "b")
+    third = _family_history_scope_dir(tmp_path / "run", "pip", task_c, "c")
+
+    assert first == second
+    assert first != third
+    assert first.parent.name == "family"
+
+
+def test_preferred_seed_history_uses_family_only_when_available(tmp_path: Path) -> None:
+    instance_dir = _pytest_history_scope_dir(tmp_path / "run", "encode__httpx-2701")
+    family_dir = _family_history_scope_dir(
+        tmp_path / "run",
+        "pytest",
+        {"repo": "encode/httpx", "image_name": "swerebench/example"},
+        "encode__httpx-2701",
+    )
+
+    assert _preferred_seed_history_dir(instance_dir, family_dir) == instance_dir
+
+    family_dir.mkdir(parents=True)
+    (family_dir / "history.json").write_text("{}", encoding="utf-8")
+    assert _preferred_seed_history_dir(instance_dir, family_dir) == family_dir
+
+    instance_dir.mkdir(parents=True)
+    (instance_dir / "history.json").write_text("{}", encoding="utf-8")
+    assert _preferred_seed_history_dir(instance_dir, family_dir) == instance_dir
+
+
 def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     tmp_path: Path,
     monkeypatch,
@@ -97,6 +146,8 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     pip_merge_seen: dict[str, object] = {}
     python_seed_seen: dict[str, object] = {}
     python_merge_seen: dict[str, object] = {}
+    pytest_seed_seen: dict[str, object] = {}
+    pytest_merge_seen: dict[str, object] = {}
     ctx = _make_relative_ctx(monkeypatch, tmp_path, scaffold="openclaw")
     runtime_dir = ctx.attempt_dir / "_task_container_runtime" / "openclaw"
     stdout_path = runtime_dir / "stdout.txt"
@@ -209,6 +260,14 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
         "trace_collect.collector.merge_python_script_predictions_into_shared_history",
         lambda **kwargs: python_merge_seen.update(kwargs),
     )
+    monkeypatch.setattr(
+        "trace_collect.collector.seed_pytest_history_from_shared",
+        lambda **kwargs: pytest_seed_seen.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "trace_collect.collector.merge_pytest_predictions_into_shared_history",
+        lambda **kwargs: pytest_merge_seen.update(kwargs),
+    )
 
     result = asyncio.run(
         _run_openclaw_in_task_container(
@@ -268,14 +327,46 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert pip_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "pip_runtime"
     )
-    assert pip_merge_seen == pip_seed_seen
+    assert pip_merge_seen["attempt_prediction_root"] == pip_seed_seen[
+        "attempt_prediction_root"
+    ]
+    assert pip_merge_seen["shared_history_root"] == _family_history_scope_dir(
+        ctx.run_dir,
+        "pip",
+        dict(ctx.task),
+        "encode__httpx-2701",
+    )
     assert python_seed_seen["shared_history_root"] == (
         _python_script_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
     )
     assert python_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "python_script_runtime"
     )
-    assert python_merge_seen == python_seed_seen
+    assert python_merge_seen["attempt_prediction_root"] == python_seed_seen[
+        "attempt_prediction_root"
+    ]
+    assert python_merge_seen["shared_history_root"] == _family_history_scope_dir(
+        ctx.run_dir,
+        "python_script",
+        dict(ctx.task),
+        "encode__httpx-2701",
+    )
+    assert "pytest_history_dir" not in seen
+    assert pytest_seed_seen["shared_history_root"] == (
+        _pytest_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
+    )
+    assert pytest_seed_seen["attempt_prediction_root"] == (
+        ctx.attempt_dir.resolve() / "pytest_runtime"
+    )
+    assert pytest_merge_seen["attempt_prediction_root"] == pytest_seed_seen[
+        "attempt_prediction_root"
+    ]
+    assert pytest_merge_seen["shared_history_root"] == _family_history_scope_dir(
+        ctx.run_dir,
+        "pytest",
+        dict(ctx.task),
+        "encode__httpx-2701",
+    )
     assert seen["tool_workspace"] == "/testbed"
     assert seen["exec_working_dir"] == "/testbed"
     assert preflight_seen["runtime"] == "/usr/bin/python3"
@@ -298,6 +389,8 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     pip_merge_seen.clear()
     python_seed_seen.clear()
     python_merge_seen.clear()
+    pytest_seed_seen.clear()
+    pytest_merge_seen.clear()
     asyncio.run(
         _run_openclaw_in_task_container(
             ctx=ctx,
@@ -331,6 +424,8 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert pip_merge_seen == {}
     assert python_seed_seen == {}
     assert python_merge_seen == {}
+    assert pytest_seed_seen == {}
+    assert pytest_merge_seen == {}
 
 
 def test_run_openclaw_in_task_container_adds_mcp_bootstrap_requirements(

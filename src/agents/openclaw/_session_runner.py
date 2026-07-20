@@ -99,6 +99,7 @@ class TraceCollectorHook(AgentHook):
         pytest_capture_dir: Path | None = None,
         pytest_project_root: Path | None = None,
         pytest_runtime_dir: Path | None = None,
+        pytest_history_dir: Path | None = None,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
         python_script_runtime_dir: Path | None = None,
@@ -127,6 +128,7 @@ class TraceCollectorHook(AgentHook):
         self._pytest_project_root = pytest_project_root
         self._pytest_captures_by_tool_call: dict[str, PytestCaptureRecord] = {}
         self._pytest_runtime_dir = pytest_runtime_dir
+        self._pytest_history_dir = pytest_history_dir
         self._pytest_runtime_by_tool_call: dict[str, PytestRuntimeRecord] = {}
         self._pip_runtime_dir = pip_runtime_dir
         self._pip_history_dir = pip_history_dir
@@ -229,6 +231,7 @@ class TraceCollectorHook(AgentHook):
                     try:
                         runtime_record = prepare_pytest_runtime_prediction_before_tool(
                             prediction_root=self._pytest_runtime_dir,
+                            history_root=self._pytest_history_dir,
                             iteration=context.iteration,
                             tool_call_id=tc.id,
                             tool_name=tc.name,
@@ -586,6 +589,7 @@ class TraceCollectorHook(AgentHook):
                             runtime_record,
                             prediction_root=self._pytest_runtime_dir
                             or runtime_record.directory.parent,
+                            history_root=self._pytest_history_dir,
                             action_id=action_id,
                             ts_start=tool_ts_start,
                             ts_end=tool_ts_end,
@@ -1069,6 +1073,7 @@ class SessionRunner:
         pytest_capture_dir: Path | None = None,
         capture_pytest_runtime: bool = False,
         pytest_runtime_dir: Path | None = None,
+        pytest_history_dir: Path | None = None,
         capture_pip_runtime: bool = False,
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
@@ -1100,6 +1105,7 @@ class SessionRunner:
             if capture_pytest_runtime
             else None
         )
+        pytest_history_dir = pytest_history_dir if capture_pytest_runtime else None
         pip_runtime_dir = (
             (pip_runtime_dir or trace_file.parent / "pip_runtime")
             if capture_pip_runtime
@@ -1122,6 +1128,7 @@ class SessionRunner:
             pytest_capture_dir=pytest_capture_dir,
             pytest_project_root=pytest_project_root,
             pytest_runtime_dir=pytest_runtime_dir,
+            pytest_history_dir=pytest_history_dir,
             pip_runtime_dir=pip_runtime_dir,
             pip_history_dir=pip_history_dir,
             python_script_runtime_dir=python_script_runtime_dir,

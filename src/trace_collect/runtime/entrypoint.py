@@ -172,6 +172,11 @@ async def _run_openclaw(request: dict[str, Any]) -> dict[str, Any]:
             if request.get("pytest_runtime_dir")
             else None
         ),
+        pytest_history_dir=(
+            Path(request["pytest_history_dir"])
+            if request.get("pytest_history_dir")
+            else None
+        ),
         capture_pip_runtime=bool(request.get("pip_runtime_dir")),
         pip_runtime_dir=(
             Path(request["pip_runtime_dir"])

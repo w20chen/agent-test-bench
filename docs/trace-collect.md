@@ -222,7 +222,7 @@ Switch with `--prompt-template <name>`, e.g. `--prompt-template no_spawn`.
 Use `--run-id <path>` to write into an existing run directory. This is the
 normal way to resume an interrupted run or to append extra attempts while
 keeping run-scoped history databases such as `pip_runtime_db/` and
-`python_script_runtime_db/`.
+`python_script_runtime_db/` / `pytest_runtime_db/`.
 
 ```bash
 PYTHONPATH=src python -m trace_collect.cli \
@@ -516,6 +516,9 @@ immediately prints a concise line like:
 Artifacts are written as:
 
 ```text
+pytest_runtime_db/
+  <instance_scope>/history.json
+  family/<family_scope>/history.json
 attempt_N/pytest_runtime/
   history.json
   predictions.jsonl
@@ -527,6 +530,12 @@ attempt_N/pytest_runtime/
     prediction.json
     instrumentation.json
 ```
+
+In task-container mode, pytest prediction keeps two run-scoped history buckets:
+an exact instance bucket and a conservative family bucket. Attempts seed their
+local `history.json` from the instance bucket when it exists; otherwise they use
+the family bucket for cold-start sharing across related tasks. Successful rows
+are merged back into both buckets after the attempt finishes.
 
 `pending.json` snapshots the history-derived prediction before the pytest tool
 command executes, including the collect-only command metadata, pre-execution
@@ -658,14 +667,13 @@ variables, modify tool arguments, or change package installation semantics.
 It recognizes common forms such as `pip install ...`, `pip3 install ...`, and
 `python -m pip install ...`.
 
-Pip prediction learns from an instance-scoped history database under the run
-directory, so later attempts for the same task instance can use successful
-installs observed by earlier attempts without mixing unrelated images or repos.
-Per-attempt directories still hold the invocation artifacts needed for audit.
-In task-container mode, the host seeds each attempt's local history from the
-shared database before the container starts, then merges successful prediction
-rows back after the attempt finishes; this keeps the shared database
-host-visible without adding broader container mounts.
+Pip prediction learns from run-scoped history databases. In task-container
+mode, the host keeps an exact instance bucket plus a conservative family bucket
+built from available task metadata such as repo, image-family label, Python
+version, and install config. Attempts seed local history from the instance bucket when
+available, otherwise from the family bucket; successful prediction rows are
+merged back into both. Per-attempt directories still hold the invocation
+artifacts needed for audit.
 
 After each supported invocation finishes, collect mode prints one summary line
 with all simple baselines and their relative errors:
@@ -678,8 +686,8 @@ Artifacts are written as:
 
 ```text
 pip_runtime_db/
-  <instance_scope>/
-    history.json
+  <instance_scope>/history.json
+  family/<family_scope>/history.json
 attempt_N/pip_runtime/
   predictions.jsonl
   iter_0004_exec-pip_<tool_call_id>/
@@ -687,8 +695,8 @@ attempt_N/pip_runtime/
     prediction.json
 ```
 
-`<instance_scope>` is a filesystem-safe instance label with a short hash suffix
-to avoid collisions between different raw `instance_id` values.
+`<instance_scope>` and `<family_scope>` are filesystem-safe labels with short
+hash suffixes to avoid collisions between different raw scope values.
 
 `pending.json` snapshots the normalized command and predictions before the pip
 command executes, including the history path used for that prediction.
@@ -732,17 +740,16 @@ arguments, or change Python execution semantics. It intentionally excludes
 invocations such as `python eval.py`, `python3 -u /app/explorer.py`, and
 `timeout 20 python3 script.py` are admitted.
 
-Python script prediction uses same-instance history shared across attempts.
-In task-container mode, the host seeds each attempt's local history mirror
-before the container starts and merges successful prediction rows back after
-the attempt finishes, matching the pip runtime history pattern.
+Python script prediction uses the same two-bucket sharing pattern as pip:
+instance history is preferred, family history is used for cold starts, and
+successful rows are merged into both after the attempt finishes.
 
 Artifacts are written as:
 
 ```text
 python_script_runtime_db/
-  <instance_scope>/
-    history.json
+  <instance_scope>/history.json
+  family/<family_scope>/history.json
 attempt_N/python_script_runtime/
   predictions.jsonl
   iter_0004_python-script_<tool_call_id>/
