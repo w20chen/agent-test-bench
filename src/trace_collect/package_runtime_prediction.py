@@ -915,8 +915,6 @@ def format_pip_prediction_summary(payload: dict[str, Any]) -> str:
 
     def _strat(label: str, pred_key: str, err_key: str) -> str:
         val = payload.get(pred_key)
-        if val is None:
-            return ""
         arrow = "\u2192" if err_key == recommended else " "
         return f"{arrow}{label}={_s(val)}({_pct(err_key)})"
 
@@ -930,4 +928,4 @@ def format_pip_prediction_summary(payload: dict[str, Any]) -> str:
         _strat("glob", "prediction_global_median_s", "global_median"),
         f"| {reliability}",
     ]
-    return " ".join(p for p in parts if p)
+    return " ".join(parts)
