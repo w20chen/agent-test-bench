@@ -1704,6 +1704,7 @@ def finalize_pytest_runtime_prediction(
             else None
         ),
         "prediction_last_run_s": predictions["prediction_last_run_s"],
+        "prediction_family_last_run_s": predictions["prediction_family_last_run_s"],
         "prediction_test_count_s": predictions["prediction_test_count_s"],
         "prediction_per_test_s": predictions["prediction_per_test_s"],
         "prediction_per_test_without_overhead_s": predictions[
