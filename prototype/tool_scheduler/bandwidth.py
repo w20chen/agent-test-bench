@@ -202,20 +202,18 @@ class BandwidthCollector:
                 available=False,
             )
 
-        # Build perf stat command
-        # Use -a for system-wide, -I for interval, -x for CSV output
-        # We sample for one interval and parse the output
+        # Build perf stat command (consistent with memory_bandwidth.py).
+        # All PMU events are passed as a comma-separated list to a single -e,
+        # avoiding the fragile index-based insert that produced duplicate -e
+        # flags when more than one event was configured.
         cmd = [
             "perf", "stat",
             "-a",  # system-wide
             "-x", ",",  # CSV output
+            "-e", ",".join(events),
             "-I", str(int(self._sample_interval * 1000)),  # interval in ms
             "--", "sleep", str(self._sample_interval),
         ]
-        # Insert events before --
-        for evt in events:
-            cmd.insert(2, "-e")
-            cmd.insert(3, evt)
 
         try:
             result = subprocess.run(

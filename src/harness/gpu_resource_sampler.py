@@ -35,6 +35,7 @@ class GpuResourceSampler:
         vllm_pid: int,
         output_path: Path,
         sample_hz: float = 10.0,
+        kv_cache_is_percent: bool | None = None,
     ) -> None:
         if sample_hz <= 0:
             raise ValueError(f"sample_hz must be positive, got {sample_hz!r}")
@@ -42,6 +43,7 @@ class GpuResourceSampler:
             metrics_url=metrics_url,
             gpu_baseline=gpu_baseline,
             vllm_pid=vllm_pid,
+            kv_cache_is_percent=kv_cache_is_percent,
         )
         self._gpu_baseline = gpu_baseline
         self._output_path = Path(output_path)

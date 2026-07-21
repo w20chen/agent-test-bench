@@ -38,6 +38,18 @@ class VLLMMetricsClient:
     Clamped to 0 when negative (with a warning) — protects against
     nvidia-smi quantization noise + KV cache fragmentation but never
     fabricates values.
+
+    Parameters
+    ----------
+    kv_cache_is_percent:
+        Declares the convention of the ``gpu_cache_usage_perc`` /
+        ``kv_cache_usage_perc`` metric exposed by the vLLM metrics
+        endpoint:
+
+        - ``True``: metric is a percentage in [0, 100] (vLLM < 0.10)
+        - ``False``: metric is a fraction in [0, 1] (vLLM ≥ 0.10)
+        - ``None`` (default): auto-detect from the value range.
+          A warning is logged encouraging explicit configuration.
     """
 
     def __init__(
@@ -47,11 +59,13 @@ class VLLMMetricsClient:
         timeout_s: float = 5.0,
         gpu_baseline: GpuBaseline | None = None,
         vllm_pid: int | None = None,
+        kv_cache_is_percent: bool | None = None,
     ) -> None:
         self.metrics_url = metrics_url
         self.timeout_s = timeout_s
         self.gpu_baseline = gpu_baseline
         self.vllm_pid = vllm_pid
+        self._kv_cache_is_percent = kv_cache_is_percent
 
     @property
     def is_enabled(self) -> bool:
@@ -90,10 +104,27 @@ class VLLMMetricsClient:
         kv_total_mib = self.gpu_baseline.kv_cache_total_mib
         kv_used_mib: float | None = None
         if kv_cache_usage_perc is not None:
-            # vLLM names this metric "perc" but some versions expose a fraction
-            # in [0, 1] while others expose a percentage in [0, 100]. Bridge
-            # both conventions: if value > 1 treat as percent, else as fraction.
-            frac = kv_cache_usage_perc / 100.0 if kv_cache_usage_perc > 1.0 else kv_cache_usage_perc
+            if self._kv_cache_is_percent is None:
+                # Auto-detect: vLLM < 0.10 emits [0, 100]; vLLM ≥ 0.10
+                # emits [0, 1].  Values ≤ 1.0 are ambiguous (1.0 could be
+                # 1% or 100%), so we log a warning and default to fraction
+                # (vLLM ≥ 0.10 convention) for safety.  Set
+                # kv_cache_is_percent explicitly to silence this warning.
+                if kv_cache_usage_perc <= 1.0:
+                    frac = kv_cache_usage_perc  # treat as fraction
+                else:
+                    frac = kv_cache_usage_perc / 100.0  # treat as percent
+                logging.warning(
+                    "VLLMMetricsClient: kv_cache_is_percent not set; "
+                    "auto-detected value %.4f → fraction %.4f. "
+                    "Set kv_cache_is_percent=True for vLLM < 0.10 or "
+                    "kv_cache_is_percent=False for vLLM ≥ 0.10.",
+                    kv_cache_usage_perc, frac,
+                )
+            elif self._kv_cache_is_percent:
+                frac = kv_cache_usage_perc / 100.0
+            else:
+                frac = kv_cache_usage_perc
             kv_used_mib = max(0.0, frac * kv_total_mib)
         total_mib = float(row["memory_used_mib"])
         if kv_used_mib is not None:

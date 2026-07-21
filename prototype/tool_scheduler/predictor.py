@@ -121,11 +121,12 @@ class Predictor:
             recent_predictions=list(self._recent_predictions[-self._stability_window:]),
         )
 
-    def check_divergence(self, current_value: float) -> bool:
+    def check_divergence(self) -> bool:
         """Check if recent observations have diverged from the stable baseline.
 
-        Returns True if the last 3 predicted values differ significantly
-        from the previous stable values, indicating a phase change.
+        Compares the last 3 predicted values against the 3 values before them.
+        Returns True if the means differ by more than stability_threshold,
+        indicating a phase change.
         """
         if not self.stable:
             return False

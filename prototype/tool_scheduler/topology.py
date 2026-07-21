@@ -372,3 +372,37 @@ def get_current_numa_node(pid: int) -> Optional[int]:
         pass
 
     return None
+
+
+def get_current_cpu_for_pid(pid: int) -> Optional[int]:
+    """Get the logical CPU a process is currently (or was last) running on.
+
+    Reads field 39 (``processor``) from ``/proc/<pid>/stat``.  Returns
+    ``None`` on non-Linux, parse failure, or if the process has exited.
+
+    This is a point-in-time sample — the kernel reschedules the process
+    between reads — so callers should treat the result as advisory.
+    """
+    if sys.platform != "linux":
+        return None
+
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return None
+
+    # Field 2 (comm) may contain spaces and parens; find the last ')'
+    # and split the remainder.
+    rparen = stat_text.rfind(")")
+    if rparen < 0:
+        return None
+    # Fields after comm: state (index 0), ppid (1), ..., processor (36)
+    # processor is field 39 in the 1-indexed stat file → index 36 in the
+    # 0-indexed post-comm split.
+    fields = stat_text[rparen + 2:].split()
+    if len(fields) < 37:
+        return None
+    try:
+        return int(fields[36])
+    except (ValueError, IndexError):
+        return None

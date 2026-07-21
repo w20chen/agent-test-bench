@@ -11,7 +11,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .topology import Topology, discover as discover_topology, get_current_numa_node
+from .topology import (
+    Topology,
+    discover as discover_topology,
+    get_current_cpu_for_pid,
+    get_current_numa_node,
+)
 from .cost_model import (
     Placement,
     CostBreakdown,
@@ -114,7 +119,6 @@ class Scheduler:
     def _generate_candidates(
         self,
         root_pid: int,
-        requested_cores: int,
     ) -> tuple[Optional[Placement], list[Placement]]:
         """Generate candidate placements on the same NUMA node.
 
@@ -166,8 +170,18 @@ class Scheduler:
             )
             candidates.append(placement)
 
-        # Determine current placement (approximate)
-        if candidates:
+        # Determine current placement by checking which LLC group the
+        # process is actually running on (via /proc/<pid>/stat).
+        current_placement: Optional[Placement] = None
+        current_cpu = get_current_cpu_for_pid(root_pid)
+        if current_cpu is not None:
+            for candidate in candidates:
+                if current_cpu in candidate.cpus:
+                    current_placement = candidate
+                    break
+        # Fallback: if the CPU lookup fails or the CPU isn't in any
+        # candidate (race with reschedule), assume the first candidate.
+        if current_placement is None and candidates:
             current_placement = candidates[0]
 
         return current_placement, candidates
@@ -203,9 +217,7 @@ class Scheduler:
         memory_sensitivity = self._get_memory_sensitivity()
 
         # Generate candidates
-        current_placement, candidates = self._generate_candidates(
-            root_pid, requested_cores
-        )
+        current_placement, candidates = self._generate_candidates(root_pid)
 
         if not candidates:
             return None
@@ -288,7 +300,7 @@ class Scheduler:
 
     def check_phase_change(self) -> bool:
         """Check if the predictor has diverged, indicating a phase change."""
-        return self._predictor.check_divergence(0.0)
+        return self._predictor.check_divergence()
 
     def reset_after_phase_change(self) -> None:
         """Reset stability tracking after phase change."""

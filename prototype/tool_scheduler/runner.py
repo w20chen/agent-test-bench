@@ -262,7 +262,7 @@ def run_tool(
             state = predictor.update(latest.effective_cores)
 
             # Check for phase change
-            if predictor.check_divergence(0.0) and predictor.stable:
+            if predictor.check_divergence() and predictor.stable:
                 print(
                     f"[tool-scheduler] phase change detected at {elapsed:.1f}s, "
                     f"resetting stability",
