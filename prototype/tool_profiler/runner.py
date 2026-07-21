@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import os
-import shlex
 import signal
 import subprocess
 import sys
@@ -15,6 +14,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+import psutil
 
 from .sampler import sample_process_tree, SamplePoint
 from .metrics import compute_windows, aggregate_samples, AggregatedMetrics
@@ -39,38 +40,48 @@ def _format_bytes(n: int) -> str:
 
 def _print_early_profile(agg: AggregatedMetrics, command_str: str, elapsed: float) -> None:
     """Print the EARLY PROFILE block to stderr."""
-    print("\nEARLY PROFILE", file=sys.stderr)
-    print(f"  command:              {command_str}", file=sys.stderr)
-    print(f"  elapsed:              {elapsed:.2f} s", file=sys.stderr)
-    print(f"  behavior:             {agg.preliminary_behavior}", file=sys.stderr)
-    print(f"  stability:            {agg.profile_stability}", file=sys.stderr)
-    print(f"  effective cores avg:  {agg.avg_effective_cores:.1f}", file=sys.stderr)
-    print(f"  effective cores peak: {agg.peak_effective_cores:.1f}", file=sys.stderr)
-    print(f"  processes peak:       {agg.peak_process_count}", file=sys.stderr)
-    print(f"  threads peak:         {agg.peak_thread_count}", file=sys.stderr)
-    print(f"  RSS peak:             {_format_bytes(agg.rss_peak_bytes)}", file=sys.stderr)
-    print(f"  read:                 {_format_bytes(agg.total_read_bytes)}", file=sys.stderr)
-    print(f"  write:                {_format_bytes(agg.total_write_bytes)}", file=sys.stderr)
-    print(file=sys.stderr)
+    lines = [
+        "",
+        "EARLY PROFILE",
+        f"  command:              {command_str}",
+        f"  elapsed:              {elapsed:.2f} s",
+        f"  behavior:             {agg.preliminary_behavior}",
+        f"  stability:            {agg.profile_stability}",
+        f"  effective cores avg:  {agg.avg_effective_cores:.1f}",
+        f"  effective cores peak: {agg.peak_effective_cores:.1f}",
+        f"  processes peak:       {agg.peak_process_count}",
+        f"  threads peak:         {agg.peak_thread_count}",
+        f"  RSS peak:             {_format_bytes(agg.rss_peak_bytes)}",
+        f"  read:                 {_format_bytes(agg.total_read_bytes)}",
+        f"  write:                {_format_bytes(agg.total_write_bytes)}",
+        "",
+    ]
+    for line in lines:
+        print(f"[tool-profiler] {line}" if line else "[tool-profiler]", file=sys.stderr)
 
 
 def _print_final_profile(agg: AggregatedMetrics, command_str: str, wall_time: float, exit_code: int) -> None:
     """Print the FINAL PROFILE block to stderr."""
-    print("\nFINAL PROFILE", file=sys.stderr)
-    print(f"  wall time:            {wall_time:.2f} s", file=sys.stderr)
-    print(f"  exit code:            {exit_code}", file=sys.stderr)
-    print(f"  behavior:             {agg.preliminary_behavior}", file=sys.stderr)
-    print(f"  stability:            {agg.profile_stability}", file=sys.stderr)
-    print(f"  effective cores avg:  {agg.avg_effective_cores:.1f}", file=sys.stderr)
-    print(f"  effective cores p50:  {agg.p50_effective_cores:.1f}", file=sys.stderr)
-    print(f"  effective cores p90:  {agg.p90_effective_cores:.1f}", file=sys.stderr)
-    print(f"  effective cores peak: {agg.peak_effective_cores:.1f}", file=sys.stderr)
-    print(f"  processes peak:       {agg.peak_process_count}", file=sys.stderr)
-    print(f"  threads peak:         {agg.peak_thread_count}", file=sys.stderr)
-    print(f"  RSS peak:             {_format_bytes(agg.rss_peak_bytes)}", file=sys.stderr)
-    print(f"  read:                 {_format_bytes(agg.total_read_bytes)}", file=sys.stderr)
-    print(f"  write:                {_format_bytes(agg.total_write_bytes)}", file=sys.stderr)
-    print(file=sys.stderr)
+    lines = [
+        "",
+        "FINAL PROFILE",
+        f"  wall time:            {wall_time:.2f} s",
+        f"  exit code:            {exit_code}",
+        f"  behavior:             {agg.preliminary_behavior}",
+        f"  stability:            {agg.profile_stability}",
+        f"  effective cores avg:  {agg.avg_effective_cores:.1f}",
+        f"  effective cores p50:  {agg.p50_effective_cores:.1f}",
+        f"  effective cores p90:  {agg.p90_effective_cores:.1f}",
+        f"  effective cores peak: {agg.peak_effective_cores:.1f}",
+        f"  processes peak:       {agg.peak_process_count}",
+        f"  threads peak:         {agg.peak_thread_count}",
+        f"  RSS peak:             {_format_bytes(agg.rss_peak_bytes)}",
+        f"  read:                 {_format_bytes(agg.total_read_bytes)}",
+        f"  write:                {_format_bytes(agg.total_write_bytes)}",
+        "",
+    ]
+    for line in lines:
+        print(f"[tool-profiler] {line}" if line else "[tool-profiler]", file=sys.stderr)
 
 
 def _shorten_uuid(u: str, n: int = 4) -> str:
@@ -85,6 +96,7 @@ def run_tool(
     output_path: str = "tool_profiles.jsonl",
     verbose: bool = False,
     save_samples: bool = False,
+    shell_command: bool = False,
 ) -> int:
     """Run an external command with resource profiling.
 
@@ -100,7 +112,12 @@ def run_tool(
         The exit code of the tools process.
     """
     invocation_id = str(uuid.uuid4())
-    command_str = " ".join(command)
+    if shell_command:
+        if len(command) != 1:
+            raise ValueError("shell_command mode requires exactly one command string")
+        command_str = command[0]
+    else:
+        command_str = " ".join(command)
     cwd = os.getcwd()
     start_time = datetime.now(timezone.utc).isoformat()
 
@@ -115,23 +132,18 @@ def run_tool(
         file=sys.stderr,
     )
 
-    # Launch the tool as a new process group so we can signal the whole tree
-    # on Ctrl+C. On Windows, CREATE_NEW_PROCESS_GROUP is used instead.
-    # On all platforms, use shell=True so shell builtins (echo, dir, cd)
-    # and operators (pipes, redirects) work correctly.  The command list is
-    # joined via shlex.join / subprocess.list2cmdline as appropriate.
-    if sys.platform == "win32":
-        popen_kwargs: dict = {
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-            "shell": True,
-        }
-        popen_cmd: str | list[str] = subprocess.list2cmdline(command)
+    # Keep the profiled workload in this process group/session so an outer
+    # harness timeout can terminate the wrapper and workload together.  Existing
+    # shell commands can opt into shell parsing with shell_command=True.
+    if shell_command:
+        popen_kwargs: dict = {"shell": True}
+        popen_cmd: str | list[str] = command_str
+    elif sys.platform == "win32":
+        popen_kwargs = {"shell": False}
+        popen_cmd = command
     else:
-        popen_kwargs = {
-            "preexec_fn": os.setsid,
-            "shell": True,
-        }
-        popen_cmd = " ".join(shlex.quote(arg) for arg in command)
+        popen_kwargs = {"shell": False}
+        popen_cmd = command
 
     # Handle redirected/pseudo stdin/stdout/stderr (e.g., under pytest)
     # Some environments replace sys.std* with objects lacking fileno().
@@ -143,6 +155,7 @@ def run_tool(
         except (AttributeError, OSError, io.UnsupportedOperation):
             return default
 
+    proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(
             popen_cmd,
@@ -162,6 +175,61 @@ def run_tool(
 
     root_pid = proc.pid
     print(f"[tool-profiler] pid={root_pid}", file=sys.stderr)
+
+    def _terminate_process_tree(pid: int, sig: int | None = None) -> None:
+        """Terminate the profiled process tree rooted at *pid*."""
+        try:
+            root = psutil.Process(pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        try:
+            children = root.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            children = []
+
+        for child in reversed(children):
+            try:
+                if sig is not None and sys.platform != "win32":
+                    os.kill(child.pid, sig)
+                else:
+                    child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                pass
+
+        try:
+            if sig is not None and sys.platform != "win32":
+                os.kill(root.pid, sig)
+            else:
+                root.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            pass
+
+        _gone, alive = psutil.wait_procs([*children, root], timeout=5.0)
+        for proc_alive in alive:
+            try:
+                proc_alive.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    received_signal: int | None = None
+    previous_handlers: dict[int, object] = {}
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        nonlocal received_signal
+        received_signal = signum
+        print(
+            f"\n[tool-profiler] signal {signum} received, terminating workload tree",
+            file=sys.stderr,
+        )
+        _terminate_process_tree(root_pid, signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_signal)
+        except (ValueError, OSError, AttributeError):
+            pass
 
     samples: list[SamplePoint] = []
     sample_lock = threading.Lock()
@@ -218,44 +286,24 @@ def run_tool(
     sampler_thread = threading.Thread(target=sampler_loop, daemon=True)
     sampler_thread.start()
 
-    # Wait for the tool to finish; handle Ctrl+C
+    # Wait for the tool to finish; signal handlers above clean descendants.
     exit_code: int = -1
-    signaled = False
     try:
         exit_code = proc.wait()
     except KeyboardInterrupt:
-        signaled = True
-        print(
-            f"\n[tool-profiler] Ctrl+C received, forwarding to process group...",
-            file=sys.stderr,
-        )
-        try:
-            if sys.platform == "win32":
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                os.killpg(os.getpgid(root_pid), signal.SIGINT)
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            print("[tool-profiler] process didn't exit, sending SIGTERM...", file=sys.stderr)
-            try:
-                if sys.platform == "win32":
-                    proc.terminate()
-                else:
-                    os.killpg(os.getpgid(root_pid), signal.SIGTERM)
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("[tool-profiler] process still alive, sending SIGKILL...", file=sys.stderr)
-                try:
-                    if sys.platform == "win32":
-                        proc.kill()
-                    else:
-                        os.killpg(os.getpgid(root_pid), signal.SIGKILL)
-                except Exception:
-                    pass
-        exit_code = proc.returncode if proc.returncode is not None else -1
+        _handle_signal(signal.SIGINT, None)
+        exit_code = proc.returncode if proc.returncode is not None else 130
     finally:
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, AttributeError):
+                pass
         stop_sampling.set()
         sampler_thread.join(timeout=3.0)
+
+    if received_signal is not None:
+        exit_code = 128 + received_signal
 
     total_wall = time.monotonic() - start_mono
 
@@ -288,7 +336,7 @@ def run_tool(
             early_agg.profile_stability != final_agg.profile_stability
         )
 
-    if signaled:
+    if received_signal is not None:
         print(
             f"[tool-profiler] command terminated by signal",
             file=sys.stderr,
@@ -383,8 +431,11 @@ def run_tool(
 
     # Append JSONL
     try:
-        with open(output_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if output_path == "-":
+            print(json.dumps(record, ensure_ascii=False), file=sys.stdout)
+        else:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError as e:
         print(f"[tool-profiler] ERROR: cannot write output: {e}", file=sys.stderr)
 

@@ -13,9 +13,8 @@ from typing import Optional
 
 from .topology import (
     Topology,
-    discover as discover_topology,
-    get_current_cpu_for_pid,
     get_current_numa_node,
+    get_process_tree_cpu_ids,
 )
 from .cost_model import (
     Placement,
@@ -132,57 +131,65 @@ class Scheduler:
         if not self._topology.available:
             return None, []
 
-        # Determine current NUMA node
-        current_numa = get_current_numa_node(root_pid)
-        if current_numa is None:
-            # Default to NUMA node 0
-            current_numa = self._topology.numa_nodes[0] if self._topology.numa_nodes else 0
+        observed_cpus = {
+            cpu_id
+            for cpu_id in get_process_tree_cpu_ids(root_pid)
+            if cpu_id in self._topology.cpus
+        }
 
-        # Get LLC groups within this NUMA node
-        llc_groups = self._topology.llc_groups.get(current_numa, {})
-        if not llc_groups:
-            return None, []
-
-        # Get real bandwidth utilization for this NUMA node
-        bw_util = get_bandwidth_utilization(current_numa)
+        observed_numa_nodes = {
+            self._topology.cpus[cpu_id].numa_node for cpu_id in observed_cpus
+        }
+        if len(observed_numa_nodes) == 1:
+            candidate_numa_nodes = [next(iter(observed_numa_nodes))]
+        else:
+            fallback_numa = get_current_numa_node(root_pid)
+            if fallback_numa is not None and fallback_numa in self._topology.llc_groups:
+                candidate_numa_nodes = [fallback_numa]
+            else:
+                candidate_numa_nodes = list(self._topology.numa_nodes)
 
         candidates: list[Placement] = []
         current_placement: Optional[Placement] = None
 
-        for llc_id, cpu_list in sorted(llc_groups.items()):
-            # Use real idle detection from /proc/stat
-            free_phys, free_smt = idle_breakdown(
-                cpu_list,
-                physical_cores_per_cpu=self._topology.physical_cores_per_cpu,
-            )
+        for current_numa in candidate_numa_nodes:
+            # Get real bandwidth utilization for this NUMA node
+            bw_util = get_bandwidth_utilization(current_numa)
+            llc_groups = self._topology.llc_groups.get(current_numa, {})
 
-            placement_id = f"numa{current_numa}-llc{llc_id}"
+            for llc_id, cpu_list in sorted(llc_groups.items()):
+                # Use real idle detection from /proc/stat
+                free_phys, free_smt = idle_breakdown(
+                    cpu_list,
+                    physical_cores_per_cpu=self._topology.physical_cores_per_cpu,
+                )
 
-            placement = Placement(
-                placement_id=placement_id,
-                numa_node=current_numa,
-                llc_group=llc_id,
-                cpus=sorted(cpu_list),
-                available_physical_cores=free_phys,
-                available_smt_threads=free_smt,
-                # Real bandwidth utilization from PMU, or None if unavailable
-                bandwidth_utilization=bw_util,
-            )
-            candidates.append(placement)
+                placement_id = f"numa{current_numa}-llc{llc_id}"
 
-        # Determine current placement by checking which LLC group the
-        # process is actually running on (via /proc/<pid>/stat).
-        current_placement: Optional[Placement] = None
-        current_cpu = get_current_cpu_for_pid(root_pid)
-        if current_cpu is not None:
-            for candidate in candidates:
-                if current_cpu in candidate.cpus:
-                    current_placement = candidate
-                    break
-        # Fallback: if the CPU lookup fails or the CPU isn't in any
-        # candidate (race with reschedule), assume the first candidate.
-        if current_placement is None and candidates:
-            current_placement = candidates[0]
+                placement = Placement(
+                    placement_id=placement_id,
+                    numa_node=current_numa,
+                    llc_group=llc_id,
+                    cpus=sorted(cpu_list),
+                    available_physical_cores=free_phys,
+                    available_smt_threads=free_smt,
+                    # Real bandwidth utilization from PMU, or None if unavailable
+                    bandwidth_utilization=bw_util,
+                )
+                candidates.append(placement)
+
+        # Current placement is known only when every sampled live process is
+        # observed inside the same candidate. Multi-LLC or multi-NUMA process
+        # trees are deliberately treated as unknown rather than collapsed to one
+        # representative process.
+        if observed_cpus and candidates:
+            matching = [
+                candidate
+                for candidate in candidates
+                if observed_cpus.issubset(set(candidate.cpus))
+            ]
+            if len(matching) == 1:
+                current_placement = matching[0]
 
         return current_placement, candidates
 
@@ -259,16 +266,14 @@ class Scheduler:
         if best_cost is None or best_breakdown is None:
             return None
 
-        # Compute gain
         if current_cost is None:
-            # No current placement identified; use the first candidate as baseline
-            current_cost = best_cost
-            current_breakdown = best_breakdown
+            gain: Optional[float] = None
+            action = "keep"
+        else:
+            gain = current_cost - best_cost
+            action = "keep"
 
-        gain = current_cost - best_cost
-        action = "keep"
-
-        if gain > self._cost_config.migration_threshold:
+        if gain is not None and gain > self._cost_config.migration_threshold:
             action = "recommend_move"
 
         decision = Decision(

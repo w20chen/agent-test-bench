@@ -10,24 +10,23 @@ import json
 import logging
 import math
 import os
-import shlex
 import signal
 import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
-from .monitor import Monitor, MonitorSample
+import psutil
+
+from .monitor import Monitor
 from .predictor import Predictor
-from .topology import Topology, discover as discover_topology, hardcoded_topology
+from .topology import discover as discover_topology, hardcoded_topology
 from .cost_model import CostModelConfig
 from .scheduler import Scheduler, Decision, DEFAULT_COOLDOWN_SECONDS
 from .output import build_record
 from .bandwidth import (
     BandwidthCollector,
-    MemoryDomainConfig,
     load_memory_domain_configs,
     _auto_detect_memory_domains,
 )
@@ -44,7 +43,7 @@ MIN_SAMPLES_FOR_PREDICTION = 2
 def _format_decision(decision: Decision) -> str:
     """Format a decision as a human-readable block for stderr output."""
     lines = [
-        f"\n[decision @ {decision.elapsed_s:.1f}s]",
+        f"decision @ {decision.elapsed_s:.1f}s",
         f"predicted cores: {decision.predicted_cores:.1f}",
         f"memory sensitivity: {decision.memory_sensitivity}",
         "",
@@ -78,7 +77,10 @@ def _format_decision(decision: Decision) -> str:
         lines.append(f"gain: {decision.gain:.2f}")
     lines.append(f"action: {decision.action.upper()}")
 
-    return "\n".join(lines)
+    return "\n".join(
+        "[tool-scheduler] " + line if line else "[tool-scheduler]"
+        for line in lines
+    )
 
 
 def run_tool(
@@ -95,6 +97,7 @@ def run_tool(
     alpha: float = 0.3,
     bandwidth_config_path: Optional[str] = None,
     hardcode_topology: bool = False,
+    shell_command: bool = False,
 ) -> int:
     """Run an external command with online load prediction and scheduling.
 
@@ -114,9 +117,13 @@ def run_tool(
         The exit code of the tool process.
     """
     invocation_id = str(uuid.uuid4())
-    command_str = " ".join(command)
+    if shell_command:
+        if len(command) != 1:
+            raise ValueError("shell_command mode requires exactly one command string")
+        command_str = command[0]
+    else:
+        command_str = " ".join(command)
     cwd = os.getcwd()
-    start_time = datetime.now(timezone.utc).isoformat()
 
     # Build command signature for history lookup
     cmd_sig = _build_command_signature(command)
@@ -182,19 +189,19 @@ def run_tool(
         except Exception as exc:
             logger.debug("Bandwidth collector init skipped: %s", exc)
 
-    # Launch the tool as a new process group
-    if sys.platform == "win32":
-        popen_kwargs: dict = {
-            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-            "shell": True,
-        }
-        popen_cmd: str | list[str] = subprocess.list2cmdline(command)
+    # Launch in the scheduler's existing process group/session so an outer
+    # harness timeout can kill the scheduler and workload together.  The
+    # scheduler still installs signal handlers below to clean up descendants
+    # when it receives a graceful termination signal directly.
+    if shell_command:
+        popen_kwargs: dict = {"shell": True}
+        popen_cmd: str | list[str] = command_str
+    elif sys.platform == "win32":
+        popen_kwargs = {"shell": False}
+        popen_cmd = command
     else:
-        popen_kwargs = {
-            "preexec_fn": os.setsid,
-            "shell": True,
-        }
-        popen_cmd = " ".join(shlex.quote(arg) for arg in command)
+        popen_kwargs = {"shell": False}
+        popen_cmd = command
 
     # Safe stream handling
     def _safe_stream(stream, default):
@@ -204,6 +211,7 @@ def run_tool(
         except (AttributeError, OSError):
             return default
 
+    proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(
             popen_cmd,
@@ -223,6 +231,62 @@ def run_tool(
 
     root_pid = proc.pid
     print(f"[tool-scheduler] pid={root_pid}", file=sys.stderr)
+
+    def _terminate_process_tree(pid: int, sig: int | None = None) -> None:
+        """Terminate the workload process tree rooted at *pid*."""
+        try:
+            root = psutil.Process(pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        children: list[psutil.Process] = []
+        try:
+            children = root.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            children = []
+
+        for child in reversed(children):
+            try:
+                if sig is not None and sys.platform != "win32":
+                    os.kill(child.pid, sig)
+                else:
+                    child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                pass
+
+        try:
+            if sig is not None and sys.platform != "win32":
+                os.kill(root.pid, sig)
+            else:
+                root.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            pass
+
+        gone, alive = psutil.wait_procs([*children, root], timeout=5.0)
+        for proc_alive in alive:
+            try:
+                proc_alive.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    received_signal: int | None = None
+    previous_handlers: dict[int, object] = {}
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        nonlocal received_signal
+        received_signal = signum
+        print(
+            f"\n[tool-scheduler] signal {signum} received, terminating workload tree",
+            file=sys.stderr,
+        )
+        _terminate_process_tree(root_pid, signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_signal)
+        except (ValueError, OSError, AttributeError):
+            pass
 
     # Start monitoring
     monitor = Monitor(root_pid, sample_interval=0.5)
@@ -247,53 +311,63 @@ def run_tool(
     running = True
     exit_code: int = -1
 
-    while running:
-        # Check if process exited
-        poll_result = proc.poll()
-        if poll_result is not None:
-            exit_code = poll_result
-            running = False
-
-        elapsed = time.monotonic() - start_mono
-        latest = monitor.latest
-
-        # Update predictor with latest sample
-        if latest is not None and latest.effective_cores > 0:
-            state = predictor.update(latest.effective_cores)
-
-            # Check for phase change
-            if predictor.check_divergence() and predictor.stable:
-                print(
-                    f"[tool-scheduler] phase change detected at {elapsed:.1f}s, "
-                    f"resetting stability",
-                    file=sys.stderr,
-                )
-                scheduler.reset_after_phase_change()
-
-            if verbose and latest.effective_cores > 0:
-                print(
-                    f"[tool-scheduler] t={elapsed:.1f}s "
-                    f"eff_cores={latest.effective_cores:.1f} "
-                    f"pred_cores={predictor.predicted_cores:.1f} "
-                    f"stable={predictor.stable}",
-                    file=sys.stderr,
-                )
-
-        # Evaluate scheduling decision
-        if topology.available:
-            decision = scheduler.evaluate(elapsed, root_pid)
-            if decision is not None:
-                decisions.append(decision)
-                print(_format_decision(decision), file=sys.stderr)
-
-        # Wait for next decision interval (or until process exits)
-        if running:
-            try:
-                proc.wait(timeout=DECISION_INTERVAL)
-                exit_code = proc.returncode if proc.returncode is not None else -1
+    try:
+        while running:
+            # Check if process exited
+            poll_result = proc.poll()
+            if poll_result is not None:
+                exit_code = poll_result
                 running = False
-            except subprocess.TimeoutExpired:
+
+            elapsed = time.monotonic() - start_mono
+            latest = monitor.latest
+
+            # Update predictor with latest sample
+            if latest is not None and latest.effective_cores > 0:
+                predictor.update(latest.effective_cores)
+
+                # Check for phase change
+                if predictor.check_divergence() and predictor.stable:
+                    print(
+                        f"[tool-scheduler] phase change detected at {elapsed:.1f}s, "
+                        f"resetting stability",
+                        file=sys.stderr,
+                    )
+                    scheduler.reset_after_phase_change()
+
+                if verbose and latest.effective_cores > 0:
+                    print(
+                        f"[tool-scheduler] t={elapsed:.1f}s "
+                        f"eff_cores={latest.effective_cores:.1f} "
+                        f"pred_cores={predictor.predicted_cores:.1f} "
+                        f"stable={predictor.stable}",
+                        file=sys.stderr,
+                    )
+
+            # Evaluate scheduling decision
+            if topology.available:
+                decision = scheduler.evaluate(elapsed, root_pid)
+                if decision is not None:
+                    decisions.append(decision)
+                    print(_format_decision(decision), file=sys.stderr)
+
+            # Wait for next decision interval (or until process exits)
+            if running:
+                try:
+                    proc.wait(timeout=DECISION_INTERVAL)
+                    exit_code = proc.returncode if proc.returncode is not None else -1
+                    running = False
+                except subprocess.TimeoutExpired:
+                    pass
+    finally:
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, AttributeError):
                 pass
+
+    if received_signal is not None:
+        exit_code = 128 + received_signal
 
     # Stop monitoring
     monitor.stop()
@@ -355,8 +429,11 @@ def run_tool(
     )
 
     try:
-        with open(output_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if output_path == "-":
+            print(json.dumps(record, ensure_ascii=False), file=sys.stdout)
+        else:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError as e:
         print(f"[tool-scheduler] ERROR: cannot write output: {e}", file=sys.stderr)
 

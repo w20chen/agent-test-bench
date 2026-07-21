@@ -1831,8 +1831,8 @@ async def _run_openclaw_in_task_container(
     elif tool_scheduler_mode:
         # tool_scheduler per-tool: uses the prototype online load-prediction
         # scheduler.  Wraps matching tool commands with:
-        #   python -m prototype.tool_scheduler --hardcode-topology
-        #     --output <profile.jsonl> --dry-run -- <command>
+        #   python -m prototype.tool_scheduler --output <profile.jsonl>
+        #     --dry-run --shell-command -- <command>
         # Activation is via env vars read by ExecTool.execute() in shell.py.
         tool_scheduler_out_dir.mkdir(parents=True, exist_ok=True)
         tools = ",".join(tool_profiling_tools or ["exec-pytest"])
@@ -1840,9 +1840,6 @@ async def _run_openclaw_in_task_container(
             "-e", "TOOL_SCHEDULER=1",
             "-e", f"TOOL_SCHEDULER_OUT={tool_scheduler_out_dir.resolve()}",
             "-e", f"TOOL_SCHEDULER_TOOLS={tools}",
-            # Use hardcoded topology inside container (host topology
-            # may not be visible from within container).
-            "-e", "TOOL_SCHEDULER_HARDCODE_TOPOLOGY=1",
         ])
     container_id = start_task_container(
         fixed_image,

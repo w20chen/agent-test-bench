@@ -396,16 +396,19 @@ class ExecTool(Tool):
             if sys.platform == "win32":
                 _py_exe = '"' + sys.executable.replace('"', '""') + '"'
                 _tp_path_q = '"' + _tp_profile_path.replace('"', '""') + '"'
+                _tp_payload_q = '"' + run_command.replace('"', '""') + '"'
             else:
                 _py_exe = shlex.quote(sys.executable)
                 _tp_path_q = shlex.quote(_tp_profile_path)
+                _tp_payload_q = shlex.quote(run_command)
 
             run_command = (
                 f"{_pythonpath_prefix}"
                 f"{_py_exe} -m prototype.tool_profiler "
                 f"--warmup-seconds 2 --sample-interval 0.2 "
                 f"--output {_tp_path_q} "
-                f"-- {run_command}"
+                f"--shell-command "
+                f"-- {_tp_payload_q}"
             )
 
         # --- tool_scheduler online scheduling (prototype) ---
@@ -431,9 +434,11 @@ class ExecTool(Tool):
             if sys.platform == "win32":
                 _py_exe = '"' + sys.executable.replace('"', '""') + '"'
                 _ts_path_q = '"' + _ts_profile_path.replace('"', '""') + '"'
+                _ts_payload_q = '"' + run_command.replace('"', '""') + '"'
             else:
                 _py_exe = shlex.quote(sys.executable)
                 _ts_path_q = shlex.quote(_ts_profile_path)
+                _ts_payload_q = shlex.quote(run_command)
 
             _ts_hardcode_flag = "--hardcode-topology " if _ts_hardcode else ""
             run_command = (
@@ -442,7 +447,8 @@ class ExecTool(Tool):
                 f"{_ts_hardcode_flag}"
                 f"--output {_ts_path_q} "
                 f"--dry-run "
-                f"-- {run_command}"
+                f"--shell-command "
+                f"-- {_ts_payload_q}"
             )
 
         # Per-invocation proc-tree sampler.  Runs in-container alongside the
@@ -566,17 +572,11 @@ class ExecTool(Tool):
                     tp_diag_lines = [
                         line for line in stderr_lines
                         if line.startswith("[tool-profiler]")
-                        or line.startswith("EARLY PROFILE")
-                        or line.startswith("FINAL PROFILE")
-                        or line.startswith("  ")  # indented profile detail lines
                     ]
                     stderr_lines = [
                         line for line in stderr_lines
                         if not (
                             line.startswith("[tool-profiler]")
-                            or line.startswith("EARLY PROFILE")
-                            or line.startswith("FINAL PROFILE")
-                            or line.startswith("  ")
                         )
                     ]
                     stderr_text = "\n".join(stderr_lines)
@@ -597,37 +597,11 @@ class ExecTool(Tool):
                     ts_diag_lines = [
                         line for line in stderr_lines
                         if line.startswith("[tool-scheduler]")
-                        or line.startswith("[decision @")
-                        or line.startswith("predicted cores:")
-                        or line.startswith("memory sensitivity:")
-                        or line.startswith("current:")
-                        or line.startswith("best candidate:")
-                        or line.startswith("gain:")
-                        or line.startswith("action:")
-                        or line.startswith("  placement:")
-                        or line.startswith("  core cost:")
-                        or line.startswith("  memory cost:")
-                        or line.startswith("  move cost:")
-                        or line.startswith("  total cost:")
-                        or line.startswith("WARNING:")
                     ]
                     stderr_lines = [
                         line for line in stderr_lines
                         if not (
                             line.startswith("[tool-scheduler]")
-                            or line.startswith("[decision @")
-                            or line.startswith("predicted cores:")
-                            or line.startswith("memory sensitivity:")
-                            or line.startswith("current:")
-                            or line.startswith("best candidate:")
-                            or line.startswith("gain:")
-                            or line.startswith("action:")
-                            or line.startswith("  placement:")
-                            or line.startswith("  core cost:")
-                            or line.startswith("  memory cost:")
-                            or line.startswith("  move cost:")
-                            or line.startswith("  total cost:")
-                            or line.startswith("WARNING:")
                         )
                     ]
                     stderr_text = "\n".join(stderr_lines)

@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 from prototype.tool_profiler.runner import run_tool
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _path_to_python() -> str:
@@ -49,6 +55,110 @@ class TestRunTool:
         rec = json.loads(lines[0])
         assert rec["final_profile"]["short_tool"] is True
         assert rec["early_profile"]["available"] is False
+
+    def test_shell_command_preserves_shell_operators(self, tmp_path: Path) -> None:
+        """shell_command mode should pass shell operators to the inner shell."""
+        output = str(tmp_path / "profiles.jsonl")
+        if sys.platform == "win32":
+            py = subprocess.list2cmdline([sys.executable])
+        else:
+            py = shlex.quote(sys.executable)
+        command = (
+            f"{py} -c \"print('first')\" && "
+            f"{py} -c \"print('second')\""
+        )
+        exit_code = run_tool(
+            command=[command],
+            warmup_seconds=2.0,
+            sample_interval=0.2,
+            output_path=output,
+            verbose=False,
+            save_samples=False,
+            shell_command=True,
+        )
+        assert exit_code == 0
+        with open(output, encoding="utf-8") as f:
+            rec = json.loads(f.readline())
+        assert rec["command"] == [command]
+        assert rec["exit_code"] == 0
+
+    def test_output_dash_writes_json_to_stdout(self, tmp_path: Path) -> None:
+        """--output - should write JSON to stdout, not a literal '-' file."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "prototype.tool_profiler",
+             "--output", "-",
+             "--", sys.executable, "-c", "print('payload')"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert "payload" in result.stdout
+        assert not (tmp_path / "-").exists()
+        rec = json.loads(result.stdout.strip().splitlines()[-1])
+        assert rec["exit_code"] == 0
+
+    def test_shell_command_rejects_multiple_argv_payload(self) -> None:
+        """CLI shell-command mode requires one already-quoted payload string."""
+        result = subprocess.run(
+            [sys.executable, "-m", "prototype.tool_profiler",
+             "--shell-command",
+             "--", "python", "-c", "print('x')"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode != 0
+        assert "requires exactly one shell command string" in result.stderr
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGTERM cleanup test")
+    def test_sigterm_cleans_workload_descendants(self, tmp_path: Path) -> None:
+        """Terminating profiler should clean up the profiled process tree."""
+        psutil = pytest.importorskip("psutil")
+        pid_file = tmp_path / "child.pid"
+        output = tmp_path / "profile.jsonl"
+        child_code = "import time; time.sleep(60)"
+        parent_code = (
+            "import subprocess, sys, time; "
+            f"p = subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
+            "time.sleep(60)"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "prototype.tool_profiler",
+             "--output", str(output),
+             "--", sys.executable, "-c", parent_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10.0
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert pid_file.exists(), "workload child pid file was not created"
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            assert psutil.pid_exists(child_pid)
+
+            proc.terminate()
+            return_code = proc.wait(timeout=15)
+            assert return_code == 143
+
+            deadline = time.monotonic() + 5.0
+            while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert not psutil.pid_exists(child_pid)
+            assert output.exists()
+            rec = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
+            assert rec["exit_code"] == 143
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
 
     def test_long_tool_early_profile(self, tmp_path: Path) -> None:
         """Tool running > warmup should emit early profile."""

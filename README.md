@@ -137,7 +137,8 @@ Each benchmark has its own setup requirements. See
 Terminal-Bench, Deep Research Bench, BrowseComp, and BFCL.
 
 For task selection, concurrency, resuming, monitoring controls, and per-tool
-profiling, see [Trace Collect](docs/trace-collect.md). For simulate mode, see
+profiling, see [Trace Collect](docs/trace-collect.md) and
+[Tool Profiler and Tool Scheduler](docs/tool-profiling.md). For simulate mode, see
 the [simulate section](docs/trace-collect.md#simulate-trace-replay).
 
 ## Documentation

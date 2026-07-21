@@ -30,6 +30,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   python -m prototype.tool_profiler -- python run.py
   python -m prototype.tool_profiler --warmup-seconds 3 -- make -j8
   python -m prototype.tool_profiler --save-samples -- pytest -q
+  python -m prototype.tool_profiler --shell-command -- "pytest -q && echo ok"
         """,
     )
 
@@ -62,6 +63,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Include all raw sample data in JSONL output.",
     )
     parser.add_argument(
+        "--shell-command",
+        action="store_true",
+        help=(
+            "Treat the command after -- as one shell command string. This is "
+            "intended for wrapping an existing shell command without changing "
+            "operators such as &&, pipes, redirects, or environment assignment."
+        ),
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="The command to profile (after --).",
@@ -76,6 +86,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if not args.command:
         parser.error("No command specified. Use: tool_profiler.py -- <command>")
+    if args.shell_command:
+        if len(args.command) != 1:
+            parser.error(
+                "--shell-command requires exactly one shell command string after --"
+            )
 
     return args
 
@@ -100,6 +115,7 @@ def main(argv: list[str] | None = None) -> None:
         output_path=args.output,
         verbose=args.verbose,
         save_samples=args.save_samples,
+        shell_command=args.shell_command,
     )
 
     sys.exit(exit_code)

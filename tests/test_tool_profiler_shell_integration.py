@@ -108,3 +108,109 @@ class TestToolProfilerShellIntegration:
         # There should be at least one profile subdirectory with profile.jsonl
         profile_files = glob.glob(f"{out_dir}/**/profile.jsonl", recursive=True)
         assert len(profile_files) >= 1, f"No profile.jsonl found in {out_dir}"
+
+    def test_tool_profiler_preserves_shell_operators(self, monkeypatch, tmp_path) -> None:
+        """Profiler wrapping should keep an existing shell command intact."""
+        out_dir = str(tmp_path / "tool_profiles")
+        monkeypatch.setenv("TOOL_PROFILER", "1")
+        monkeypatch.setenv("TOOL_PROFILER_TOOLS", "exec-python")
+        monkeypatch.setenv("TOOL_PROFILER_OUT", out_dir)
+
+        from agents.openclaw.tools.shell import ExecTool
+
+        tool = ExecTool(timeout=30)
+        command = (
+            "python -c \"print('first')\" && "
+            "python -c \"print('second')\""
+        )
+
+        async def _run():
+            return await tool.execute(command=command)
+
+        result = asyncio.run(_run())
+        assert "first" in result
+        assert "second" in result
+        assert "Exit code: 0" in result
+
+        profile_files = glob.glob(f"{out_dir}/**/profile.jsonl", recursive=True)
+        assert len(profile_files) >= 1, f"No profile.jsonl found in {out_dir}"
+
+    def test_tool_profiler_preserves_tool_stderr_prefixes(self, monkeypatch, tmp_path) -> None:
+        """Profiler stderr filtering must not remove real tool stderr lines."""
+        out_dir = str(tmp_path / "tool_profiles")
+        monkeypatch.setenv("TOOL_PROFILER", "1")
+        monkeypatch.setenv("TOOL_PROFILER_TOOLS", "exec-python")
+        monkeypatch.setenv("TOOL_PROFILER_OUT", out_dir)
+
+        from agents.openclaw.tools.shell import ExecTool
+
+        tool = ExecTool(timeout=30)
+        command = (
+            "python -c \"import sys; "
+            "print('  keep indented stderr', file=sys.stderr); "
+            "print('FINAL PROFILE from tool', file=sys.stderr)\""
+        )
+
+        async def _run():
+            return await tool.execute(command=command)
+
+        result = asyncio.run(_run())
+        assert "  keep indented stderr" in result
+        assert "FINAL PROFILE from tool" in result
+        assert "[tool-profiler]" not in result
+
+
+class TestToolSchedulerShellIntegration:
+    """Integration tests for tool_scheduler wrapping in ExecTool."""
+
+    def test_tool_scheduler_preserves_shell_operators(self, monkeypatch, tmp_path) -> None:
+        """Scheduler wrapping should keep an existing shell command intact."""
+        out_dir = str(tmp_path / "tool_scheduler")
+        monkeypatch.setenv("TOOL_SCHEDULER", "1")
+        monkeypatch.setenv("TOOL_SCHEDULER_TOOLS", "exec-python")
+        monkeypatch.setenv("TOOL_SCHEDULER_OUT", out_dir)
+        monkeypatch.delenv("TOOL_SCHEDULER_HARDCODE_TOPOLOGY", raising=False)
+
+        from agents.openclaw.tools.shell import ExecTool
+
+        tool = ExecTool(timeout=30)
+        command = (
+            "python -c \"print('first')\" && "
+            "python -c \"print('second')\""
+        )
+
+        async def _run():
+            return await tool.execute(command=command)
+
+        result = asyncio.run(_run())
+        assert "first" in result
+        assert "second" in result
+        assert "Exit code: 0" in result
+
+        profile_files = glob.glob(f"{out_dir}/**/profile.jsonl", recursive=True)
+        assert len(profile_files) >= 1, f"No scheduler profile.jsonl found in {out_dir}"
+
+    def test_tool_scheduler_preserves_tool_stderr_prefixes(self, monkeypatch, tmp_path) -> None:
+        """Scheduler stderr filtering must not remove real tool stderr lines."""
+        out_dir = str(tmp_path / "tool_scheduler")
+        monkeypatch.setenv("TOOL_SCHEDULER", "1")
+        monkeypatch.setenv("TOOL_SCHEDULER_TOOLS", "exec-python")
+        monkeypatch.setenv("TOOL_SCHEDULER_OUT", out_dir)
+        monkeypatch.delenv("TOOL_SCHEDULER_HARDCODE_TOPOLOGY", raising=False)
+
+        from agents.openclaw.tools.shell import ExecTool
+
+        tool = ExecTool(timeout=30)
+        command = (
+            "python -c \"import sys; "
+            "print('WARNING: keep me', file=sys.stderr); "
+            "print('action: keep me', file=sys.stderr)\""
+        )
+
+        async def _run():
+            return await tool.execute(command=command)
+
+        result = asyncio.run(_run())
+        assert "WARNING: keep me" in result
+        assert "action: keep me" in result
+        assert "[tool-scheduler]" not in result

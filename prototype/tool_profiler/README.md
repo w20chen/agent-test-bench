@@ -64,7 +64,7 @@ prototype/tool_profiler/
 ### Module Responsibilities
 
 - **`cli.py`**: Parses `--warmup-seconds`, `--sample-interval`, `--output`, `--`, and delegates to `runner.run_tool()`.
-- **`runner.py`**: Launches the tool in a separate process group (`setsid` on Unix, `CREATE_NEW_PROCESS_GROUP` on Windows), runs a daemon sampling thread, waits for tool exit, handles Ctrl+C forwarding, and writes JSONL output.
+- **`runner.py`**: Launches argv commands directly (`shell=False`) and uses `--shell-command` only for existing shell command strings, runs a daemon sampling thread, waits for tool exit, handles termination by cleaning the profiled process tree, and writes JSONL output.
 - **`sampler.py`**: Uses `psutil.Process(pid)` to enumerate the process tree (`children(recursive=True)`) and aggregates CPU times, RSS, VMS, I/O counters, context switches, and page faults across all live processes.
 - **`metrics.py`**: Computes per-window deltas, `effective_cpu_cores`, percentiles (linear interpolation), coefficient of variation, and aggregates into `AggregatedMetrics`.
 - **`classifier.py`**: Applies simple threshold-based rules to assign a weak behavior label (`cpu_parallel`, `cpu_serial`, `io_active`, `mixed`, `idle_or_waiting`, `unknown`).

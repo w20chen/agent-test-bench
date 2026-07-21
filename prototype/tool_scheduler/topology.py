@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import psutil
+
 logger = logging.getLogger(__name__)
 
 _SYS_CPU = Path("/sys/devices/system/cpu")
@@ -97,9 +99,9 @@ def _discover_llc_groups(cpu_id: int) -> int:
     if not cpu_cache_dir.exists():
         return -1
 
-    best_index: Optional[int] = None
     best_level: int = -1
     best_shared_count: int = 1
+    best_shared_list: list[int] = []
 
     for index_dir in sorted(cpu_cache_dir.iterdir()):
         if not index_dir.is_dir() or not index_dir.name.startswith("index"):
@@ -115,14 +117,14 @@ def _discover_llc_groups(cpu_id: int) -> int:
             ):
                 best_level = level
                 best_shared_count = len(shared_list)
-                # Extract index number
-                idx_str = index_dir.name.replace("index", "")
-                best_index = int(idx_str)
+                best_shared_list = sorted(shared_list)
         except (OSError, ValueError):
             continue
 
-    if best_index is not None:
-        return best_index
+    if best_shared_list:
+        # The cache index number is local to each CPU and is not a shared-cache
+        # identifier.  Use the first CPU in the shared list as a stable group id.
+        return min(best_shared_list)
     return -1
 
 
@@ -159,6 +161,15 @@ def discover() -> Topology:
         logger.warning("No CPUs discovered via sysfs")
         return Topology(available=False)
 
+    try:
+        allowed_cpu_ids = set(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        allowed_cpu_ids = set(all_cpu_ids)
+    all_cpu_ids = [cpu_id for cpu_id in all_cpu_ids if cpu_id in allowed_cpu_ids]
+    if not all_cpu_ids:
+        logger.warning("No discovered CPUs are allowed by process affinity")
+        return Topology(available=False)
+
     # Collect per-CPU info
     cpus: dict[int, CpuInfo] = {}
     numa_nodes_set: set[int] = set()
@@ -173,7 +184,11 @@ def discover() -> Topology:
 
         pkg_id = _read_int(topo_dir / "physical_package_id")
         core_id = _read_int(topo_dir / "core_id")
-        thread_siblings = _read_int_list(topo_dir / "thread_siblings_list")
+        thread_siblings = [
+            sibling
+            for sibling in _read_int_list(topo_dir / "thread_siblings_list")
+            if sibling in allowed_cpu_ids
+        ]
 
         if pkg_id is None or core_id is None:
             continue
@@ -372,6 +387,68 @@ def get_current_numa_node(pid: int) -> Optional[int]:
         pass
 
     return None
+
+
+def get_representative_pid(root_pid: int) -> int:
+    """Return the process-tree PID with the largest accumulated CPU time."""
+    try:
+        root = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return root_pid
+
+    candidates: list[psutil.Process] = []
+    try:
+        if root.is_running():
+            candidates.append(root)
+        candidates.extend(root.children(recursive=True))
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return root_pid
+
+    best_pid = root_pid
+    best_cpu_time = -1.0
+    for proc in candidates:
+        try:
+            times = proc.cpu_times()
+            cpu_time = float(times.user + times.system)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if cpu_time > best_cpu_time:
+            best_cpu_time = cpu_time
+            best_pid = proc.pid
+
+    return best_pid
+
+
+def get_process_tree_cpu_ids(root_pid: int) -> list[int]:
+    """Return last-observed CPU ids for the root process and live descendants."""
+    try:
+        root = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+
+    procs: list[psutil.Process] = []
+    try:
+        if root.is_running():
+            procs.append(root)
+        procs.extend(root.children(recursive=True))
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return []
+
+    cpu_ids: list[int] = []
+    for proc in procs:
+        try:
+            cpu_num = proc.cpu_num()
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.ZombieProcess,
+            AttributeError,
+        ):
+            continue
+        if cpu_num is not None and cpu_num >= 0:
+            cpu_ids.append(int(cpu_num))
+
+    return cpu_ids
 
 
 def get_current_cpu_for_pid(pid: int) -> Optional[int]:

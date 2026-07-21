@@ -5,6 +5,7 @@ Run with: python -m pytest tests/test_tool_scheduler.py -v
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -154,9 +155,12 @@ class TestMonitor:
         # Single-threaded CPU-bound process - run longer to ensure multiple samples
         proc = sp.Popen(
             [sys.executable, "-c",
-             "import time; t0=time.monotonic();"
-             "while time.monotonic()-t0<5.0:"
-             " sum(i**0.5 for i in range(50000))"],
+             "\n".join([
+                 "import time",
+                 "t0=time.monotonic()",
+                 "while time.monotonic()-t0<5.0:",
+                 "    sum(i**0.5 for i in range(50000))",
+             ])],
             stdout=sp.DEVNULL, stderr=sp.DEVNULL,
         )
         m = Monitor(proc.pid, sample_interval=0.3)
@@ -178,6 +182,109 @@ class TestMonitor:
 
 class TestCLI:
     """Integration tests for the CLI."""
+
+    def test_shell_command_preserves_shell_operators(self, tmp_path):
+        """--shell-command should pass operators like && to the inner shell."""
+        output = tmp_path / "shell_profile.jsonl"
+        if sys.platform == "win32":
+            py = subprocess.list2cmdline([sys.executable])
+        else:
+            py = shlex.quote(sys.executable)
+        payload = (
+            f"{py} -c \"print('first')\" && "
+            f"{py} -c \"print('second')\""
+        )
+        result = subprocess.run(
+            [sys.executable, "-m", "prototype.tool_scheduler",
+             "--output", str(output),
+             "--dry-run",
+             "--shell-command",
+             "--", payload],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0
+        assert "first" in result.stdout
+        assert "second" in result.stdout
+        assert output.exists()
+
+    def test_output_dash_writes_json_to_stdout(self, tmp_path):
+        """--output - should not create a literal '-' file in the cwd."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "prototype.tool_scheduler",
+             "--output", "-",
+             "--dry-run",
+             "--", sys.executable, "-c", "print('payload')"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0
+        assert "payload" in result.stdout
+        assert not (tmp_path / "-").exists()
+        json_line = result.stdout.strip().splitlines()[-1]
+        rec = json.loads(json_line)
+        assert rec["exit_code"] == 0
+
+    def test_shell_command_rejects_multiple_argv_payload(self) -> None:
+        """CLI shell-command mode requires one already-quoted payload string."""
+        result = subprocess.run(
+            [sys.executable, "-m", "prototype.tool_scheduler",
+             "--shell-command",
+             "--", "python", "-c", "print('x')"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode != 0
+        assert "requires exactly one shell command string" in result.stderr
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGTERM cleanup test")
+    def test_sigterm_cleans_workload_descendants(self, tmp_path):
+        """Terminating the scheduler should clean up the wrapped process tree."""
+        psutil = pytest.importorskip("psutil")
+        pid_file = tmp_path / "child.pid"
+        output = tmp_path / "profile.jsonl"
+        child_code = "import time; time.sleep(60)"
+        parent_code = (
+            "import subprocess, sys, time; "
+            f"p = subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(p.pid)); "
+            "time.sleep(60)"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "prototype.tool_scheduler",
+             "--output", str(output),
+             "--dry-run",
+             "--", sys.executable, "-c", parent_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10.0
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert pid_file.exists(), "workload child pid file was not created"
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            assert psutil.pid_exists(child_pid)
+
+            proc.terminate()
+            return_code = proc.wait(timeout=15)
+            assert return_code == 143
+
+            deadline = time.monotonic() + 5.0
+            while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert not psutil.pid_exists(child_pid)
+            assert output.exists()
+            rec = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
+            assert rec["exit_code"] == 143
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
 
     def test_short_tool(self):
         """Short tools (<2s) should be marked as short_tool=true."""
@@ -276,6 +383,175 @@ class TestIdle:
         # Without util data, all should be available
         assert phys == 2  # Two physical cores
         assert smt == 2  # Two SMT threads
+
+
+class TestTopology:
+    """Unit tests for topology discovery helpers."""
+
+    def test_llc_group_uses_shared_cpu_list_not_cache_index(self, tmp_path, monkeypatch):
+        from prototype.tool_scheduler import topology
+
+        def _write_cache(cpu: int, shared: str) -> None:
+            cache_dir = tmp_path / f"cpu{cpu}" / "cache" / "index3"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "level").write_text("3\n", encoding="ascii")
+            (cache_dir / "shared_cpu_list").write_text(shared + "\n", encoding="ascii")
+
+        _write_cache(0, "0-3")
+        _write_cache(4, "4-7")
+        monkeypatch.setattr(topology, "_SYS_CPU", tmp_path)
+
+        assert topology._discover_llc_groups(0) == 0
+        assert topology._discover_llc_groups(4) == 4
+
+    def test_discover_filters_to_process_affinity(self, tmp_path, monkeypatch):
+        from prototype.tool_scheduler import topology
+
+        def _write_cpu(cpu: int) -> None:
+            topo_dir = tmp_path / f"cpu{cpu}" / "topology"
+            topo_dir.mkdir(parents=True)
+            (topo_dir / "physical_package_id").write_text("0\n", encoding="ascii")
+            (topo_dir / "core_id").write_text(f"{cpu}\n", encoding="ascii")
+            (topo_dir / "thread_siblings_list").write_text(f"{cpu}\n", encoding="ascii")
+            cache_dir = tmp_path / f"cpu{cpu}" / "cache" / "index3"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "level").write_text("3\n", encoding="ascii")
+            (cache_dir / "shared_cpu_list").write_text(f"{cpu}\n", encoding="ascii")
+
+        (tmp_path / "online").write_text("0-1\n", encoding="ascii")
+        _write_cpu(0)
+        _write_cpu(1)
+        monkeypatch.setattr(topology, "_SYS_CPU", tmp_path)
+        monkeypatch.setattr(topology.sys, "platform", "linux")
+        monkeypatch.setattr(
+            topology.os,
+            "sched_getaffinity",
+            lambda _pid: {1},
+            raising=False,
+        )
+
+        topo = topology.discover()
+
+        assert topo.available
+        assert sorted(topo.cpus) == [1]
+        assert topo.total_logical_cpus == 1
+
+    def test_representative_pid_prefers_busy_descendant(self, monkeypatch):
+        from prototype.tool_scheduler import topology
+
+        class _Times:
+            def __init__(self, user: float, system: float) -> None:
+                self.user = user
+                self.system = system
+
+        class _Proc:
+            def __init__(self, pid: int, total: float, children=None) -> None:
+                self.pid = pid
+                self._total = total
+                self._children = children or []
+
+            def is_running(self) -> bool:
+                return True
+
+            def children(self, recursive: bool = False):
+                return self._children
+
+            def cpu_times(self):
+                return _Times(self._total, 0.0)
+
+        child = _Proc(22, 4.0)
+        root = _Proc(11, 0.1, [child])
+        monkeypatch.setattr(topology.psutil, "Process", lambda _pid: root)
+
+        assert topology.get_representative_pid(11) == 22
+
+
+class TestSchedulerPlacement:
+    """Unit tests for scheduler placement detection."""
+
+    def test_current_placement_uses_representative_pid_cpu(self, monkeypatch):
+        from prototype.tool_scheduler import scheduler as sched_mod
+        from prototype.tool_scheduler.predictor import Predictor
+        from prototype.tool_scheduler.topology import CpuInfo, Topology
+
+        predictor = Predictor(alpha=0.3)
+        for _ in range(3):
+            predictor.update(1.0)
+
+        topo = Topology(
+            cpus={
+                5: CpuInfo(
+                    cpu_id=5,
+                    physical_package_id=0,
+                    core_id=5,
+                    thread_siblings=[5],
+                    numa_node=1,
+                    llc_group=50,
+                )
+            },
+            numa_nodes=[0, 1],
+            llc_groups={1: {50: [4, 5]}},
+            physical_cores_per_cpu={4: 4, 5: 5},
+            total_logical_cpus=2,
+            total_physical_cores=2,
+            available=True,
+        )
+
+        monkeypatch.setattr(sched_mod, "get_process_tree_cpu_ids", lambda pid: [5])
+        monkeypatch.setattr(sched_mod, "get_bandwidth_utilization", lambda numa: None)
+        monkeypatch.setattr(sched_mod, "idle_breakdown", lambda cpus, physical_cores_per_cpu: (2, 0))
+
+        scheduler = sched_mod.Scheduler(
+            predictor=predictor,
+            topology=topo,
+            history={},
+            cooldown_seconds=0.0,
+        )
+        decision = scheduler.evaluate(2.0, root_pid=111)
+
+        assert decision is not None
+        assert decision.current_cost_breakdown is not None
+        assert decision.current_cost_breakdown["placement"] == "numa1-llc50"
+
+    def test_multi_llc_process_tree_has_unknown_current_placement(self, monkeypatch):
+        from prototype.tool_scheduler import scheduler as sched_mod
+        from prototype.tool_scheduler.predictor import Predictor
+        from prototype.tool_scheduler.topology import CpuInfo, Topology
+
+        predictor = Predictor(alpha=0.3)
+        for _ in range(3):
+            predictor.update(4.0)
+
+        topo = Topology(
+            cpus={
+                0: CpuInfo(0, 0, 0, [0], 0, 0),
+                4: CpuInfo(4, 0, 4, [4], 0, 4),
+            },
+            numa_nodes=[0],
+            llc_groups={0: {0: [0, 1, 2, 3], 4: [4, 5, 6, 7]}},
+            physical_cores_per_cpu={i: i for i in range(8)},
+            total_logical_cpus=8,
+            total_physical_cores=8,
+            available=True,
+        )
+
+        monkeypatch.setattr(sched_mod, "get_process_tree_cpu_ids", lambda pid: [0, 4])
+        monkeypatch.setattr(sched_mod, "get_bandwidth_utilization", lambda numa: None)
+        monkeypatch.setattr(sched_mod, "idle_breakdown", lambda cpus, physical_cores_per_cpu: (len(cpus), 0))
+
+        scheduler = sched_mod.Scheduler(
+            predictor=predictor,
+            topology=topo,
+            history={},
+            cooldown_seconds=0.0,
+        )
+        decision = scheduler.evaluate(2.0, root_pid=111)
+
+        assert decision is not None
+        assert decision.action == "keep"
+        assert decision.current_cost is None
+        assert decision.current_cost_breakdown is None
+        assert decision.gain is None
 
 
 class TestBandwidth:
