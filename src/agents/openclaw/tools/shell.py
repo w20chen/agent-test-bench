@@ -397,6 +397,42 @@ class ExecTool(Tool):
                 f"-- {run_command}"
             )
 
+        # --- tool_scheduler online scheduling (prototype) ---
+        # When TOOL_SCHEDULER=1, wrap matching tool invocations with the
+        # prototype hardware-aware scheduler.  The scheduler monitors the
+        # process tree, predicts CPU demand, and outputs dry-run placement
+        # recommendations.  Scheduler stderr is filtered below.
+        _tool_scheduler_active = os.environ.get("TOOL_SCHEDULER") == "1"
+        _ts_tools_raw = os.environ.get("TOOL_SCHEDULER_TOOLS", "exec-pytest")
+        _ts_tools = {t.strip() for t in _ts_tools_raw.split(",") if t.strip()}
+        _ts_out_dir: str | None = None
+        _ts_hardcode = os.environ.get("TOOL_SCHEDULER_HARDCODE_TOPOLOGY") == "1"
+        if _tool_scheduler_active and _classified in _ts_tools:
+            _ts_out = os.environ.get("TOOL_SCHEDULER_OUT", cwd)
+            _ts_out_dir = os.path.join(
+                _ts_out,
+                f"{_classified}_{time.strftime('%Y%m%dT%H%M%S')}"
+                f"_{(time.time_ns() // 1_000) % 1_000_000:06d}_{os.getpid()}",
+            )
+            os.makedirs(_ts_out_dir, exist_ok=True)
+            _ts_profile_path = os.path.join(_ts_out_dir, "profile.jsonl")
+
+            if sys.platform == "win32":
+                _py_exe = '"' + sys.executable.replace('"', '""') + '"'
+                _ts_path_q = '"' + _ts_profile_path.replace('"', '""') + '"'
+            else:
+                _py_exe = shlex.quote(sys.executable)
+                _ts_path_q = shlex.quote(_ts_profile_path)
+
+            _ts_hardcode_flag = "--hardcode-topology " if _ts_hardcode else ""
+            run_command = (
+                f"{_py_exe} -m prototype.tool_scheduler "
+                f"{_ts_hardcode_flag}"
+                f"--output {_ts_path_q} "
+                f"--dry-run "
+                f"-- {run_command}"
+            )
+
         # Per-invocation proc-tree sampler.  Runs in-container alongside the
         # subprocess whenever tool-profiling is active (vtune or ksys), scoped
         # to the exact process tree via /proc/<pid>.
@@ -539,6 +575,57 @@ class ExecTool(Tool):
                             )
                             with open(_tp_log_path, "w", encoding="utf-8") as _f:
                                 _f.write("\n".join(tp_diag_lines) + "\n")
+                        except OSError:
+                            pass
+                # Strip tool_scheduler's own diagnostic lines so the agent
+                # doesn't see scheduler noise.  Scheduler output is saved to
+                # tool_scheduler_stderr.log alongside profile.jsonl.
+                if _ts_out_dir is not None:
+                    stderr_lines = stderr_text.splitlines()
+                    ts_diag_lines = [
+                        line for line in stderr_lines
+                        if line.startswith("[tool-scheduler]")
+                        or line.startswith("[decision @")
+                        or line.startswith("predicted cores:")
+                        or line.startswith("memory sensitivity:")
+                        or line.startswith("current:")
+                        or line.startswith("best candidate:")
+                        or line.startswith("gain:")
+                        or line.startswith("action:")
+                        or line.startswith("  placement:")
+                        or line.startswith("  core cost:")
+                        or line.startswith("  memory cost:")
+                        or line.startswith("  move cost:")
+                        or line.startswith("  total cost:")
+                        or line.startswith("WARNING:")
+                    ]
+                    stderr_lines = [
+                        line for line in stderr_lines
+                        if not (
+                            line.startswith("[tool-scheduler]")
+                            or line.startswith("[decision @")
+                            or line.startswith("predicted cores:")
+                            or line.startswith("memory sensitivity:")
+                            or line.startswith("current:")
+                            or line.startswith("best candidate:")
+                            or line.startswith("gain:")
+                            or line.startswith("action:")
+                            or line.startswith("  placement:")
+                            or line.startswith("  core cost:")
+                            or line.startswith("  memory cost:")
+                            or line.startswith("  move cost:")
+                            or line.startswith("  total cost:")
+                            or line.startswith("WARNING:")
+                        )
+                    ]
+                    stderr_text = "\n".join(stderr_lines)
+                    if ts_diag_lines:
+                        try:
+                            _ts_log_path = os.path.join(
+                                _ts_out_dir, "tool_scheduler_stderr.log"
+                            )
+                            with open(_ts_log_path, "w", encoding="utf-8") as _f:
+                                _f.write("\n".join(ts_diag_lines) + "\n")
                         except OSError:
                             pass
                 if stderr_text.strip():

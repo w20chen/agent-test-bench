@@ -1216,12 +1216,14 @@ async def collect_traces(
         raise NotImplementedError(
             f"Unsupported benchmark.runtime_mode_for({scaffold!r}): {runtime_mode!r}"
         )
-    if tool_profiling not in {"off", "vtune", "ksys", "tool_profiler"}:
+    if tool_profiling not in {"off", "vtune", "ksys", "tool_profiler", "tool_scheduler"}:
         raise ValueError(
-            f"--tool-profiling must be 'off', 'vtune', 'ksys', or 'tool_profiler', got {tool_profiling!r}"
+            f"--tool-profiling must be 'off', 'vtune', 'ksys', 'tool_profiler', "
+            f"or 'tool_scheduler', got {tool_profiling!r}"
         )
     vtune = tool_profiling == "vtune"
     tool_profiler_mode = tool_profiling == "tool_profiler"
+    tool_scheduler_mode = tool_profiling == "tool_scheduler"
     if vtune and runtime_mode != "task_container_agent":
         raise ValueError(
             "--tool-profiling vtune wraps in-container commands and only applies to "
@@ -1230,6 +1232,11 @@ async def collect_traces(
     if tool_profiler_mode and runtime_mode != "task_container_agent":
         raise ValueError(
             "--tool-profiling tool_profiler wraps in-container commands and only "
+            f"applies to task-container benchmarks, not runtime_mode={runtime_mode!r}"
+        )
+    if tool_scheduler_mode and runtime_mode != "task_container_agent":
+        raise ValueError(
+            "--tool-profiling tool_scheduler wraps in-container commands and only "
             f"applies to task-container benchmarks, not runtime_mode={runtime_mode!r}"
         )
     # Future: add ksys per-tool validation here when implemented.
@@ -1547,6 +1554,82 @@ def _finalize_tool_profiler(
             pass
 
 
+def _finalize_tool_scheduler(
+    out_dir: Path,
+    attempt_dir: Path,
+) -> None:
+    """Collect per-tool scheduler JSONL files and write a summary.
+
+    Each matched tool invocation writes ``profile.jsonl`` in a timestamped
+    subdirectory of *out_dir*.  This function discovers them, aggregates
+    key metrics, and writes ``tool_scheduler_summary.json`` to *attempt_dir*.
+    """
+    profile_files = sorted(out_dir.glob("*/profile.jsonl"))
+    if not profile_files:
+        return
+
+    records: list[dict] = []
+    for pf in profile_files:
+        try:
+            text = pf.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    if not records:
+        return
+
+    n_total = len(records)
+    n_short = sum(
+        1 for r in records
+        if r.get("final_profile", {}).get("short_tool")
+    )
+    n_decisions = sum(len(r.get("decisions", [])) for r in records)
+    n_moves = sum(
+        1 for r in records
+        for d in r.get("decisions", [])
+        if d.get("action") == "recommend_move"
+    )
+
+    cores = [
+        r.get("final_profile", {}).get("median_effective_cores", 0.0)
+        for r in records
+    ]
+    avg_cores = sum(cores) / len(cores) if cores else 0.0
+
+    summary: dict = {
+        "schema_version": 1,
+        "n_tool_invocations": n_total,
+        "n_short_tools": n_short,
+        "n_decisions": n_decisions,
+        "n_recommend_moves": n_moves,
+        "avg_median_effective_cores": avg_cores,
+    }
+
+    summary_path = attempt_dir / "tool_scheduler_summary.json"
+    try:
+        summary_path.write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+    # Copy all individual profile files into the attempt dir
+    profiles_dest = attempt_dir / "tool_scheduler"
+    profiles_dest.mkdir(parents=True, exist_ok=True)
+    for pf in profile_files:
+        dest = profiles_dest / pf.parent.name / pf.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.write_bytes(pf.read_bytes())
+        except OSError:
+            pass
+
+
 def _normalize_openclaw_trace(
     src: Path,
     dst: Path,
@@ -1712,9 +1795,11 @@ async def _run_openclaw_in_task_container(
     start_extra_args = list(exec_config.start_extra_args)
     vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
     tool_profiler_out_dir = ctx.attempt_dir.resolve() / "tool_profiles"
+    tool_scheduler_out_dir = ctx.attempt_dir.resolve() / "tool_scheduler"
     vtune = tool_profiling == "vtune"
     ksys_tool = tool_profiling == "ksys"
     tool_profiler_mode = tool_profiling == "tool_profiler"
+    tool_scheduler_mode = tool_profiling == "tool_scheduler"
     if vtune:
         from trace_collect.vtune_report import vtune_container_run_args
 
@@ -1742,6 +1827,22 @@ async def _run_openclaw_in_task_container(
             "-e", "TOOL_PROFILER=1",
             "-e", f"TOOL_PROFILER_OUT={tool_profiler_out_dir.resolve()}",
             "-e", f"TOOL_PROFILER_TOOLS={tools}",
+        ])
+    elif tool_scheduler_mode:
+        # tool_scheduler per-tool: uses the prototype online load-prediction
+        # scheduler.  Wraps matching tool commands with:
+        #   python -m prototype.tool_scheduler --hardcode-topology
+        #     --output <profile.jsonl> --dry-run -- <command>
+        # Activation is via env vars read by ExecTool.execute() in shell.py.
+        tool_scheduler_out_dir.mkdir(parents=True, exist_ok=True)
+        tools = ",".join(tool_profiling_tools or ["exec-pytest"])
+        start_extra_args.extend([
+            "-e", "TOOL_SCHEDULER=1",
+            "-e", f"TOOL_SCHEDULER_OUT={tool_scheduler_out_dir.resolve()}",
+            "-e", f"TOOL_SCHEDULER_TOOLS={tools}",
+            # Use hardcoded topology inside container (host topology
+            # may not be visible from within container).
+            "-e", "TOOL_SCHEDULER_HARDCODE_TOPOLOGY=1",
         ])
     container_id = start_task_container(
         fixed_image,
@@ -1793,6 +1894,10 @@ async def _run_openclaw_in_task_container(
             # sampling.  Add it to the bootstrap requirements so it's
             # guaranteed to be importable when ExecTool wraps commands with
             # ``python -m prototype.tool_profiler``.
+            bootstrap_requirements = bootstrap_requirements + ("psutil",)
+        if tool_scheduler_mode:
+            # tool_scheduler also needs psutil inside the container for
+            # process-tree monitoring.
             bootstrap_requirements = bootstrap_requirements + ("psutil",)
         bootstrapped_config = bootstrap_task_container_python(
             container_id=container_id,
@@ -2021,6 +2126,11 @@ async def _run_openclaw_in_task_container(
         if tool_profiler_mode:
             _finalize_tool_profiler(
                 tool_profiler_out_dir,
+                ctx.attempt_dir,
+            )
+        if tool_scheduler_mode:
+            _finalize_tool_scheduler(
+                tool_scheduler_out_dir,
                 ctx.attempt_dir,
             )
         container_logs = stop_task_container(

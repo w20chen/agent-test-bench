@@ -57,7 +57,7 @@ def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tool-profiling",
-        choices=["off", "vtune", "ksys", "tool_profiler"],
+        choices=["off", "vtune", "ksys", "tool_profiler", "tool_scheduler"],
         default="off",
         help=(
             "Wrap each in-container tool invocation with a platform-specific "
@@ -65,6 +65,8 @@ def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
             "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
             "'tool_profiler' uses the prototype online process-tree profiler "
             "(cross-platform, requires psutil); "
+            "'tool_scheduler' uses the prototype hardware-aware scheduler "
+            "(online CPU prediction + cost-model placement recommendations); "
             "'off' disables per-tool profiling (default).  "
             "Container benchmarks only."
         ),
