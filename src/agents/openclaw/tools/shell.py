@@ -366,6 +366,16 @@ class ExecTool(Tool):
         # process tree, emits an early profile at 2 s, and writes a JSONL
         # record when the tool exits.  Profiler stderr is captured alongside
         # tool output and filtered below so the agent doesn't see it.
+        #
+        # NOTE: _prepare_exec_env strips PYTHONPATH (isolate_runtime_env=True),
+        # so we must prepend it inline to the command so that prototype.*
+        # modules are importable by the wrapper subprocess.
+        _pythonpath = os.environ.get("PYTHONPATH", "")
+        if sys.platform == "win32":
+            _pythonpath_prefix = f'set "PYTHONPATH={_pythonpath}" && ' if _pythonpath else ""
+        else:
+            _pythonpath_prefix = f"PYTHONPATH={shlex.quote(_pythonpath)} " if _pythonpath else ""
+
         _tool_profiler_active = os.environ.get("TOOL_PROFILER") == "1"
         _tp_tools_raw = os.environ.get("TOOL_PROFILER_TOOLS", "exec-pytest")
         _tp_tools = {t.strip() for t in _tp_tools_raw.split(",") if t.strip()}
@@ -391,6 +401,7 @@ class ExecTool(Tool):
                 _tp_path_q = shlex.quote(_tp_profile_path)
 
             run_command = (
+                f"{_pythonpath_prefix}"
                 f"{_py_exe} -m prototype.tool_profiler "
                 f"--warmup-seconds 2 --sample-interval 0.2 "
                 f"--output {_tp_path_q} "
@@ -426,6 +437,7 @@ class ExecTool(Tool):
 
             _ts_hardcode_flag = "--hardcode-topology " if _ts_hardcode else ""
             run_command = (
+                f"{_pythonpath_prefix}"
                 f"{_py_exe} -m prototype.tool_scheduler "
                 f"{_ts_hardcode_flag}"
                 f"--output {_ts_path_q} "
