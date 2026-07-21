@@ -57,12 +57,14 @@ def _add_monitoring_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tool-profiling",
-        choices=["off", "vtune", "ksys"],
+        choices=["off", "vtune", "ksys", "tool_profiler"],
         default="off",
         help=(
             "Wrap each in-container tool invocation with a platform-specific "
             "profiler.  'vtune' uses Intel VTune uarch-exploration (x86 only); "
             "'ksys' uses Huawei Kunpeng ksys (ARM64/Kunpeng only); "
+            "'tool_profiler' uses the prototype online process-tree profiler "
+            "(cross-platform, requires psutil); "
             "'off' disables per-tool profiling (default).  "
             "Container benchmarks only."
         ),

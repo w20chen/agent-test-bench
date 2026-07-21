@@ -1216,15 +1216,21 @@ async def collect_traces(
         raise NotImplementedError(
             f"Unsupported benchmark.runtime_mode_for({scaffold!r}): {runtime_mode!r}"
         )
-    if tool_profiling not in {"off", "vtune", "ksys"}:
+    if tool_profiling not in {"off", "vtune", "ksys", "tool_profiler"}:
         raise ValueError(
-            f"--tool-profiling must be 'off', 'vtune', or 'ksys', got {tool_profiling!r}"
+            f"--tool-profiling must be 'off', 'vtune', 'ksys', or 'tool_profiler', got {tool_profiling!r}"
         )
     vtune = tool_profiling == "vtune"
+    tool_profiler_mode = tool_profiling == "tool_profiler"
     if vtune and runtime_mode != "task_container_agent":
         raise ValueError(
             "--tool-profiling vtune wraps in-container commands and only applies to "
             f"task-container benchmarks, not runtime_mode={runtime_mode!r}"
+        )
+    if tool_profiler_mode and runtime_mode != "task_container_agent":
+        raise ValueError(
+            "--tool-profiling tool_profiler wraps in-container commands and only "
+            f"applies to task-container benchmarks, not runtime_mode={runtime_mode!r}"
         )
     # Future: add ksys per-tool validation here when implemented.
     if tool_profiling_tools is None:
@@ -1447,6 +1453,100 @@ async def collect_traces(
         )
 
 
+def _finalize_tool_profiler(
+    out_dir: Path,
+    attempt_dir: Path,
+) -> None:
+    """Collect per-tool profile JSONL files and write a summary.
+
+    Each matched tool invocation writes ``profile.jsonl`` in a timestamped
+    subdirectory of *out_dir*.  This function discovers them, aggregates
+    key metrics, and writes ``tool_profiles_summary.json`` to *attempt_dir*.
+    """
+    profile_files = sorted(out_dir.glob("*/profile.jsonl"))
+    if not profile_files:
+        return
+
+    records: list[dict] = []
+    for pf in profile_files:
+        try:
+            text = pf.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    if not records:
+        return
+
+    # Aggregate summary
+    n_total = len(records)
+    n_early = sum(1 for r in records if r.get("early_profile", {}).get("available"))
+    n_short = sum(1 for r in records if r.get("final_profile", {}).get("short_tool"))
+
+    behaviors: dict[str, int] = {}
+    for r in records:
+        beh = r.get("final_profile", {}).get("preliminary_behavior", "unknown")
+        behaviors[beh] = behaviors.get(beh, 0) + 1
+
+    cores = [
+        r.get("final_profile", {}).get("avg_effective_cores", 0.0)
+        for r in records
+    ]
+    avg_cores = sum(cores) / len(cores) if cores else 0.0
+
+    # Early-final consistency
+    records_with_early = [
+        r for r in records if r.get("early_profile", {}).get("available")
+    ]
+    behavior_changed = sum(
+        1 for r in records_with_early
+        if r.get("early_final_comparison", {}).get("behavior_changed")
+    )
+    errors = [
+        r.get("early_final_comparison", {}).get("effective_cores_relative_error", 0.0) or 0.0
+        for r in records_with_early
+    ]
+    avg_rel_error = sum(errors) / len(errors) if errors else 0.0
+
+    summary: dict = {
+        "schema_version": 1,
+        "n_tool_invocations": n_total,
+        "n_short_tools": n_short,
+        "n_with_early_profile": n_early,
+        "behavior_distribution": behaviors,
+        "avg_effective_cores": avg_cores,
+        "early_final_consistency": {
+            "behavior_changed": behavior_changed,
+            "n_with_early": len(records_with_early),
+            "avg_effective_cores_relative_error": avg_rel_error,
+        },
+    }
+
+    summary_path = attempt_dir / "tool_profiles_summary.json"
+    try:
+        summary_path.write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+    # Also copy all individual profile files into the attempt dir for
+    # easy access alongside the trace.
+    profiles_dest = attempt_dir / "tool_profiles"
+    profiles_dest.mkdir(parents=True, exist_ok=True)
+    for pf in profile_files:
+        dest = profiles_dest / pf.parent.name / pf.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.write_bytes(pf.read_bytes())
+        except OSError:
+            pass
+
+
 def _normalize_openclaw_trace(
     src: Path,
     dst: Path,
@@ -1611,8 +1711,10 @@ async def _run_openclaw_in_task_container(
     )
     start_extra_args = list(exec_config.start_extra_args)
     vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
+    tool_profiler_out_dir = ctx.attempt_dir.resolve() / "tool_profiles"
     vtune = tool_profiling == "vtune"
     ksys_tool = tool_profiling == "ksys"
+    tool_profiler_mode = tool_profiling == "tool_profiler"
     if vtune:
         from trace_collect.vtune_report import vtune_container_run_args
 
@@ -1628,6 +1730,18 @@ async def _run_openclaw_in_task_container(
             "-e", "VTUNE_PROFILE=1",
             "-e", f"VTUNE_OUT={vtune_out_dir.resolve()}",
             "-e", f"VTUNE_TOOLS={tools}",
+        ])
+    elif tool_profiler_mode:
+        # tool_profiler per-tool: uses the prototype online process-tree profiler.
+        # The profiler wraps matching tool commands with:
+        #   python -m prototype.tool_profiler --output <profile.jsonl> -- <command>
+        # Activation is via env vars read by ExecTool.execute() in shell.py.
+        tool_profiler_out_dir.mkdir(parents=True, exist_ok=True)
+        tools = ",".join(tool_profiling_tools or ["exec-pytest"])
+        start_extra_args.extend([
+            "-e", "TOOL_PROFILER=1",
+            "-e", f"TOOL_PROFILER_OUT={tool_profiler_out_dir.resolve()}",
+            "-e", f"TOOL_PROFILER_TOOLS={tools}",
         ])
     container_id = start_task_container(
         fixed_image,
@@ -1674,6 +1788,12 @@ async def _run_openclaw_in_task_container(
         if mcp_config not in {None, "none"}:
             preflight_imports.append("agents.openclaw.tools.mcp")
             bootstrap_requirements = OPENCLAW_MCP_RUNTIME_REQUIREMENTS
+        if tool_profiler_mode:
+            # tool_profiler needs psutil inside the container for process-tree
+            # sampling.  Add it to the bootstrap requirements so it's
+            # guaranteed to be importable when ExecTool wraps commands with
+            # ``python -m prototype.tool_profiler``.
+            bootstrap_requirements = bootstrap_requirements + ("psutil",)
         bootstrapped_config = bootstrap_task_container_python(
             container_id=container_id,
             exec_config=exec_config,
@@ -1897,6 +2017,11 @@ async def _run_openclaw_in_task_container(
             finalize_vtune(
                 vtune_out_dir,
                 ctx.samples or [],
+            )
+        if tool_profiler_mode:
+            _finalize_tool_profiler(
+                tool_profiler_out_dir,
+                ctx.attempt_dir,
             )
         container_logs = stop_task_container(
             container_id,

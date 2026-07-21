@@ -360,6 +360,43 @@ class ExecTool(Tool):
             # the /proc sampler collects data.
             vtune_window = {"dir": run_dir, "cmd": command, "ts_start": time.time()}
 
+        # --- tool_profiler online profiling (prototype) ---
+        # When TOOL_PROFILER=1, wrap matching tool invocations with the
+        # prototype process-tree profiler.  The profiler monitors the entire
+        # process tree, emits an early profile at 2 s, and writes a JSONL
+        # record when the tool exits.  Profiler stderr is captured alongside
+        # tool output and filtered below so the agent doesn't see it.
+        _tool_profiler_active = os.environ.get("TOOL_PROFILER") == "1"
+        _tp_tools_raw = os.environ.get("TOOL_PROFILER_TOOLS", "exec-pytest")
+        _tp_tools = {t.strip() for t in _tp_tools_raw.split(",") if t.strip()}
+        _tp_out_dir: str | None = None
+        if _tool_profiler_active and _classified in _tp_tools:
+            _tp_out = os.environ.get("TOOL_PROFILER_OUT", cwd)
+            _tp_out_dir = os.path.join(
+                _tp_out,
+                f"{_classified}_{time.strftime('%Y%m%dT%H%M%S')}"
+                f"_{(time.time_ns() // 1_000) % 1_000_000:06d}_{os.getpid()}",
+            )
+            os.makedirs(_tp_out_dir, exist_ok=True)
+            _tp_profile_path = os.path.join(_tp_out_dir, "profile.jsonl")
+
+            # On Windows, shlex.quote produces single quotes that cmd.exe
+            # doesn't understand.  Use double-quote semantics for win32 and
+            # POSIX sh semantics otherwise.
+            if sys.platform == "win32":
+                _py_exe = '"' + sys.executable.replace('"', '""') + '"'
+                _tp_path_q = '"' + _tp_profile_path.replace('"', '""') + '"'
+            else:
+                _py_exe = shlex.quote(sys.executable)
+                _tp_path_q = shlex.quote(_tp_profile_path)
+
+            run_command = (
+                f"{_py_exe} -m prototype.tool_profiler "
+                f"--warmup-seconds 2 --sample-interval 0.2 "
+                f"--output {_tp_path_q} "
+                f"-- {run_command}"
+            )
+
         # Per-invocation proc-tree sampler.  Runs in-container alongside the
         # subprocess whenever tool-profiling is active (vtune or ksys), scoped
         # to the exact process tree via /proc/<pid>.
@@ -471,6 +508,37 @@ class ExecTool(Tool):
                             )
                             with open(_diag_path, "a", encoding="utf-8") as _f:
                                 _f.write("\n".join(vtune_diag_lines) + "\n")
+                        except OSError:
+                            pass
+                # Strip tool_profiler's own diagnostic lines so the agent
+                # doesn't see profiler noise.  Profiler output is saved to
+                # tool_profiler_stderr.log alongside profile.jsonl.
+                if _tp_out_dir is not None:
+                    stderr_lines = stderr_text.splitlines()
+                    tp_diag_lines = [
+                        line for line in stderr_lines
+                        if line.startswith("[tool-profiler]")
+                        or line.startswith("EARLY PROFILE")
+                        or line.startswith("FINAL PROFILE")
+                        or line.startswith("  ")  # indented profile detail lines
+                    ]
+                    stderr_lines = [
+                        line for line in stderr_lines
+                        if not (
+                            line.startswith("[tool-profiler]")
+                            or line.startswith("EARLY PROFILE")
+                            or line.startswith("FINAL PROFILE")
+                            or line.startswith("  ")
+                        )
+                    ]
+                    stderr_text = "\n".join(stderr_lines)
+                    if tp_diag_lines:
+                        try:
+                            _tp_log_path = os.path.join(
+                                _tp_out_dir, "tool_profiler_stderr.log"
+                            )
+                            with open(_tp_log_path, "w", encoding="utf-8") as _f:
+                                _f.write("\n".join(tp_diag_lines) + "\n")
                         except OSError:
                             pass
                 if stderr_text.strip():
