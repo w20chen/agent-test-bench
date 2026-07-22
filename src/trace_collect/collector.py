@@ -2091,14 +2091,29 @@ async def _run_openclaw_in_task_container(
                     if pytest_runtime_dir is not None
                     else None
                 ),
+                "pytest_history_dir": (
+                    str(pytest_repo_history_dir)
+                    if pytest_repo_history_dir is not None
+                    else None
+                ),
                 "pip_runtime_dir": (
                     str(pip_runtime_dir)
                     if pip_runtime_dir is not None
                     else None
                 ),
+                "pip_history_dir": (
+                    str(pip_repo_history_dir)
+                    if pip_repo_history_dir is not None
+                    else None
+                ),
                 "python_script_runtime_dir": (
                     str(python_script_runtime_dir)
                     if python_script_runtime_dir is not None
+                    else None
+                ),
+                "python_script_history_dir": (
+                    str(python_script_repo_history_dir)
+                    if python_script_repo_history_dir is not None
                     else None
                 ),
                 "raw_stdout_path": str(stdout_path),

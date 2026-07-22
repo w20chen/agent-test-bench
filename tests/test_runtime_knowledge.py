@@ -9,6 +9,7 @@ from trace_collect.python_script_runtime_prediction import (
 )
 from trace_collect.runtime_knowledge import (
     COMMON_KB_ENV,
+    format_runtime_knowledge_summary,
     lookup_common_prediction,
     load_json_object,
     resource_summary_from_profile,
@@ -16,6 +17,41 @@ from trace_collect.runtime_knowledge import (
     write_json_object,
     default_common_kb_path,
 )
+
+
+def test_runtime_knowledge_summary_shows_personal_and_common_layers() -> None:
+    summary = format_runtime_knowledge_summary(
+        {
+            "runtime_knowledge_prediction": {
+                "prediction_source": "personal_command",
+                "duration_p50_s": 3.0,
+                "duration_p90_s": 5.0,
+            },
+            "prediction_common_p50_s": 10.0,
+            "prediction_common_p90_s": 20.0,
+        }
+    )
+
+    assert "kb=personal_command p50=3.0s p90=5.0s" in summary
+    assert "common p50=10.0s p90=20.0s" in summary
+
+
+def test_runtime_knowledge_summary_does_not_repeat_selected_common_layer() -> None:
+    summary = format_runtime_knowledge_summary(
+        {
+            "runtime_knowledge_prediction": {
+                "prediction_source": "common:by_tool/pip/install/default",
+                "duration_p50_s": 10.0,
+                "duration_p90_s": 20.0,
+            },
+            "prediction_common_p50_s": 10.0,
+            "prediction_common_p90_s": 20.0,
+        }
+    )
+
+    assert summary == (
+        "kb=common:by_tool/pip/install/default p50=10.0s p90=20.0s"
+    )
 
 
 def test_common_prior_is_coldstart_fallback_for_pip() -> None:

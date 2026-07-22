@@ -8,6 +8,7 @@ import pytest
 from trace_collect.python_script_runtime_prediction import (
     compute_python_script_predictions,
     finalize_python_script_runtime_prediction,
+    format_python_script_prediction_summary,
     is_python_script_tool_call,
     merge_python_script_predictions_into_shared_history,
     parse_python_script_command,
@@ -15,6 +16,34 @@ from trace_collect.python_script_runtime_prediction import (
     seed_python_script_history_from_shared,
     update_python_script_history,
 )
+
+
+def test_format_python_script_prediction_summary_includes_runtime_kb() -> None:
+    summary = format_python_script_prediction_summary(
+        {
+            "iteration": 7,
+            "script_basename": "train.py",
+            "actual_duration_s": 30.0,
+            "prediction_last_run_s": None,
+            "prediction_family_last_run_s": None,
+            "prediction_script_path_median_s": None,
+            "prediction_basename_median_s": None,
+            "prediction_global_median_s": None,
+            "prediction_recommended_s": 25.0,
+            "prediction_recommended_method": "common:by_operation/run_script/default",
+            "prediction_reliability": {"level": "low"},
+            "runtime_knowledge_prediction": {
+                "duration_p50_s": 25.0,
+                "duration_p90_s": 40.0,
+                "prediction_source": "common:by_operation/run_script/default",
+            },
+            "relative_error": {},
+        }
+    )
+
+    assert "kb=common:by_operation/run_script/default" in summary
+    assert "p50=25.0s p90=40.0s" in summary
+    assert summary.endswith("| low")
 
 
 def test_python_script_command_recognition() -> None:
@@ -141,7 +170,7 @@ def test_finalize_writes_artifacts_and_cross_attempt_history(tmp_path: Path) -> 
         tool_result="ok\nExit code: 0",
     )
     assert first_payload["history_updated"] is True
-    assert first_payload["prediction_recommended_method"] == "unavailable"
+    assert str(first_payload["prediction_recommended_method"]).startswith("common:")
 
     merge_python_script_predictions_into_shared_history(
         shared_history_root=shared_root,

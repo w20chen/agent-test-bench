@@ -578,7 +578,7 @@ def test_prediction_json_includes_pytest_output_but_jsonl_stays_compact(
         "test output\nExit code: 0"
     )
     assert "pytest_output" not in prediction_jsonl
-    assert prediction_jsonl["prediction_recommended_method"] == "none"
+    assert str(prediction_jsonl["prediction_recommended_method"]).startswith("common:")
     assert "prediction_reliability" in prediction_jsonl
     assert "recommended" in prediction_jsonl["absolute_error"]
     assert "recommended" in prediction_jsonl["relative_error"]
@@ -909,6 +909,13 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
             "prediction_recommended_s": 9.0,
             "prediction_recommended_method": "per_test",
             "prediction_reliability": {"level": "high"},
+            "runtime_knowledge_prediction": {
+                "duration_p50_s": 6.8,
+                "duration_p90_s": 9.9,
+                "prediction_source": "personal_command",
+            },
+            "prediction_common_p50_s": 12.0,
+            "prediction_common_p90_s": 20.0,
             "relative_error": {
                 "last_run": 0.2,
                 "test_count": 0.5,
@@ -925,6 +932,8 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     assert "count=5.0s(+50.0%)" in line
     assert "→per=9.0s(+10.0%)" in line
     assert "unk=11.0s(+10.0%)" in line
+    assert "kb=personal_command p50=6.8s p90=9.9s" in line
+    assert "common p50=12.0s p90=20.0s" in line
     assert line.endswith("| high")
 
 

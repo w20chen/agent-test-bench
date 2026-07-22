@@ -174,6 +174,13 @@ def test_format_pip_prediction_summary_includes_all_method_errors() -> None:
             "prediction_recommended_s": 11.0,
             "prediction_recommended_method": "package_count",
             "prediction_reliability": {"level": "medium"},
+            "runtime_knowledge_prediction": {
+                "duration_p50_s": 12.0,
+                "duration_p90_s": 20.0,
+                "prediction_source": "common:by_tool/pip/install/buckets/2-10-packages",
+            },
+            "prediction_common_p50_s": 12.0,
+            "prediction_common_p90_s": 20.0,
             "relative_error": {
                 "last_run": 0.1,
                 "package_count": 0.1,
@@ -186,6 +193,9 @@ def test_format_pip_prediction_summary_includes_all_method_errors() -> None:
     assert "last=9.0s(+10.0%)" in summary
     assert "→pkgs=11.0s(+10.0%)" in summary
     assert "glob=8.0s(+20.0%)" in summary
+    assert "kb=common:by_tool/pip/install/buckets/2-10-packages" in summary
+    assert "p50=12.0s p90=20.0s" in summary
+    assert " common p50=" not in summary
     assert summary.endswith("| medium")
 
 
@@ -490,8 +500,8 @@ def test_finalize_uses_pre_execution_prediction_snapshot(tmp_path: Path) -> None
         tool_result="Successfully installed requests\nExit code: 0",
     )
 
-    assert payload["prediction_recommended_method"] == "unavailable"
-    assert payload["prediction_recommended_s"] is None
+    assert str(payload["prediction_recommended_method"]).startswith("common:")
+    assert payload["prediction_recommended_s"] is not None
 
 
 def test_finalize_with_missing_pending_does_not_recompute_predictions(

@@ -18,6 +18,7 @@ from trace_collect.exec_classifier import classify_exec_tool_name
 from trace_collect.runtime_knowledge import (
     default_common_kb_path,
     default_personal_kb_path,
+    format_runtime_knowledge_summary,
     load_json_object,
     select_unified_prediction,
     update_personal_kb,
@@ -1053,6 +1054,8 @@ def format_python_script_prediction_summary(payload: dict[str, Any]) -> str:
         arrow = "\u2192" if (err_key == recommended and val is not None) else " "
         return f"{arrow}{label}={_s(val)}({_pct(err_key)})"
 
+    kb_part = format_runtime_knowledge_summary(payload)
+
     parts = [
         f"[py-predict] #{payload.get('iteration')}",
         f"{payload.get('script_basename')}",
@@ -1062,6 +1065,7 @@ def format_python_script_prediction_summary(payload: dict[str, Any]) -> str:
         _strat("path", "prediction_script_path_median_s", "script_path_median"),
         _strat("name", "prediction_basename_median_s", "basename_median"),
         _strat("glob", "prediction_global_median_s", "global_median"),
+        kb_part,
         f"| {reliability}",
     ]
-    return " ".join(parts)
+    return " ".join(part for part in parts if part)

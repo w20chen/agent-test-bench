@@ -9,10 +9,7 @@ from types import SimpleNamespace
 
 from trace_collect.attempt_pipeline import AttemptContext
 from trace_collect.collector import (
-    _family_history_scope_dir,
-    _pip_history_scope_dir,
-    _pytest_history_scope_dir,
-    _python_script_history_scope_dir,
+    _repo_history_dir,
     _run_openclaw_in_task_container,
 )
 from trace_collect.runtime.task_container import (
@@ -63,32 +60,30 @@ def _make_relative_ctx(monkeypatch, tmp_path: Path, *, scaffold: str) -> Attempt
     )
 
 
-def test_pip_history_scope_dir_avoids_sanitized_instance_collisions(
+def test_repo_history_dir_avoids_sanitized_instance_collisions(
     tmp_path: Path,
 ) -> None:
-    first = _pip_history_scope_dir(tmp_path / "run", "a/b")
-    second = _pip_history_scope_dir(tmp_path / "run", "a_b")
+    first = _repo_history_dir(
+        tmp_path / "run",
+        "pip",
+        {"instance_id": "a/b"},
+        "a/b",
+    )
+    second = _repo_history_dir(
+        tmp_path / "run",
+        "pip",
+        {"instance_id": "a_b"},
+        "a_b",
+    )
 
     assert first != second
-    assert first.parent == second.parent
-    assert first.name.startswith("a_b-")
-    assert second.name.startswith("a_b-")
+    assert first.parent.parent == second.parent.parent
+    assert first.parent.name.startswith("instance_a_b-")
+    assert second.parent.name.startswith("instance_a_b-")
+    assert first.name == "pip"
 
 
-def test_python_script_history_scope_dir_avoids_sanitized_instance_collisions(
-    tmp_path: Path,
-) -> None:
-    first = _python_script_history_scope_dir(tmp_path / "run", "a/b")
-    second = _python_script_history_scope_dir(tmp_path / "run", "a_b")
-
-    assert first != second
-    assert first.parent == second.parent
-    assert first.parent.name == "python_script_runtime_db"
-    assert first.name.startswith("a_b-")
-    assert second.name.startswith("a_b-")
-
-
-def test_family_history_scope_groups_related_tasks(tmp_path: Path) -> None:
+def test_repo_history_dir_groups_related_tasks(tmp_path: Path) -> None:
     task_a = {
         "repo": "encode/httpx",
         "image_name": "swerebench/example-1:latest",
@@ -105,9 +100,9 @@ def test_family_history_scope_groups_related_tasks(tmp_path: Path) -> None:
         "python_version": "3.11",
     }
 
-    first = _family_history_scope_dir(tmp_path / "run", "pip", task_a, "a")
-    second = _family_history_scope_dir(tmp_path / "run", "pip", task_b, "b")
-    third = _family_history_scope_dir(tmp_path / "run", "pip", task_c, "c")
+    first = _repo_history_dir(tmp_path / "run", "pip", task_a, "a")
+    second = _repo_history_dir(tmp_path / "run", "pip", task_b, "b")
+    third = _repo_history_dir(tmp_path / "run", "pip", task_c, "c")
 
     assert first == second
     assert first != third
@@ -299,59 +294,45 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert Path(str(seen["python_script_runtime_dir"])) == (
         ctx.attempt_dir.resolve() / "python_script_runtime"
     )
-    assert "pip_history_dir" not in seen
-    assert "python_script_history_dir" not in seen
-    assert pip_seed_seen["shared_history_root"] == (
-        _pip_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
+    pip_repo_history_dir = _repo_history_dir(
+        ctx.run_dir, "pip", dict(ctx.task), ctx.instance_id
     )
+    python_script_repo_history_dir = _repo_history_dir(
+        ctx.run_dir, "python_script", dict(ctx.task), ctx.instance_id
+    )
+    pytest_repo_history_dir = _repo_history_dir(
+        ctx.run_dir, "pytest", dict(ctx.task), ctx.instance_id
+    )
+    assert Path(str(seen["pip_history_dir"])) == pip_repo_history_dir
+    assert Path(str(seen["python_script_history_dir"])) == (
+        python_script_repo_history_dir
+    )
+    assert pip_seed_seen["shared_history_root"] == pip_repo_history_dir
     assert pip_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "pip_runtime"
     )
-    assert len(pip_merge_seen) == 2
+    assert len(pip_merge_seen) == 1
     assert pip_merge_seen[0]["attempt_prediction_root"] == pip_seed_seen[
         "attempt_prediction_root"
     ]
-    assert pip_merge_seen[0]["shared_history_root"] == _pip_history_scope_dir(
-        ctx.run_dir,
-        "encode__httpx-2701",
-    )
-    assert pip_merge_seen[1]["shared_history_root"] == _family_history_scope_dir(
-        ctx.run_dir,
-        "pip",
-        dict(ctx.task),
-        "encode__httpx-2701",
-    )
-    assert python_seed_seen["shared_history_root"] == (
-        _python_script_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
-    )
+    assert pip_merge_seen[0]["shared_history_root"] == pip_repo_history_dir
+    assert python_seed_seen["shared_history_root"] == python_script_repo_history_dir
     assert python_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "python_script_runtime"
     )
     assert python_merge_seen["attempt_prediction_root"] == python_seed_seen[
         "attempt_prediction_root"
     ]
-    assert python_merge_seen["shared_history_root"] == _family_history_scope_dir(
-        ctx.run_dir,
-        "python_script",
-        dict(ctx.task),
-        "encode__httpx-2701",
-    )
-    assert "pytest_history_dir" not in seen
-    assert pytest_seed_seen["shared_history_root"] == (
-        _pytest_history_scope_dir(ctx.run_dir, "encode__httpx-2701")
-    )
+    assert python_merge_seen["shared_history_root"] == python_script_repo_history_dir
+    assert Path(str(seen["pytest_history_dir"])) == pytest_repo_history_dir
+    assert pytest_seed_seen["shared_history_root"] == pytest_repo_history_dir
     assert pytest_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "pytest_runtime"
     )
     assert pytest_merge_seen["attempt_prediction_root"] == pytest_seed_seen[
         "attempt_prediction_root"
     ]
-    assert pytest_merge_seen["shared_history_root"] == _family_history_scope_dir(
-        ctx.run_dir,
-        "pytest",
-        dict(ctx.task),
-        "encode__httpx-2701",
-    )
+    assert pytest_merge_seen["shared_history_root"] == pytest_repo_history_dir
     assert seen["tool_workspace"] == "/testbed"
     assert seen["exec_working_dir"] == "/testbed"
     assert preflight_seen["runtime"] == "/usr/bin/python3"
@@ -403,8 +384,9 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert seen["pytest_runtime_dir"] is None
     assert seen["pip_runtime_dir"] is None
     assert seen["python_script_runtime_dir"] is None
-    assert "pip_history_dir" not in seen
-    assert "python_script_history_dir" not in seen
+    assert seen["pytest_history_dir"] is None
+    assert seen["pip_history_dir"] is None
+    assert seen["python_script_history_dir"] is None
     assert pip_seed_seen == {}
     assert pip_merge_seen == []
     assert python_seed_seen == {}

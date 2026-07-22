@@ -466,6 +466,34 @@ def select_unified_prediction(
     )
 
 
+def format_runtime_knowledge_summary(payload: dict[str, Any]) -> str:
+    """Compact realtime display for selected and Common KB predictions."""
+
+    def seconds(value: Any) -> str:
+        return "?" if value is None else f"{float(value):.1f}s"
+
+    parts: list[str] = []
+    knowledge = payload.get("runtime_knowledge_prediction")
+    selected_source: str | None = None
+    if isinstance(knowledge, dict):
+        source = knowledge.get("prediction_source")
+        if isinstance(source, str):
+            selected_source = source
+            parts.append(
+                f"kb={source} p50={seconds(knowledge.get('duration_p50_s'))}"
+                f" p90={seconds(knowledge.get('duration_p90_s'))}"
+            )
+
+    common_p50 = payload.get("prediction_common_p50_s")
+    common_p90 = payload.get("prediction_common_p90_s")
+    if (
+        (common_p50 is not None or common_p90 is not None)
+        and (selected_source is None or not selected_source.startswith("common:"))
+    ):
+        parts.append(f"common p50={seconds(common_p50)} p90={seconds(common_p90)}")
+    return " ".join(parts)
+
+
 def _update_resource_history(rec: dict[str, Any], resource: ResourceSummary | None) -> None:
     if resource is None:
         return

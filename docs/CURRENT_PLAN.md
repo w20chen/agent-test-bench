@@ -414,3 +414,43 @@ Verification:
   `runtime_common_kb_swe_rebench_p1.json` through `default_common_kb_path()` and
   returned Common predictions for `pytest/run_tests`, `pip/install`, and
   `read_file/read_file`.
+
+----
+
+Objective: Fix runtime KB wiring and realtime prediction output.
+
+User requirement:
+- Runtime prediction must use two knowledge layers:
+  - read-only Common KB for cold start;
+  - repo-private Personal KB learned across instances of the same repo.
+- Realtime output must show predictions from both layers when available.
+- Avoid redundant output/files and keep the change scoped.
+
+Plan:
+1. Pass repo-level pip/pytest/python-script history directories into the
+   task-container OpenClaw request so in-container predictors read and update the
+   repo-private Personal KB path instead of attempt-local fallback files. -
+   completed
+2. Update compact realtime summary lines to include the unified KB prediction
+   source and p50/p90 values. - completed
+3. Add focused regression tests for request wiring and summary visibility. -
+   completed
+4. Run focused tests/compile only. - completed
+5. Run mandatory fresh reviewer gate because this touches runtime/evaluation
+   prediction paths. - completed
+
+Review notes:
+- Fresh reviewer found the initial summary patch only printed the selected
+  unified KB source, which hides the Common layer once repo-private Personal
+  exact-command history wins. Fixed by adding a shared compact formatter that
+  prints `kb=<selected source>` plus `common p50/p90` when Common is available
+  and not already the selected source.
+- Follow-up reviewer found no blockers or major issues. Minor suggestion was to
+  add a direct unit test for the shared formatter; added coverage for both
+  Personal+Common and selected-Common cases.
+
+Verification:
+- `python -m pytest tests\test_runtime_knowledge.py tests\test_collector_task_container_runtime.py tests\test_package_runtime_prediction.py tests\test_python_script_runtime_prediction.py tests\test_pytest_runtime_prediction.py --basetemp .pytest-tmp-runtime-kb-fix`
+  passed: 104 tests.
+- `python -m py_compile src\trace_collect\runtime_knowledge.py src\trace_collect\collector.py src\trace_collect\package_runtime_prediction.py src\trace_collect\python_script_runtime_prediction.py src\trace_collect\pytest_runtime_prediction.py tests\test_runtime_knowledge.py tests\test_collector_task_container_runtime.py tests\test_package_runtime_prediction.py tests\test_python_script_runtime_prediction.py tests\test_pytest_runtime_prediction.py`
+  passed.
