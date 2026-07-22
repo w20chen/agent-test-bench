@@ -52,24 +52,22 @@ from trace_collect.package_runtime_prediction import (
     merge_pip_predictions_into_shared_history,
     parse_pip_install_command,
     seed_pip_history_from_shared,
-    seed_pip_family_history_from_shared,
 )
 from trace_collect.pytest_runtime_prediction import (
     merge_pytest_predictions_into_shared_history,
     normalize_pytest_command,
     command_contains_literal_pytest,
     seed_pytest_history_from_shared,
-    seed_pytest_family_history_from_shared,
 )
 from trace_collect.python_script_runtime_prediction import (
     merge_python_script_predictions_into_shared_history,
     parse_python_script_command,
     seed_python_script_history_from_shared,
-    seed_python_script_family_history_from_shared,
 )
 from trace_collect.runtime_knowledge import (
     default_personal_kb_path,
     load_json_object,
+    repo_personal_kb_path,
     resource_summary_from_profile,
     update_personal_kb,
     write_json_object,
@@ -97,40 +95,10 @@ def _safe_scope_dir_name(value: str, *, fallback: str) -> str:
     return f"{safe[:80] or fallback}-{digest}"
 
 
-def _history_bucket_dir(run_dir: Path, tool: str, scope: str, value: str) -> Path:
-    return (
-        run_dir.resolve()
-        / f"{tool}_runtime_db"
-        / scope
-        / _safe_scope_dir_name(value, fallback=scope)
-    )
+def _repo_scope(task: dict[str, Any], instance_id: str) -> str:
+    """Build a repo-level scope key for cross-instance history sharing.
 
-
-def _pip_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
-    return run_dir.resolve() / "pip_runtime_db" / _safe_scope_dir_name(
-        instance_id,
-        fallback="instance",
-    )
-
-
-def _python_script_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
-    return run_dir.resolve() / "python_script_runtime_db" / _safe_scope_dir_name(
-        instance_id,
-        fallback="instance",
-    )
-
-
-def _pytest_history_scope_dir(run_dir: Path, instance_id: str) -> Path:
-    return run_dir.resolve() / "pytest_runtime_db" / _safe_scope_dir_name(
-        instance_id,
-        fallback="instance",
-    )
-
-
-def _task_family_scope(task: dict[str, Any], instance_id: str) -> str:
-    """Build a coarse family key for cross-instance history sharing.
-
-    Family scope is intentionally minimal: **only repo**.  Image family,
+    Scope is intentionally minimal: **only repo**.  Image family,
     Python version, and install config are deliberately excluded so that
     all instances of the same repository share a single history bucket.
     This maximises the chance of a cold-start hit.
@@ -141,19 +109,35 @@ def _task_family_scope(task: dict[str, Any], instance_id: str) -> str:
     return f"instance={instance_id}"
 
 
-def _family_history_scope_dir(
+def _repo_history_dir(
     run_dir: Path,
     tool: str,
     task: dict[str, Any],
     instance_id: str,
 ) -> Path:
+    """Repo-level persistent history directory for a tool.
+
+    Returns e.g. ``runtime_kb/repo/repo_<name>/pip/``.
+    This is the single source of truth for per-tool history across all
+    instances of the same repository.
+    """
     return (
         run_dir.resolve()
         / "runtime_kb"
         / "repo"
-        / _safe_scope_dir_name(_task_family_scope(task, instance_id), fallback="repo")
+        / _safe_scope_dir_name(_repo_scope(task, instance_id), fallback="repo")
         / tool
     )
+
+
+def _repo_personal_kb_path(
+    run_dir: Path,
+    task: dict[str, Any],
+    instance_id: str,
+) -> Path:
+    """Repo-level Personal KB path, shared across all tools for a repo."""
+    repo_key = _safe_scope_dir_name(_repo_scope(task, instance_id), fallback="repo")
+    return repo_personal_kb_path(run_dir, repo_key)
 
 
 def _recording_server_public_host(
@@ -1394,31 +1378,13 @@ async def collect_traces(
                     run_task_kwargs["capture_pytest_runtime"] = capture_pytest_runtime
                 if "pytest_history_dir" in run_task_params and capture_pytest_runtime:
                     run_task_kwargs["pytest_history_dir"] = (
-                        _pytest_history_scope_dir(run_dir, ctx.instance_id)
-                    )
-                if "pytest_family_history_dir" in run_task_params and capture_pytest_runtime:
-                    run_task_kwargs["pytest_family_history_dir"] = (
-                        _family_history_scope_dir(
-                            run_dir,
-                            "pytest",
-                            task,
-                            ctx.instance_id,
-                        )
+                        _repo_history_dir(run_dir, "pytest", task, ctx.instance_id)
                     )
                 if "capture_pip_runtime" in run_task_params:
                     run_task_kwargs["capture_pip_runtime"] = capture_pip_runtime
                 if "pip_history_dir" in run_task_params and capture_pip_runtime:
                     run_task_kwargs["pip_history_dir"] = (
-                        _pip_history_scope_dir(run_dir, ctx.instance_id)
-                    )
-                if "pip_family_history_dir" in run_task_params and capture_pip_runtime:
-                    run_task_kwargs["pip_family_history_dir"] = (
-                        _family_history_scope_dir(
-                            run_dir,
-                            "pip",
-                            task,
-                            ctx.instance_id,
-                        )
+                        _repo_history_dir(run_dir, "pip", task, ctx.instance_id)
                     )
                 if "capture_python_script_runtime" in run_task_params:
                     run_task_kwargs["capture_python_script_runtime"] = (
@@ -1429,18 +1395,8 @@ async def collect_traces(
                     and capture_python_script_runtime
                 ):
                     run_task_kwargs["python_script_history_dir"] = (
-                        _python_script_history_scope_dir(run_dir, ctx.instance_id)
-                    )
-                if (
-                    "python_script_family_history_dir" in run_task_params
-                    and capture_python_script_runtime
-                ):
-                    run_task_kwargs["python_script_family_history_dir"] = (
-                        _family_history_scope_dir(
-                            run_dir,
-                            "python_script",
-                            task,
-                            ctx.instance_id,
+                        _repo_history_dir(
+                            run_dir, "python_script", task, ctx.instance_id
                         )
                     )
                 result = await runner.run_task(
@@ -1913,7 +1869,7 @@ async def _run_openclaw_in_task_container(
     tool_profiler_out_dir = ctx.attempt_dir.resolve() / "tool_profiles"
     tool_scheduler_out_dir = ctx.attempt_dir.resolve() / "tool_scheduler"
     tool_scheduler_history_db = (
-        _family_history_scope_dir(
+        _repo_history_dir(
             ctx.run_dir,
             "tool_scheduler",
             task,
@@ -2045,38 +2001,23 @@ async def _run_openclaw_in_task_container(
             if capture_pip_runtime
             else None
         )
-        pip_shared_history_dir = (
-            _pip_history_scope_dir(ctx.run_dir, ctx.instance_id)
+        pip_repo_history_dir = (
+            _repo_history_dir(ctx.run_dir, "pip", task, ctx.instance_id)
             if capture_pip_runtime
             else None
         )
-        pip_family_history_dir = (
-            _family_history_scope_dir(ctx.run_dir, "pip", task, ctx.instance_id)
-            if capture_pip_runtime
-            else None
-        )
-        if pip_runtime_dir is not None and pip_shared_history_dir is not None:
+        if pip_runtime_dir is not None and pip_repo_history_dir is not None:
             seed_pip_history_from_shared(
-                shared_history_root=pip_shared_history_dir,
+                shared_history_root=pip_repo_history_dir,
                 attempt_prediction_root=pip_runtime_dir,
             )
-            if pip_family_history_dir is not None:
-                seed_pip_family_history_from_shared(
-                    shared_history_root=pip_family_history_dir,
-                    attempt_prediction_root=pip_runtime_dir,
-                )
         python_script_runtime_dir = (
             ctx.attempt_dir.resolve() / "python_script_runtime"
             if capture_python_script_runtime
             else None
         )
-        python_script_shared_history_dir = (
-            _python_script_history_scope_dir(ctx.run_dir, ctx.instance_id)
-            if capture_python_script_runtime
-            else None
-        )
-        python_script_family_history_dir = (
-            _family_history_scope_dir(
+        python_script_repo_history_dir = (
+            _repo_history_dir(
                 ctx.run_dir,
                 "python_script",
                 task,
@@ -2087,42 +2028,27 @@ async def _run_openclaw_in_task_container(
         )
         if (
             python_script_runtime_dir is not None
-            and python_script_shared_history_dir is not None
+            and python_script_repo_history_dir is not None
         ):
             seed_python_script_history_from_shared(
-                shared_history_root=python_script_shared_history_dir,
+                shared_history_root=python_script_repo_history_dir,
                 attempt_prediction_root=python_script_runtime_dir,
             )
-            if python_script_family_history_dir is not None:
-                seed_python_script_family_history_from_shared(
-                    shared_history_root=python_script_family_history_dir,
-                    attempt_prediction_root=python_script_runtime_dir,
-                )
         pytest_runtime_dir = (
             ctx.attempt_dir.resolve() / "pytest_runtime"
             if capture_pytest_runtime
             else None
         )
-        pytest_shared_history_dir = (
-            _pytest_history_scope_dir(ctx.run_dir, ctx.instance_id)
+        pytest_repo_history_dir = (
+            _repo_history_dir(ctx.run_dir, "pytest", task, ctx.instance_id)
             if capture_pytest_runtime
             else None
         )
-        pytest_family_history_dir = (
-            _family_history_scope_dir(ctx.run_dir, "pytest", task, ctx.instance_id)
-            if capture_pytest_runtime
-            else None
-        )
-        if pytest_runtime_dir is not None and pytest_shared_history_dir is not None:
+        if pytest_runtime_dir is not None and pytest_repo_history_dir is not None:
             seed_pytest_history_from_shared(
-                shared_history_root=pytest_shared_history_dir,
+                shared_history_root=pytest_repo_history_dir,
                 attempt_prediction_root=pytest_runtime_dir,
             )
-            if pytest_family_history_dir is not None:
-                seed_pytest_family_history_from_shared(
-                    shared_history_root=pytest_family_history_dir,
-                    attempt_prediction_root=pytest_runtime_dir,
-                )
         runtime = run_task_container_agent(
             container_id=container_id,
             timeout=(max_iterations * 120) + 300,
@@ -2181,39 +2107,24 @@ async def _run_openclaw_in_task_container(
             },
             container_executable=container_executable,
         )
-        if pip_runtime_dir is not None and pip_shared_history_dir is not None:
+        if pip_runtime_dir is not None and pip_repo_history_dir is not None:
             merge_pip_predictions_into_shared_history(
-                shared_history_root=pip_shared_history_dir,
+                shared_history_root=pip_repo_history_dir,
                 attempt_prediction_root=pip_runtime_dir,
             )
-            if pip_family_history_dir is not None:
-                merge_pip_predictions_into_shared_history(
-                    shared_history_root=pip_family_history_dir,
-                    attempt_prediction_root=pip_runtime_dir,
-                )
         if (
             python_script_runtime_dir is not None
-            and python_script_shared_history_dir is not None
+            and python_script_repo_history_dir is not None
         ):
             merge_python_script_predictions_into_shared_history(
-                shared_history_root=python_script_shared_history_dir,
+                shared_history_root=python_script_repo_history_dir,
                 attempt_prediction_root=python_script_runtime_dir,
             )
-            if python_script_family_history_dir is not None:
-                merge_python_script_predictions_into_shared_history(
-                    shared_history_root=python_script_family_history_dir,
-                    attempt_prediction_root=python_script_runtime_dir,
-                )
-        if pytest_runtime_dir is not None and pytest_shared_history_dir is not None:
+        if pytest_runtime_dir is not None and pytest_repo_history_dir is not None:
             merge_pytest_predictions_into_shared_history(
-                shared_history_root=pytest_shared_history_dir,
+                shared_history_root=pytest_repo_history_dir,
                 attempt_prediction_root=pytest_runtime_dir,
             )
-            if pytest_family_history_dir is not None:
-                merge_pytest_predictions_into_shared_history(
-                    shared_history_root=pytest_family_history_dir,
-                    attempt_prediction_root=pytest_runtime_dir,
-                )
         runtime_proof = {
             **asdict(proof),
             **runtime.runtime_proof,
@@ -2251,18 +2162,16 @@ async def _run_openclaw_in_task_container(
             _finalize_tool_profiler(
                 tool_profiler_out_dir,
                 ctx.attempt_dir,
-                personal_kb_path=default_personal_kb_path(
-                    _pytest_history_scope_dir(ctx.run_dir, ctx.instance_id),
-                    ctx.attempt_dir,
+                personal_kb_path=_repo_personal_kb_path(
+                    ctx.run_dir, task, ctx.instance_id
                 ),
             )
         if tool_scheduler_mode:
             _finalize_tool_scheduler(
                 tool_scheduler_out_dir,
                 ctx.attempt_dir,
-                personal_kb_path=default_personal_kb_path(
-                    _pytest_history_scope_dir(ctx.run_dir, ctx.instance_id),
-                    ctx.attempt_dir,
+                personal_kb_path=_repo_personal_kb_path(
+                    ctx.run_dir, task, ctx.instance_id
                 ),
             )
         container_logs = stop_task_container(

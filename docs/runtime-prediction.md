@@ -21,62 +21,58 @@ Common KB is a read-only cross-repo prior. It is assumed to be populated
 offline and provided at runtime by setting `TOOL_RUNTIME_COMMON_KB` to a JSON
 file. Online calibration never writes to Common KB.
 
-Recommended fields for each Common prior:
+Common KB schema v2 separates concrete-tool, family, operation, and global
+fallback layers. Leaves contain only statistics; identity lives in the nested
+path.
 
 ```json
 {
-  "priors": {
-    "pytest/run_tests/101-500-tests": {
-      "tool_name": "pytest",
-      "tool_family": "test_runner",
-      "operation": "run_tests",
-      "workload_bucket": "101-500-tests",
-      "environment_bucket": {
-        "os": "linux",
-        "arch": "x86_64",
-        "cpu_class": "generic",
-        "memory_bucket": "8-32gb"
-      },
-      "duration": {
-        "p50_s": 40.0,
-        "p75_s": 65.0,
-        "p90_s": 90.0,
-        "p95_s": 120.0,
-        "mean_s": 52.0,
-        "std_s": 20.0,
-        "sample_count": 1000
-      },
-      "resources": {
-        "load_class": "cpu_parallel",
-        "expected_cores": 3.2,
-        "peak_cores_p90": 6.0,
-        "peak_memory_mb": 1024.0,
-        "disk_read_mb_p90": 128.0,
-        "disk_write_mb_p90": 64.0,
-        "io_class": "light"
-      },
-      "quality": {
-        "min_samples": 50,
-        "outlier_policy": "winsorized_p01_p99",
-        "source_version": "common-v1",
-        "privacy_level": "aggregate",
-        "confidence": "medium"
+  "schema_version": 2,
+  "taxonomy": {
+    "pytest": {"family": "test_runner"}
+  },
+  "by_tool": {
+    "pytest": {
+      "run_tests": {
+        "default": {
+          "duration": {"p50_s": 40.0, "p90_s": 90.0},
+          "resources": {"load_class": "cpu_parallel", "expected_cores": 3.2},
+          "counts": {"duration": 1000, "resources": 120},
+          "confidence": {"duration": "high", "resources": "high"}
+        },
+        "buckets": {
+          "101-500-tests": {
+            "duration": {"p50_s": 52.0, "p90_s": 120.0},
+            "resources": {},
+            "counts": {"duration": 75, "resources": 0},
+            "confidence": {"duration": "medium", "resources": "unavailable"}
+          }
+        }
       }
     }
-  }
+  },
+  "by_family": {},
+  "by_operation": {
+    "run_tests": {"default": {"duration": {"p50_s": 60.0}}}
+  },
+  "global": {"duration": {"p50_s": 30.0}}
 }
 ```
 
 Lookup is progressive:
 
 ```text
-tool_name / operation / workload_bucket
--> tool_name / operation
--> tool_family / operation / workload_bucket
--> tool_family / operation
--> generic_process / operation
--> generic_process
+by_tool[tool_name][operation].buckets[workload_bucket]
+-> by_tool[tool_name][operation].default
+-> by_family[tool_family][operation].buckets[workload_bucket]
+-> by_family[tool_family][operation].default
+-> by_operation[operation].default
+-> global
 ```
+
+The reader still accepts legacy v1 `priors` files for compatibility. If
+`TOOL_RUNTIME_COMMON_KB` is unset, the project defaults to
+`runtime_common_kb_swe_rebench_p1.json` in the repository root when present.
 
 ### Personal KB
 

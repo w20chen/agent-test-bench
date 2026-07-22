@@ -100,13 +100,13 @@ class TraceCollectorHook(AgentHook):
         pytest_project_root: Path | None = None,
         pytest_runtime_dir: Path | None = None,
         pytest_history_dir: Path | None = None,
-        pytest_family_history_dir: Path | None = None,
+        pytest_family_history_dir: Path | None = None,  # noqa: ARG002 – kept for caller compat; unused
         pip_runtime_dir: Path | None = None,
         pip_history_dir: Path | None = None,
-        pip_family_history_dir: Path | None = None,
+        pip_family_history_dir: Path | None = None,  # noqa: ARG002 – kept for caller compat; unused
         python_script_runtime_dir: Path | None = None,
         python_script_history_dir: Path | None = None,
-        python_script_family_history_dir: Path | None = None,
+        python_script_family_history_dir: Path | None = None,  # noqa: ARG002 – kept for caller compat; unused
         exec_path_append: str = "",
     ) -> None:
         self.trace_file = trace_file
@@ -132,15 +132,15 @@ class TraceCollectorHook(AgentHook):
         self._pytest_captures_by_tool_call: dict[str, PytestCaptureRecord] = {}
         self._pytest_runtime_dir = pytest_runtime_dir
         self._pytest_history_dir = pytest_history_dir
-        self._pytest_family_history_dir = pytest_family_history_dir
+        self._pytest_family_history_dir: Path | None = None  # deprecated – repo-level history is now primary
         self._pytest_runtime_by_tool_call: dict[str, PytestRuntimeRecord] = {}
         self._pip_runtime_dir = pip_runtime_dir
         self._pip_history_dir = pip_history_dir
-        self._pip_family_history_dir = pip_family_history_dir
+        self._pip_family_history_dir: Path | None = None  # deprecated – repo-level history is now primary
         self._pip_runtime_by_tool_call: dict[str, PipRuntimeRecord] = {}
         self._python_script_runtime_dir = python_script_runtime_dir
         self._python_script_history_dir = python_script_history_dir
-        self._python_script_family_history_dir = python_script_family_history_dir
+        self._python_script_family_history_dir: Path | None = None  # deprecated – repo-level history is now primary
         self._python_script_runtime_by_tool_call: dict[
             str, PythonScriptRuntimeRecord
         ] = {}
@@ -238,7 +238,7 @@ class TraceCollectorHook(AgentHook):
                         runtime_record = prepare_pytest_runtime_prediction_before_tool(
                             prediction_root=self._pytest_runtime_dir,
                             history_root=self._pytest_history_dir,
-                            family_history_root=self._pytest_family_history_dir,
+                            family_history_root=None,
                             iteration=context.iteration,
                             tool_call_id=tc.id,
                             tool_name=tc.name,
@@ -272,7 +272,7 @@ class TraceCollectorHook(AgentHook):
                         pip_runtime_record = prepare_pip_runtime_prediction_before_tool(
                             prediction_root=self._pip_runtime_dir,
                             history_root=self._pip_history_dir,
-                            family_history_root=self._pip_family_history_dir,
+                            family_history_root=None,
                             iteration=context.iteration,
                             tool_call_id=tc.id,
                             tool_name=tc.name,
@@ -305,7 +305,7 @@ class TraceCollectorHook(AgentHook):
                             prepare_python_script_runtime_prediction_before_tool(
                                 prediction_root=self._python_script_runtime_dir,
                                 history_root=self._python_script_history_dir,
-                                family_history_root=self._python_script_family_history_dir,
+                                family_history_root=None,
                                 iteration=context.iteration,
                                 tool_call_id=tc.id,
                                 tool_name=tc.name,

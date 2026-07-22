@@ -12,6 +12,7 @@ from typing import Any
 
 
 PERSONAL_KB_FILENAME = "personal_runtime_knowledge.json"
+COMMON_KB_FILENAME = "runtime_common_kb_swe_rebench_p1.json"
 COMMON_KB_ENV = "TOOL_RUNTIME_COMMON_KB"
 HISTORY_LIMIT = 10
 SCHEMA_VERSION = 1
@@ -64,19 +65,36 @@ def utc_now() -> str:
 
 
 def default_personal_kb_path(history_root: Path | None, prediction_root: Path) -> Path:
+    """Resolve the Personal KB path.
+
+    When *history_root* points to a repo-level directory (e.g.
+    ``runtime_kb/repo/repo_<name>/pip/``), the Personal KB lives alongside
+    it at ``runtime_kb/repo/repo_<name>/personal_runtime_knowledge.json``
+    so that all tools within the same repo share a single knowledge base.
+
+    Falls back to *prediction_root* when no shared history directory is
+    configured.
+    """
     if history_root is not None and history_root.parent.parent != history_root.parent:
-        return (
-            history_root.parent.parent
-            / "runtime_knowledge_db"
-            / history_root.name
-            / PERSONAL_KB_FILENAME
-        )
+        return history_root.parent / PERSONAL_KB_FILENAME
     return prediction_root / PERSONAL_KB_FILENAME
+
+
+def repo_personal_kb_path(run_dir: Path, repo_key: str) -> Path:
+    """Repo-level Personal KB path, independent of any tool subdirectory.
+
+    ``repo_key`` is a safe directory name for the repository (e.g. the
+    output of ``_safe_scope_dir_name``).
+    """
+    return run_dir / "runtime_kb" / "repo" / repo_key / PERSONAL_KB_FILENAME
 
 
 def default_common_kb_path() -> Path | None:
     value = os.environ.get(COMMON_KB_ENV)
-    return Path(value) if value else None
+    if value:
+        return Path(value)
+    repo_default = Path(__file__).resolve().parents[2] / COMMON_KB_FILENAME
+    return repo_default if repo_default.exists() else None
 
 
 def load_json_object(path: Path | None) -> dict[str, Any]:
@@ -250,6 +268,17 @@ def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _confidence_from_common_prior(prior: dict[str, Any]) -> str:
+    confidence = prior.get("confidence")
+    if isinstance(confidence, str):
+        return confidence
+    if isinstance(confidence, dict):
+        duration_confidence = confidence.get("duration")
+        if isinstance(duration_confidence, str):
+            return duration_confidence
+    return "low"
+
+
 def _common_prior_to_prediction(prior: dict[str, Any], *, source: str) -> RuntimePrediction:
     duration = prior.get("duration")
     resources = prior.get("resources")
@@ -257,7 +286,10 @@ def _common_prior_to_prediction(prior: dict[str, Any], *, source: str) -> Runtim
         duration = prior
     if not isinstance(resources, dict):
         resources = prior
+    counts = prior.get("counts")
     sample_count = prior.get("sample_count")
+    if not isinstance(sample_count, int) and isinstance(counts, dict):
+        sample_count = counts.get("duration")
     if not isinstance(sample_count, int):
         sample_count = duration.get("sample_count")
     return RuntimePrediction(
@@ -272,15 +304,90 @@ def _common_prior_to_prediction(prior: dict[str, Any], *, source: str) -> Runtim
         peak_memory_mb=_float_or_none(
             _first_present(resources, "peak_memory_mb", "rss_p90_mb")
         ),
-        confidence=prior.get("confidence")
-        if isinstance(prior.get("confidence"), str)
-        else "low",
+        confidence=_confidence_from_common_prior(prior),
         prediction_source=source,
         source_detail=prior.get("source_detail")
         if isinstance(prior.get("source_detail"), str)
         else None,
         sample_count=sample_count,
     )
+
+
+def _lookup_layered_operation(
+    node: dict[str, Any],
+    *,
+    workload_bucket: str | None,
+) -> tuple[str, dict[str, Any]] | None:
+    if workload_bucket:
+        buckets = node.get("buckets")
+        if isinstance(buckets, dict):
+            prior = buckets.get(workload_bucket)
+            if isinstance(prior, dict):
+                return f"buckets/{workload_bucket}", prior
+    prior = node.get("default")
+    if isinstance(prior, dict) and prior:
+        return "default", prior
+    return None
+
+
+def _lookup_v2_common_prediction(
+    kb: dict[str, Any],
+    *,
+    tool_name: str,
+    tool_family: str,
+    operation: str,
+    workload_bucket: str | None,
+) -> RuntimePrediction | None:
+    by_tool = kb.get("by_tool")
+    if isinstance(by_tool, dict):
+        tool_node = by_tool.get(tool_name)
+        if isinstance(tool_node, dict):
+            operation_node = tool_node.get(operation)
+            if isinstance(operation_node, dict):
+                found = _lookup_layered_operation(
+                    operation_node,
+                    workload_bucket=workload_bucket,
+                )
+                if found is not None:
+                    detail, prior = found
+                    return _common_prior_to_prediction(
+                        prior,
+                        source=f"common:by_tool/{tool_name}/{operation}/{detail}",
+                    )
+
+    by_family = kb.get("by_family")
+    if isinstance(by_family, dict):
+        family_node = by_family.get(tool_family)
+        if isinstance(family_node, dict):
+            operation_node = family_node.get(operation)
+            if isinstance(operation_node, dict):
+                found = _lookup_layered_operation(
+                    operation_node,
+                    workload_bucket=workload_bucket,
+                )
+                if found is not None:
+                    detail, prior = found
+                    return _common_prior_to_prediction(
+                        prior,
+                        source=f"common:by_family/{tool_family}/{operation}/{detail}",
+                    )
+
+    by_operation = kb.get("by_operation")
+    if isinstance(by_operation, dict):
+        operation_node = by_operation.get(operation)
+        if isinstance(operation_node, dict):
+            prior = operation_node.get("default")
+            if isinstance(prior, dict) and prior:
+                return _common_prior_to_prediction(
+                    prior,
+                    source=f"common:by_operation/{operation}/default",
+                )
+
+    global_prior = kb.get("global")
+    if isinstance(global_prior, dict) and global_prior:
+        return _common_prior_to_prediction(global_prior, source="common:global")
+
+    return None
 
 
 def lookup_common_prediction(
@@ -292,6 +399,16 @@ def lookup_common_prediction(
     workload_bucket: str | None = None,
 ) -> RuntimePrediction | None:
     """Read-only Common fallback: tool -> family -> generic."""
+
+    v2_prediction = _lookup_v2_common_prediction(
+        kb,
+        tool_name=tool_name,
+        tool_family=tool_family,
+        operation=operation,
+        workload_bucket=workload_bucket,
+    )
+    if v2_prediction is not None:
+        return v2_prediction
 
     candidates: list[str] = []
     if workload_bucket:

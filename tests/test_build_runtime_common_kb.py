@@ -6,6 +6,23 @@ from pathlib import Path
 from scripts.build_runtime_common_kb import build_common_kb
 
 
+def _tool_default(kb: dict[str, object], tool: str, operation: str) -> dict[str, object]:
+    return kb["by_tool"][tool][operation]["default"]  # type: ignore[index]
+
+
+def _tool_bucket(
+    kb: dict[str, object],
+    tool: str,
+    operation: str,
+    bucket: str,
+) -> dict[str, object]:
+    return kb["by_tool"][tool][operation]["buckets"][bucket]  # type: ignore[index]
+
+
+def _family_default(kb: dict[str, object], family: str, operation: str) -> dict[str, object]:
+    return kb["by_family"][family][operation]["default"]  # type: ignore[index]
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -51,12 +68,20 @@ def test_build_common_kb_from_prediction_artifacts(tmp_path: Path) -> None:
 
     kb = build_common_kb(tmp_path)
 
-    pip_prior = kb["priors"]["pip/install/2-10-packages"]
-    assert pip_prior["duration"]["sample_count"] == 2
+    pip_prior = _tool_bucket(kb, "pip", "install", "2-10-packages")
+    assert pip_prior["counts"]["duration"] == 2
+    assert pip_prior["counts"]["resources"] == 0
     assert pip_prior["duration"]["p50_s"] == 15.0
+    assert pip_prior["resources"] == {}
+    assert pip_prior["confidence"]["duration"] == "low"
+    assert pip_prior["confidence"]["resources"] == "unavailable"
+    assert "tool_name" not in pip_prior
+    assert "tool_family" not in pip_prior
+    assert "operation" not in pip_prior
+    assert "workload_bucket" not in pip_prior
     assert "private-package" not in json.dumps(kb)
 
-    pytest_prior = kb["priors"]["pytest/run_tests/11-100-tests"]
+    pytest_prior = _tool_bucket(kb, "pytest", "run_tests", "11-100-tests")
     assert pytest_prior["duration"]["p90_s"] == 30.0
 
 
@@ -83,7 +108,7 @@ def test_build_common_kb_from_whole_run_profile(tmp_path: Path) -> None:
     )
 
     kb = build_common_kb(tmp_path)
-    prior = kb["priors"]["pytest/run_tests"]
+    prior = _tool_default(kb, "pytest", "run_tests")
 
     assert prior["duration"]["p50_s"] == 8.0
     assert prior["resources"]["load_class"] == "cpu_parallel"
@@ -118,12 +143,12 @@ def test_build_common_kb_from_tool_calls_json(tmp_path: Path) -> None:
 
     kb = build_common_kb(tmp_path)
 
-    assert kb["priors"]["read_file/read_file/32k-256k-chars"]["duration"][
+    assert _tool_bucket(kb, "read_file", "read_file", "32k-256k-chars")["duration"][
         "p50_s"
     ] == 0.1
-    assert kb["priors"]["find/search_files"]["tool_family"] == "file_processing"
-    assert kb["priors"]["pytest/run_tests"]["duration"]["p50_s"] == 5.0
-    assert kb["priors"]["pytest/run_tests/1-10-tests"]["duration"]["p50_s"] == 5.0
+    assert kb["taxonomy"]["find"]["family"] == "file_processing"
+    assert _tool_default(kb, "pytest", "run_tests")["duration"]["p50_s"] == 5.0
+    assert _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")["duration"]["p50_s"] == 5.0
     serialized = json.dumps(kb)
     assert "private" not in serialized
     assert "/testbed" not in serialized
@@ -145,10 +170,85 @@ def test_builder_emits_family_and_generic_fallback_buckets(tmp_path: Path) -> No
 
     kb = build_common_kb(tmp_path)
 
-    assert "pip/install/2-10-packages" in kb["priors"]
-    assert "package_install/install/2-10-packages" in kb["priors"]
-    assert "generic_process/install" in kb["priors"]
-    assert "generic_process" in kb["priors"]
+    assert "2-10-packages" in kb["by_tool"]["pip"]["install"]["buckets"]
+    assert "2-10-packages" in kb["by_family"]["package_install"]["install"]["buckets"]
+    assert "install" in kb["by_operation"]
+    assert "buckets" not in kb["by_operation"]["install"]
+    assert "generic_process" not in kb["by_family"]
+    assert kb["global"]["counts"]["duration"] == 1
+
+
+def test_builder_canonicalizes_common_exec_command_forms(tmp_path: Path) -> None:
+    tool_calls = [
+        {
+            "tool": "exec-pip",
+            "input": {"command": "python -m pip install -r requirements.txt"},
+            "duration_ms": 1000.0,
+        },
+        {
+            "tool": "exec-grep",
+            "input": {"command": "grep -R needle ."},
+            "duration_ms": 100.0,
+        },
+        {
+            "tool": "exec-rg",
+            "input": {"command": "rg needle"},
+            "duration_ms": 200.0,
+        },
+        {
+            "tool": "exec-cat",
+            "input": {"command": "cat pyproject.toml"},
+            "duration_ms": 10.0,
+        },
+        {
+            "tool": "exec-head",
+            "input": {"command": "head README.md"},
+            "duration_ms": 20.0,
+        },
+        {
+            "tool": "exec-tail",
+            "input": {"command": "tail README.md"},
+            "duration_ms": 30.0,
+        },
+    ]
+    path = tmp_path / "case" / "attempt_1" / "tool_calls.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tool_calls), encoding="utf-8")
+
+    kb = build_common_kb(tmp_path)
+
+    assert _tool_default(kb, "pip", "install")["counts"]["duration"] == 1
+    assert _family_default(kb, "file_processing", "search_files")["counts"][
+        "duration"
+    ] == 2
+    assert _family_default(kb, "file_processing", "read_file")["counts"][
+        "duration"
+    ] == 3
+    assert "run" not in kb["by_family"].get("generic_process", {})
+
+
+def test_builder_keeps_distinct_rows_without_ids_or_timestamps(tmp_path: Path) -> None:
+    tool_calls = [
+        {
+            "tool": "exec-cat",
+            "input": {"command": "cat a.txt"},
+            "duration_ms": 10.0,
+        },
+        {
+            "tool": "exec-cat",
+            "input": {"command": "cat b.txt"},
+            "duration_ms": 20.0,
+        },
+    ]
+    path = tmp_path / "case" / "attempt_1" / "tool_calls.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tool_calls), encoding="utf-8")
+
+    kb = build_common_kb(tmp_path)
+
+    prior = _tool_default(kb, "cat", "read_file")
+    assert prior["counts"]["duration"] == 2
+    assert prior["duration"]["p50_s"] == 0.015
 
 
 def test_builder_deduplicates_prediction_and_tool_call_by_id(tmp_path: Path) -> None:
@@ -198,10 +298,10 @@ def test_builder_deduplicates_prediction_and_tool_call_by_id(tmp_path: Path) -> 
 
     kb = build_common_kb(tmp_path)
 
-    prior = kb["priors"]["pytest/run_tests/1-10-tests"]
-    assert prior["duration"]["sample_count"] == 1
+    prior = _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")
+    assert prior["counts"]["duration"] == 1
     assert prior["duration"]["p50_s"] == 10.0
-    assert prior["resources"]["resource_sample_count"] == 1
+    assert prior["counts"]["resources"] == 1
     assert prior["resources"]["expected_cores"] == 2.0
 
 
@@ -231,8 +331,8 @@ def test_builder_suppresses_tool_call_when_prediction_exists_without_shared_id(
 
     kb = build_common_kb(tmp_path)
 
-    prior = kb["priors"]["pytest/run_tests/1-10-tests"]
-    assert prior["duration"]["sample_count"] == 1
+    prior = _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")
+    assert prior["counts"]["duration"] == 1
     assert prior["duration"]["p50_s"] == 10.0
 
 
@@ -288,10 +388,10 @@ def test_prediction_duration_suppression_keeps_tool_call_resources(
 
     kb = build_common_kb(tmp_path)
 
-    prior = kb["priors"]["pytest/run_tests/1-10-tests"]
-    assert prior["duration"]["sample_count"] == 1
+    prior = _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")
+    assert prior["counts"]["duration"] == 1
     assert prior["duration"]["p50_s"] == 10.0
-    assert prior["resources"]["resource_sample_count"] == 1
+    assert prior["counts"]["resources"] == 1
     assert prior["resources"]["expected_cores"] == 2.0
     assert prior["resources"]["peak_memory_mb"] == 20.0
 
@@ -353,8 +453,9 @@ def test_tool_call_resources_suppress_duplicate_profile_resources(
 
     kb = build_common_kb(tmp_path)
 
-    resources = kb["priors"]["pytest/run_tests/1-10-tests"]["resources"]
-    assert resources["resource_sample_count"] == 1
+    prior = _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")
+    resources = prior["resources"]
+    assert prior["counts"]["resources"] == 1
     assert resources["expected_cores"] == 2.0
     assert resources["peak_memory_mb"] == 20.0
 
@@ -424,8 +525,9 @@ def test_repeated_tool_calls_keep_unmatched_profile_resource_fallback(
 
     kb = build_common_kb(tmp_path)
 
-    resources = kb["priors"]["pytest/run_tests"]["resources"]
-    assert resources["resource_sample_count"] == 2
+    prior = _tool_default(kb, "pytest", "run_tests")
+    resources = prior["resources"]
+    assert prior["counts"]["resources"] == 2
     assert resources["peak_memory_mb"] > 20.0
 
 
@@ -459,7 +561,7 @@ def test_builder_skips_failed_tool_call_and_profile(tmp_path: Path) -> None:
 
     kb = build_common_kb(tmp_path)
 
-    assert kb["priors"] == {}
+    assert kb["by_tool"] == {}
 
 
 def test_common_output_omits_root_name_and_repo_like_ids(tmp_path: Path) -> None:
@@ -551,7 +653,7 @@ def test_tool_call_resource_window_updates_common_resources(tmp_path: Path) -> N
     )
 
     kb = build_common_kb(tmp_path)
-    resources = kb["priors"]["pytest/run_tests/1-10-tests"]["resources"]
+    resources = _tool_bucket(kb, "pytest", "run_tests", "1-10-tests")["resources"]
 
     assert resources["expected_cores"] == 2.0
     assert resources["peak_cores_p90"] == 3.0

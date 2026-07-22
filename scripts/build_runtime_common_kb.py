@@ -13,7 +13,7 @@ import statistics
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _PYTHON_NAMES = {
     "python",
     "python3",
@@ -59,6 +59,14 @@ class PriorBucket:
     def key(self) -> str:
         base = f"{self.tool_name}/{self.operation}"
         return f"{base}/{self.workload_bucket}" if self.workload_bucket else base
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalToolCall:
+    tool: str
+    family: str
+    operation: str
+    workload_bucket: str | None
 
 
 def _utc_now() -> str:
@@ -333,10 +341,10 @@ def _std(values: list[float]) -> float | None:
     return statistics.pstdev(values) if len(values) > 1 else None
 
 
-def _confidence(sample_count: int, *, min_samples: int) -> str:
-    if sample_count >= max(min_samples * 4, 100):
+def _confidence(sample_count: int) -> str:
+    if sample_count >= 100:
         return "high"
-    if sample_count >= min_samples:
+    if sample_count >= 10:
         return "medium"
     if sample_count > 0:
         return "low"
@@ -356,6 +364,8 @@ def _duration_block(values: list[float]) -> dict[str, Any]:
 
 
 def _resource_block(bucket: PriorBucket) -> dict[str, Any]:
+    if bucket.resource_sample_count == 0:
+        return {}
     load_class = (
         bucket.load_classes.most_common(1)[0][0] if bucket.load_classes else "unknown"
     )
@@ -376,7 +386,6 @@ def _resource_block(bucket: PriorBucket) -> dict[str, Any]:
         "l1i_hit_rate_p50": _percentile(bucket.l1i_hit_rate, 50),
         "ipc_p50": _percentile(bucket.ipc, 50),
         "instructions_per_s_p50": _percentile(bucket.instructions_per_s, 50),
-        "resource_sample_count": bucket.resource_sample_count,
         "load_class_counts": dict(bucket.load_classes),
     }
 
@@ -484,7 +493,7 @@ def _preview_size(row: dict[str, Any]) -> int | None:
     return len(preview)
 
 
-def _tool_call_descriptor(row: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
+def _tool_call_descriptor(row: dict[str, Any]) -> CanonicalToolCall | None:
     tool = row.get("tool")
     if not isinstance(tool, str):
         return None
@@ -493,37 +502,37 @@ def _tool_call_descriptor(row: dict[str, Any]) -> tuple[str, str, str, str | Non
         input_payload = {}
     command = str(input_payload.get("command") or "")
     if _looks_like_pip_install(command):
-        return (
-            "pip",
-            "package_install",
-            "install",
-            _pip_workload_bucket(_count_pip_packages(command)),
+        return CanonicalToolCall(
+            tool="pip",
+            family="package_install",
+            operation="install",
+            workload_bucket=_pip_workload_bucket(_count_pip_packages(command)),
         )
     if _looks_like_pytest(command):
-        return (
-            "pytest",
-            "test_runner",
-            "run_tests",
-            _pytest_workload_bucket(_pytest_count_from_preview(row)),
+        return CanonicalToolCall(
+            tool="pytest",
+            family="test_runner",
+            operation="run_tests",
+            workload_bucket=_pytest_workload_bucket(_pytest_count_from_preview(row)),
         )
     if _looks_like_python_script(command):
-        return ("python", "script_execution", "run_script", None)
+        return CanonicalToolCall("python", "script_execution", "run_script", None)
 
     if tool in {"read_file", "write_file", "edit_file"}:
-        operation = tool
-        return (
-            tool,
-            "file_processing",
-            operation,
-            _size_bucket(_preview_size(row)),
+        operation = "read_file" if tool == "read_file" else tool
+        return CanonicalToolCall(
+            tool=tool,
+            family="file_processing",
+            operation=operation,
+            workload_bucket=_size_bucket(_preview_size(row)),
         )
     if tool == "list_dir":
         recursive = bool(input_payload.get("recursive"))
-        return (
-            "list_dir",
-            "file_processing",
-            "list_dir",
-            "recursive" if recursive else "single-dir",
+        return CanonicalToolCall(
+            tool="list_dir",
+            family="file_processing",
+            operation="list_dir",
+            workload_bucket="recursive" if recursive else "single-dir",
         )
     if tool.startswith("exec-"):
         name = tool.removeprefix("exec-") or "exec"
@@ -532,38 +541,41 @@ def _tool_call_descriptor(row: dict[str, Any]) -> tuple[str, str, str, str | Non
         if name in {"find", "grep", "rg"}:
             family = "file_processing"
             operation = "search_files"
-        elif name in {"ls", "cat", "sed", "head", "tail"}:
+        elif name in {"cat", "head", "tail"}:
+            family = "file_processing"
+            operation = "read_file"
+        elif name in {"ls", "sed"}:
             family = "file_processing"
             operation = name
-        return (name, family, operation, None)
-    return (tool, "generic_process", "run", None)
+        return CanonicalToolCall(name, family, operation, None)
+    return CanonicalToolCall(tool, "generic_process", "run", None)
 
 
-def _bucket_for_prediction_file(path: Path, row: dict[str, Any]) -> tuple[str, str, str, str | None] | None:
+def _bucket_for_prediction_file(path: Path, row: dict[str, Any]) -> CanonicalToolCall | None:
     parts = set(path.parts)
     if "pip_runtime" in parts:
-        return (
-            "pip",
-            "package_install",
-            "install",
-            _pip_workload_bucket(row.get("package_count")),
+        return CanonicalToolCall(
+            tool="pip",
+            family="package_install",
+            operation="install",
+            workload_bucket=_pip_workload_bucket(row.get("package_count")),
         )
     if "python_script_runtime" in parts:
-        return (
-            "python",
-            "script_execution",
-            "run_script",
-            _python_workload_bucket(row),
+        return CanonicalToolCall(
+            tool="python",
+            family="script_execution",
+            operation="run_script",
+            workload_bucket=_python_workload_bucket(row),
         )
     if "pytest_runtime" in parts:
         count_value = row.get("collected_count")
         if count_value is None:
             count_value = row.get("pre_execution_collected_count")
-        return (
-            "pytest",
-            "test_runner",
-            "run_tests",
-            _pytest_workload_bucket(count_value),
+        return CanonicalToolCall(
+            tool="pytest",
+            family="test_runner",
+            operation="run_tests",
+            workload_bucket=_pytest_workload_bucket(count_value),
         )
     return None
 
@@ -596,81 +608,36 @@ def _ensure_bucket(
     return bucket
 
 
-def _bucket_specs(
-    *,
-    tool_name: str,
-    tool_family: str,
-    operation: str,
-    workload_bucket: str | None,
-) -> list[tuple[str, str, str, str | None]]:
-    specs = [
-        (tool_name, tool_family, operation, workload_bucket),
-        (tool_name, tool_family, operation, None),
-    ]
-    if tool_family != tool_name:
-        specs.append((tool_family, tool_family, operation, workload_bucket))
-        specs.append((tool_family, tool_family, operation, None))
-    if tool_family != "generic_process":
-        specs.append(("generic_process", "generic_process", operation, None))
-    specs.append(("generic_process", "generic_process", "", None))
-
-    deduped: list[tuple[str, str, str, str | None]] = []
-    seen: set[tuple[str, str, str, str | None]] = set()
-    for spec in specs:
-        if spec not in seen:
-            seen.add(spec)
-            deduped.append(spec)
-    return deduped
-
-
 def _add_duration_observation(
     buckets: dict[str, PriorBucket],
     *,
-    tool_name: str,
-    tool_family: str,
-    operation: str,
-    workload_bucket: str | None,
+    descriptor: CanonicalToolCall,
     duration_s: float,
 ) -> None:
-    for spec_tool, spec_family, spec_operation, spec_workload in _bucket_specs(
-        tool_name=tool_name,
-        tool_family=tool_family,
-        operation=operation,
-        workload_bucket=workload_bucket,
-    ):
-        bucket = _ensure_bucket(
-            buckets,
-            tool_name=spec_tool,
-            tool_family=spec_family,
-            operation=spec_operation,
-            workload_bucket=spec_workload,
-        )
-        bucket.durations.append(duration_s)
+    bucket = _ensure_bucket(
+        buckets,
+        tool_name=descriptor.tool,
+        tool_family=descriptor.family,
+        operation=descriptor.operation,
+        workload_bucket=descriptor.workload_bucket,
+    )
+    bucket.durations.append(duration_s)
 
 
 def _add_resource_observation_to_buckets(
     buckets: dict[str, PriorBucket],
     *,
-    tool_name: str,
-    tool_family: str,
-    operation: str,
-    workload_bucket: str | None,
+    descriptor: CanonicalToolCall,
     summary: dict[str, Any],
 ) -> None:
-    for spec_tool, spec_family, spec_operation, spec_workload in _bucket_specs(
-        tool_name=tool_name,
-        tool_family=tool_family,
-        operation=operation,
-        workload_bucket=workload_bucket,
-    ):
-        bucket = _ensure_bucket(
-            buckets,
-            tool_name=spec_tool,
-            tool_family=spec_family,
-            operation=spec_operation,
-            workload_bucket=spec_workload,
-        )
-        _add_resource_observation(bucket, summary)
+    bucket = _ensure_bucket(
+        buckets,
+        tool_name=descriptor.tool,
+        tool_family=descriptor.family,
+        operation=descriptor.operation,
+        workload_bucket=descriptor.workload_bucket,
+    )
+    _add_resource_observation(bucket, summary)
 
 
 def _attempt_key(path: Path) -> str:
@@ -695,7 +662,8 @@ def _observation_id(path: Path, row: dict[str, Any]) -> str:
         if isinstance(value, str) and value:
             return f"{_attempt_key(path)}::{value}"
     timestamp = row.get("timestamp") or row.get("ts_start")
-    return f"{_attempt_key(path)}::{timestamp!r}::{len(json.dumps(row, sort_keys=True))}"
+    fingerprint = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    return f"{_attempt_key(path)}::{timestamp!r}::{fingerprint}"
 
 
 def _iter_prediction_files(root: Path) -> Iterable[Path]:
@@ -732,16 +700,16 @@ def collect_prediction_observations(
             if observation_id in seen_observations:
                 continue
             seen_observations.add(observation_id)
-            tool_name, tool_family, operation, workload_bucket = descriptor
             duration_keys.add(
-                _duration_key(path, tool_name=tool_name, operation=operation)
+                _duration_key(
+                    path,
+                    tool_name=descriptor.tool,
+                    operation=descriptor.operation,
+                )
             )
             _add_duration_observation(
                 buckets,
-                tool_name=tool_name,
-                tool_family=tool_family,
-                operation=operation,
-                workload_bucket=workload_bucket,
+                descriptor=descriptor,
                 duration_s=duration_s,
             )
     return buckets
@@ -791,8 +759,11 @@ def collect_tool_call_observations(
             if descriptor is None:
                 continue
             observation_id = _observation_id(path, row)
-            tool_name, tool_family, operation, workload_bucket = descriptor
-            duration_key = _duration_key(path, tool_name=tool_name, operation=operation)
+            duration_key = _duration_key(
+                path,
+                tool_name=descriptor.tool,
+                operation=descriptor.operation,
+            )
             already_seen = observation_id in seen_observations
             if already_seen and duration_key not in suppress_duration_keys:
                 continue
@@ -804,10 +775,7 @@ def collect_tool_call_observations(
                 duration_keys.add(duration_key)
                 _add_duration_observation(
                     buckets,
-                    tool_name=tool_name,
-                    tool_family=tool_family,
-                    operation=operation,
-                    workload_bucket=workload_bucket,
+                    descriptor=descriptor,
                     duration_s=duration_s,
                 )
             resource_summary = _tool_call_resource_summary(
@@ -820,10 +788,7 @@ def collect_tool_call_observations(
                 tool_call_resource_ids.add(observation_id)
                 _add_resource_observation_to_buckets(
                     buckets,
-                    tool_name=tool_name,
-                    tool_family=tool_family,
-                    operation=operation,
-                    workload_bucket=workload_bucket,
+                    descriptor=descriptor,
                     summary=resource_summary,
                 )
 
@@ -918,15 +883,15 @@ def _looks_like_pytest(command: str) -> bool:
     )
 
 
-def _descriptor_from_profile_row(row: dict[str, Any]) -> tuple[str, str, str]:
+def _descriptor_from_profile_row(row: dict[str, Any]) -> CanonicalToolCall:
     command = _command_text(row)
     if _looks_like_pip_install(command):
-        return ("pip", "package_install", "install")
+        return CanonicalToolCall("pip", "package_install", "install", None)
     if _looks_like_python_script(command):
-        return ("python", "script_execution", "run_script")
+        return CanonicalToolCall("python", "script_execution", "run_script", None)
     if _looks_like_pytest(command):
-        return ("pytest", "test_runner", "run_tests")
-    return ("generic_process", "generic_process", "run")
+        return CanonicalToolCall("pytest", "test_runner", "run_tests", None)
+    return CanonicalToolCall("generic_process", "generic_process", "run", None)
 
 
 def collect_profile_observations(
@@ -951,21 +916,28 @@ def collect_profile_observations(
             duration_s = _finite_nonnegative(summary.get("wall_time_s"))
             if duration_s is None:
                 continue
-            tool_name, tool_family, operation = _descriptor_from_profile_row(row)
+            descriptor = _descriptor_from_profile_row(row)
             final = row.get("final_profile") if isinstance(row.get("final_profile"), dict) else {}
             profile_tool = final.get("short_tool")
-            workload_bucket = "short" if profile_tool is True else None
+            if profile_tool is True:
+                descriptor = CanonicalToolCall(
+                    descriptor.tool,
+                    descriptor.family,
+                    descriptor.operation,
+                    "short",
+                )
             observation_id = _observation_id(path, row)
-            duration_key = _duration_key(path, tool_name=tool_name, operation=operation)
+            duration_key = _duration_key(
+                path,
+                tool_name=descriptor.tool,
+                operation=descriptor.operation,
+            )
             if observation_id not in seen_observations and duration_key not in duration_keys:
                 seen_observations.add(observation_id)
                 duration_keys.add(duration_key)
                 _add_duration_observation(
                     buckets,
-                    tool_name=tool_name,
-                    tool_family=tool_family,
-                    operation=operation,
-                    workload_bucket=workload_bucket,
+                    descriptor=descriptor,
                     duration_s=duration_s,
                 )
             tool_call_interval_covers_profile = (
@@ -978,10 +950,7 @@ def collect_profile_observations(
             if not tool_call_interval_covers_profile:
                 _add_resource_observation_to_buckets(
                     buckets,
-                    tool_name=tool_name,
-                    tool_family=tool_family,
-                    operation=operation,
-                    workload_bucket=workload_bucket,
+                    descriptor=descriptor,
                     summary=summary,
                 )
 
@@ -1030,6 +999,188 @@ def _add_resource_observation(bucket: PriorBucket, summary: dict[str, Any]) -> N
     bucket.resource_sample_count += 1
 
 
+def _merge_bucket(target: PriorBucket, source: PriorBucket) -> None:
+    target.durations.extend(source.durations)
+    target.avg_cores.extend(source.avg_cores)
+    target.p50_cores.extend(source.p50_cores)
+    target.p90_cores.extend(source.p90_cores)
+    target.peak_cores.extend(source.peak_cores)
+    target.peak_memory_mb.extend(source.peak_memory_mb)
+    target.disk_read_mb.extend(source.disk_read_mb)
+    target.disk_write_mb.extend(source.disk_write_mb)
+    target.net_rx_mb.extend(source.net_rx_mb)
+    target.net_tx_mb.extend(source.net_tx_mb)
+    target.context_switches.extend(source.context_switches)
+    target.l1d_hit_rate.extend(source.l1d_hit_rate)
+    target.l1i_hit_rate.extend(source.l1i_hit_rate)
+    target.ipc.extend(source.ipc)
+    target.instructions_per_s.extend(source.instructions_per_s)
+    target.load_classes.update(source.load_classes)
+    target.resource_sample_count += source.resource_sample_count
+
+
+def _aggregation_bucket(
+    buckets: dict[tuple[str, str, str | None], PriorBucket],
+    *,
+    identity: str,
+    operation: str,
+    workload_bucket: str | None,
+) -> PriorBucket:
+    key = (identity, operation, workload_bucket)
+    bucket = buckets.get(key)
+    if bucket is None:
+        bucket = PriorBucket(
+            tool_name=identity,
+            tool_family=identity,
+            operation=operation,
+            workload_bucket=workload_bucket,
+        )
+        buckets[key] = bucket
+    return bucket
+
+
+def _leaf_from_bucket(bucket: PriorBucket, *, min_samples: int) -> dict[str, Any]:
+    duration_count = len(bucket.durations)
+    resource_count = bucket.resource_sample_count
+    leaf = {
+        "duration": _duration_block(bucket.durations) if duration_count else {},
+        "resources": _resource_block(bucket),
+        "counts": {
+            "duration": duration_count,
+            "resources": resource_count,
+        },
+        "confidence": {
+            "duration": _confidence(duration_count),
+            "resources": _confidence(resource_count),
+        },
+    }
+    return _strip_none(leaf)
+
+
+def _insert_operation_leaf(
+    root: dict[str, Any],
+    *,
+    identity: str,
+    operation: str,
+    workload_bucket: str | None,
+    leaf: dict[str, Any],
+) -> None:
+    operation_node = root.setdefault(identity, {}).setdefault(
+        operation,
+        {"default": {}, "buckets": {}},
+    )
+    if workload_bucket is None:
+        operation_node["default"] = leaf
+    else:
+        operation_node["buckets"][workload_bucket] = leaf
+
+
+def _strip_empty_buckets(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned = {key: _strip_empty_buckets(item) for key, item in value.items()}
+        return {
+            key: item
+            for key, item in cleaned.items()
+            if not (key == "buckets" and item == {})
+        }
+    if isinstance(value, list):
+        return [_strip_empty_buckets(item) for item in value]
+    return value
+
+
+def _bucket_sort_key(
+    item: tuple[tuple[str, str, str | None], PriorBucket],
+) -> tuple[str, str, str]:
+    identity, operation, workload_bucket = item[0]
+    return (identity, operation, workload_bucket or "")
+
+
+def _build_layered_output(
+    canonical_buckets: dict[str, PriorBucket],
+    *,
+    min_samples: int,
+) -> dict[str, Any]:
+    by_tool_buckets: dict[tuple[str, str, str | None], PriorBucket] = {}
+    by_family_buckets: dict[tuple[str, str, str | None], PriorBucket] = {}
+    by_operation_buckets: dict[tuple[str, str, str | None], PriorBucket] = {}
+    global_bucket = PriorBucket("global", "global", "global", None)
+    taxonomy: dict[str, dict[str, str]] = {}
+
+    for bucket in canonical_buckets.values():
+        taxonomy.setdefault(bucket.tool_name, {"family": bucket.tool_family})
+        for identity, aggregate in (
+            (bucket.tool_name, by_tool_buckets),
+            (bucket.tool_family, by_family_buckets),
+        ):
+            default_bucket = _aggregation_bucket(
+                aggregate,
+                identity=identity,
+                operation=bucket.operation,
+                workload_bucket=None,
+            )
+            _merge_bucket(default_bucket, bucket)
+            if bucket.workload_bucket is not None:
+                workload_bucket = _aggregation_bucket(
+                    aggregate,
+                    identity=identity,
+                    operation=bucket.operation,
+                    workload_bucket=bucket.workload_bucket,
+                )
+                _merge_bucket(workload_bucket, bucket)
+        operation_bucket = _aggregation_bucket(
+            by_operation_buckets,
+            identity=bucket.operation,
+            operation=bucket.operation,
+            workload_bucket=None,
+        )
+        _merge_bucket(operation_bucket, bucket)
+        _merge_bucket(global_bucket, bucket)
+
+    by_tool: dict[str, Any] = {}
+    by_family: dict[str, Any] = {}
+    by_operation: dict[str, Any] = {}
+    for aggregate, target in (
+        (by_tool_buckets, by_tool),
+        (by_family_buckets, by_family),
+    ):
+        for (identity, operation, workload_bucket), bucket in sorted(
+            aggregate.items(),
+            key=_bucket_sort_key,
+        ):
+            if len(bucket.durations) < min_samples:
+                continue
+            _insert_operation_leaf(
+                target,
+                identity=identity,
+                operation=operation,
+                workload_bucket=workload_bucket,
+                leaf=_leaf_from_bucket(bucket, min_samples=min_samples),
+            )
+    for (operation_name, _operation, workload_bucket), bucket in sorted(
+        by_operation_buckets.items(),
+        key=_bucket_sort_key,
+    ):
+        if len(bucket.durations) < min_samples:
+            continue
+        operation_node = by_operation.setdefault(
+            operation_name,
+            {"default": {}, "buckets": {}},
+        )
+        leaf = _leaf_from_bucket(bucket, min_samples=min_samples)
+        if workload_bucket is None:
+            operation_node["default"] = leaf
+        else:
+            operation_node["buckets"][workload_bucket] = leaf
+
+    return {
+        "taxonomy": dict(sorted(taxonomy.items())),
+        "by_tool": _strip_empty_buckets(by_tool),
+        "by_family": _strip_empty_buckets(by_family),
+        "by_operation": _strip_empty_buckets(by_operation),
+        "global": _leaf_from_bucket(global_bucket, min_samples=min_samples),
+    }
+
+
 def build_common_kb(root: Path, *, min_samples: int = 1) -> dict[str, Any]:
     seen_observations: set[str] = set()
     duration_keys: set[tuple[str, str, str]] = set()
@@ -1061,35 +1212,20 @@ def build_common_kb(root: Path, *, min_samples: int = 1) -> dict[str, Any]:
         tool_call_resource_counts=tool_call_resource_counts,
         tool_call_resource_ids=tool_call_resource_ids,
     )
-    priors: dict[str, Any] = {}
-    for key, bucket in sorted(buckets.items()):
-        sample_count = len(bucket.durations)
-        if sample_count < min_samples:
-            continue
-        prior = {
-            "tool_name": bucket.tool_name,
-            "tool_family": bucket.tool_family,
-            "operation": bucket.operation,
-            "workload_bucket": bucket.workload_bucket,
-            "duration": _duration_block(bucket.durations),
-            "resources": _resource_block(bucket),
-            "sample_count": sample_count,
-            "confidence": _confidence(sample_count, min_samples=min_samples),
-            "quality": {
-                "min_samples": min_samples,
-                "outlier_policy": "none",
-                "source_version": "runtime-common-builder-v1",
-                "privacy_level": "aggregate",
-            },
-        }
-        priors[key] = _strip_none(prior)
+    layered = _build_layered_output(buckets, min_samples=min_samples)
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at": _utc_now(),
         "source": {
             "kind": "historical_runtime_artifacts",
         },
-        "priors": priors,
+        "quality": {
+            "min_samples": min_samples,
+            "outlier_policy": "none",
+            "source_version": "runtime-common-builder-v2",
+            "privacy_level": "aggregate",
+        },
+        **layered,
     }
 
 
@@ -1117,7 +1253,7 @@ def main() -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
         print(
-            f"wrote {len(kb['priors'])} priors to {output}",
+            f"wrote schema v{kb['schema_version']} runtime KB to {output}",
             flush=True,
         )
     return 0

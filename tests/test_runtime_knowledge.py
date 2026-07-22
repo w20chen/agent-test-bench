@@ -8,11 +8,13 @@ from trace_collect.python_script_runtime_prediction import (
     compute_python_script_predictions,
 )
 from trace_collect.runtime_knowledge import (
+    COMMON_KB_ENV,
     lookup_common_prediction,
     load_json_object,
     resource_summary_from_profile,
     update_personal_kb,
     write_json_object,
+    default_common_kb_path,
 )
 
 
@@ -43,6 +45,101 @@ def test_common_prior_is_coldstart_fallback_for_pip() -> None:
     )
     assert predictions["prediction_common_p90_s"] == 90.0
     assert predictions["runtime_knowledge_prediction"]["load_class"] == "network_fetch"
+
+
+def test_common_v2_prior_is_coldstart_fallback_for_pip() -> None:
+    predictions = compute_pip_predictions(
+        history={},
+        common_knowledge={
+            "schema_version": 2,
+            "by_tool": {
+                "pip": {
+                    "install": {
+                        "default": {
+                            "duration": {"p50_s": 40.0, "p90_s": 90.0},
+                            "resources": {
+                                "load_class": "network_fetch",
+                                "expected_cores": 1.2,
+                                "peak_memory_mb": 512.0,
+                            },
+                            "counts": {"duration": 120, "resources": 10},
+                            "confidence": {
+                                "duration": "high",
+                                "resources": "medium",
+                            },
+                        },
+                        "buckets": {
+                            "2-10-packages": {
+                                "duration": {"p50_s": 30.0, "p90_s": 70.0},
+                                "resources": {},
+                                "counts": {"duration": 42, "resources": 0},
+                                "confidence": {
+                                    "duration": "medium",
+                                    "resources": "unavailable",
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+            "by_family": {},
+            "by_operation": {},
+            "global": {},
+        },
+        normalized_command="pip install numpy requests",
+        package_count=2,
+    )
+
+    assert predictions["prediction_recommended_s"] == 30.0
+    assert predictions["prediction_recommended_method"] == (
+        "common:by_tool/pip/install/buckets/2-10-packages"
+    )
+    assert predictions["prediction_common_p90_s"] == 70.0
+    assert predictions["runtime_knowledge_prediction"]["confidence"] == "medium"
+    assert predictions["runtime_knowledge_prediction"]["sample_count"] == 42
+
+
+def test_common_v2_falls_back_to_operation_default() -> None:
+    prediction = lookup_common_prediction(
+        {
+            "schema_version": 2,
+            "by_tool": {},
+            "by_family": {},
+            "by_operation": {
+                "run_tests": {
+                    "default": {
+                        "duration": {"p50_s": 12.0, "p90_s": 20.0},
+                        "counts": {"duration": 11, "resources": 0},
+                        "confidence": {
+                            "duration": "medium",
+                            "resources": "unavailable",
+                        },
+                    }
+                }
+            },
+            "global": {
+                "duration": {"p50_s": 100.0, "p90_s": 200.0},
+                "counts": {"duration": 1000, "resources": 0},
+                "confidence": {"duration": "high", "resources": "unavailable"},
+            },
+        },
+        tool_name="pytest",
+        tool_family="test_runner",
+        operation="run_tests",
+    )
+
+    assert prediction is not None
+    assert prediction.duration_p50_s == 12.0
+    assert prediction.prediction_source == "common:by_operation/run_tests/default"
+
+
+def test_default_common_kb_path_uses_repo_file_when_env_missing(monkeypatch) -> None:
+    monkeypatch.delenv(COMMON_KB_ENV, raising=False)
+
+    path = default_common_kb_path()
+
+    assert path is not None
+    assert path.name == "runtime_common_kb_swe_rebench_p1.json"
 
 
 def test_unified_personal_beats_common_after_tool_history_misses() -> None:
