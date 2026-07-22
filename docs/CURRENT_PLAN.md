@@ -189,3 +189,92 @@ Verification:
   passed.
 - `python -m pytest tests\test_runtime_knowledge.py tests\test_package_runtime_prediction.py tests\test_python_script_runtime_prediction.py tests\test_pytest_runtime_prediction.py --basetemp .pytest-tmp-root`
   passed: 95 tests.
+
+---
+
+Objective: Build a Common runtime KB from SWE-rebench P1 traces on SSH host 5090.
+
+User requirement:
+- Source data lives on host `5090` at
+  `/data/share/datasets/agent_datasets/swe-rebench-p1`.
+- Build Common KB from existing historical data only.
+- Do not run cases, do not run pre-execution probes, and do not mutate Common
+  from online calibration.
+- Keep private repo/path/command details out of Common output.
+
+Plan:
+1. Inspect the remote directory structure and identify available trace/runtime
+   artifacts. - completed
+2. Add a reproducible builder script that reads local or remote-copied trace
+   artifacts and emits Common KB JSON. - completed
+3. Aggregate only de-identified fields:
+   - tool name, tool family, operation, workload bucket
+   - duration P50/P75/P90/P95/mean/std/sample count
+   - whole-run resource summaries from final profiler/scheduler profiles when
+     present
+   - confidence/quality metadata - completed
+4. Add tests with small synthetic artifact fixtures for the builder logic. -
+   completed
+5. Run reviewer gate because this touches evaluation/prediction artifacts. -
+   completed
+6. Run focused verification and report the generated Common KB path. -
+   completed
+
+Remote data notes:
+- SSH source: `weitian@202.120.39.13:17722`.
+- Remote root:
+  `/data/share/datasets/agent_datasets/swe-rebench-p1`.
+- Downloaded existing artifacts only; no case execution and no pre-run probes.
+- The dataset contains `tool_calls.json`, `resources.json`, `trace.jsonl`,
+  and related attempt artifacts. No per-tool `profile.jsonl` files were found,
+  so resource priors are reconstructed by matching each `tool_calls.json`
+  timestamp/end-timestamp interval against the sibling `resources.json` samples.
+- Local generated output:
+  `artifacts/runtime_common_kb_swe_rebench_p1.json`.
+- Current generated KB has 53 prior buckets from 197 `tool_calls.json` files.
+- Reviewer found missing family/generic fallback buckets, possible multi-source
+  duplicate duration counting, missing failed-profile filtering, root name
+  leakage, and coarse pytest workload buckets.
+- Builder was fixed to emit tool/family/generic buckets, deduplicate by
+  attempt/id where possible, use profile duration only for attempts without
+  prediction/tool_call duration artifacts, skip failed tool calls/profiles,
+  omit root names, and parse pytest counts from historical result previews.
+- Follow-up review found remaining issues in source-priority deduplication,
+  structured failure filtering, global generic fallback, and test coverage.
+- Builder was fixed again to suppress tool-call duration when a prediction
+  duration exists for the same attempt/tool/operation, preserve repeated
+  same-tool tool calls when no higher-priority source exists, filter structured
+  failure fields, and emit the final `generic_process` fallback prior.
+- Builder now adds whole-interval resource/load statistics from timestamped
+  `resources.json` samples while leaving the existing duration extraction
+  strategy unchanged. Resource samples use the strict inclusive tool interval
+  `[timestamp, end_timestamp]`.
+- Resource output includes CPU cores, peak RSS, disk I/O, network I/O, context
+  switches, and selected CPU micro-architecture counters. Memory bandwidth
+  fields are intentionally ignored because those measurements are not reliable.
+- Reviewer found that duration suppression could accidentally suppress resource
+  extraction, profile resources could double-count tool-call interval
+  resources, and padded resource windows could contaminate adjacent tool calls.
+  Fixed by separating duration suppression from resource extraction, using
+  profile resources only as a fallback when no tool-call resource interval
+  exists for the same attempt/tool/operation, and removing the window padding.
+- Follow-up review found that shared prediction/tool-call IDs still suppressed
+  tool-call resources, and that repeated same-tool calls needed less coarse
+  profile fallback handling. Fixed by allowing shared-ID tool calls to continue
+  resource extraction while suppressing only duration, and by suppressing
+  profile resources exactly by shared observation ID or coarsely only when a
+  single successful tool call exists for that attempt/tool/operation.
+- Final review found no remaining major or medium issues. Residual low-risk
+  boundary: repeated same-tool calls without shared profile IDs may retain
+  profile fallback resources to avoid dropping an unmatched invocation.
+- Final regenerated Common KB has 92 prior buckets from 197 `tool_calls.json`
+  files; 85 buckets include resource samples from strict matched tool
+  intervals.
+
+Verification:
+- `python -m py_compile scripts\build_runtime_common_kb.py tests\test_build_runtime_common_kb.py`
+  passed.
+- `python -m ruff check scripts\build_runtime_common_kb.py tests\test_build_runtime_common_kb.py`
+  passed.
+- `python -m pytest tests\test_build_runtime_common_kb.py --basetemp .pytest-tmp-root`
+  passed: 12 tests.
