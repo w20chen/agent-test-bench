@@ -1,8 +1,9 @@
 """Minimal pytest runtime prediction artifacts for trace collection.
 
-The prototype is intentionally small: it records per-node pytest durations,
-computes three simple predictions from bounded history, and writes attempt-local
-JSON artifacts.  It does not change benchmark labels or use oracle data.
+The prototype is intentionally small: it records per-node pytest durations from
+the real command, computes predictions from bounded history, and writes
+attempt-local JSON artifacts.  It does not run pre-execution pytest probes,
+change benchmark labels, or use oracle data.
 """
 
 from __future__ import annotations
@@ -16,11 +17,9 @@ from pathlib import Path
 import re
 import shlex
 import statistics
-import subprocess
 import time
 from typing import Any, Iterator
 
-from agents.openclaw.tools.exec_env import prepare_exec_env
 from trace_collect.exec_classifier import classify_exec_tool_name
 
 HIDDEN_RUNTIME_DIR_ARG = "__openclaw_pytest_runtime_dir"
@@ -29,14 +28,12 @@ HIDDEN_RUNTIME_ENABLED_ARG = "__openclaw_pytest_runtime_enabled"
 HISTORY_FILENAME = "history.json"
 PREDICTIONS_FILENAME = "predictions.jsonl"
 RUNTIME_JSON_FILENAME = "pytest_runtime.json"
-COLLECT_ONLY_JSON_FILENAME = "pytest_collect_only.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
 PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
 PREDICTION_SCHEMA_VERSION = 5
 HISTORY_SCHEMA_VERSION = 5
 LOCK_STALE_AFTER_S = 600.0
-DEFAULT_COLLECT_ONLY_TIMEOUT_S = 300.0
 KNOWN_NODE_HIGH_RATIO = 0.80
 KNOWN_OR_FILE_MEDIUM_RATIO = 0.80
 COMMAND_COUNT_STABLE_REL_DELTA = 0.10
@@ -71,7 +68,31 @@ _PYTEST_ORDERED_VALUE_FLAGS = {
     "--html",
     "--cov",
     "--cov-report",
+    "--basetemp",
+    "--cache-dir",
+    "--capture",
+    "--durations",
+    "--durations-min",
+    "--import-mode",
+    "--junit-prefix",
+    "--log-cli-level",
+    "--log-file",
+    "--log-file-level",
+    "--reruns",
+    "--reruns-delay",
 }
+_PYTEST_SELECTOR_FLAGS = {"-k", "-m", "--deselect"}
+
+
+@dataclass(slots=True)
+class ExplicitPytestNodeids:
+    """Nodeids explicitly named in the pytest command text."""
+
+    nodeids: list[str]
+    coverage: str
+    unmatched_positional_args: list[str]
+    selector_flags: list[str]
+    warnings: list[str]
 
 
 @dataclass(slots=True)
@@ -84,17 +105,6 @@ class PytestRuntimeRecord:
     command: str
     working_directory: str | None = None
     history_root: Path | None = None
-
-
-@dataclass(slots=True)
-class PytestCollectOnlyInvocation:
-    """Side-effect-minimized pytest collection command."""
-
-    argv: list[str]
-    working_directory: str | None
-    env_overrides: dict[str, str]
-    warnings: list[str]
-    timeout_s: float | None = None
 
 
 def _utc_now() -> str:
@@ -220,6 +230,54 @@ def _normalize_timeout_value(value: str) -> str:
     return f"{seconds:.3f}".rstrip("0").rstrip(".")
 
 
+def _strip_supported_pytest_command_prefix(
+    tokens: list[str],
+) -> tuple[list[str] | None, list[str]]:
+    """Return pytest args after simple shell prefixes, or None if unsupported."""
+    warnings: list[str] = []
+    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
+        tokens = tokens[3:]
+
+    if "&&" in tokens or ";" in tokens:
+        warnings.append("unsupported compound command before pytest")
+        return None, warnings
+
+    if tokens and _shell_basename(tokens[0]) == "timeout":
+        if len(tokens) < 3:
+            warnings.append("unsupported timeout prefix")
+            return None, warnings
+        tokens = tokens[2:]
+
+    env_prefix: list[str] = []
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        env_prefix.append(tokens.pop(0))
+
+    pytest_idx: int | None = None
+    pytest_args_start: int | None = None
+    for idx, token in enumerate(tokens):
+        base = _shell_basename(token)
+        if base == "pytest":
+            pytest_idx = idx
+            pytest_args_start = idx + 1
+            break
+        if (
+            base.startswith("python")
+            and idx + 2 < len(tokens)
+            and tokens[idx + 1] == "-m"
+            and tokens[idx + 2] == "pytest"
+        ):
+            pytest_idx = idx
+            pytest_args_start = idx + 3
+            break
+    if pytest_idx is None or pytest_args_start is None:
+        warnings.append("pytest executable not found")
+        return None, warnings
+    if any(tok not in env_prefix for tok in tokens[:pytest_idx]):
+        warnings.append("unsupported command prefix before pytest")
+        return None, warnings
+    return tokens[pytest_args_start:], warnings
+
+
 def normalize_pytest_command(command: str) -> str:
     """Return a stable pytest selection key for the Last Run baseline.
 
@@ -329,6 +387,80 @@ def normalize_pytest_command(command: str) -> str:
             parts.extend([flag, value.removeprefix("/testbed/")])
     parts.extend(ordered_parts)
     return " ".join(parts)
+
+
+def extract_explicit_pytest_nodeids(command: str) -> ExplicitPytestNodeids:
+    """Extract pytest nodeids that are explicitly present in command text.
+
+    This is intentionally a pure parser: it does not expand files, inspect the
+    workspace, import tests, or run pytest. A mixed command such as
+    ``pytest tests/test_a.py::test_one tests/test_b.py`` yields one explicit
+    nodeid with ``coverage='partial'``.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as exc:
+        return ExplicitPytestNodeids([], "unknown", [], [], [f"parse_error: {exc}"])
+    if not tokens:
+        return ExplicitPytestNodeids([], "unknown", [], [], ["empty command"])
+
+    pytest_args, warnings = _strip_supported_pytest_command_prefix(tokens)
+    if pytest_args is None:
+        return ExplicitPytestNodeids([], "unknown", [], [], warnings)
+
+    nodeids: list[str] = []
+    unmatched_positional_args: list[str] = []
+    selector_flags: list[str] = []
+    seen: set[str] = set()
+    idx = 0
+    while idx < len(pytest_args):
+        token = pytest_args[idx]
+        if token in _SHELL_STOP_TOKENS or _is_redirection_token(token):
+            break
+        split = _split_option_value(token)
+        option_name = split[0] if split is not None else token
+
+        if option_name in _PYTEST_SELECTOR_FLAGS:
+            selector_flags.append(option_name)
+
+        if token in _PYTEST_OUTPUT_FLAGS:
+            idx += 1
+            continue
+        if option_name in _PYTEST_OUTPUT_VALUE_FLAGS:
+            idx += 1 if split is not None else 2
+            continue
+        if option_name in _PYTEST_SORTABLE_VALUE_FLAGS:
+            idx += 1 if split is not None else 2
+            continue
+        if option_name in _PYTEST_ORDERED_VALUE_FLAGS:
+            idx += 1 if split is not None else 2
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+
+        normalized = token.removeprefix("/testbed/")
+        if "::" in normalized:
+            if normalized not in seen:
+                seen.add(normalized)
+                nodeids.append(normalized)
+        else:
+            unmatched_positional_args.append(normalized)
+        idx += 1
+
+    if not nodeids:
+        coverage = "unknown"
+    elif unmatched_positional_args or selector_flags:
+        coverage = "partial"
+    else:
+        coverage = "explicit_only"
+    return ExplicitPytestNodeids(
+        nodeids=nodeids,
+        coverage=coverage,
+        unmatched_positional_args=unmatched_positional_args,
+        selector_flags=selector_flags,
+        warnings=warnings,
+    )
 
 
 def command_contains_literal_pytest(command: str) -> bool:
@@ -482,272 +614,6 @@ def prepare_pytest_runtime_environment(
     }
 
 
-def build_pytest_collect_only_invocation(
-    command: str,
-    *,
-    working_directory: str | Path | None,
-    artifact_dir: Path,
-) -> PytestCollectOnlyInvocation | None:
-    """Build a side-effect-minimized collection invocation for supported forms."""
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-
-    invocation_cwd = str(working_directory) if working_directory else None
-    if len(tokens) >= 3 and tokens[0] == "cd" and tokens[2] == "&&":
-        cd_path = Path(tokens[1])
-        if not cd_path.is_absolute() and invocation_cwd:
-            cd_path = Path(invocation_cwd) / cd_path
-        invocation_cwd = str(cd_path)
-        tokens = tokens[3:]
-
-    if "&&" in tokens or ";" in tokens:
-        return None
-
-    timeout_override_s: float | None = None
-    if tokens and _shell_basename(tokens[0]) == "timeout":
-        if len(tokens) < 3:
-            return None
-        normalized_timeout = _normalize_timeout_value(tokens[1])
-        try:
-            timeout_override_s = float(normalized_timeout)
-        except ValueError:
-            return None
-        tokens = tokens[2:]
-
-    env_prefix: list[str] = []
-    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
-        env_prefix.append(tokens.pop(0))
-
-    pytest_idx: int | None = None
-    pytest_args_start: int | None = None
-    for idx, token in enumerate(tokens):
-        base = _shell_basename(token)
-        if base == "pytest":
-            pytest_idx = idx
-            pytest_args_start = idx + 1
-            break
-        if (
-            base.startswith("python")
-            and idx + 2 < len(tokens)
-            and tokens[idx + 1] == "-m"
-            and tokens[idx + 2] == "pytest"
-        ):
-            pytest_idx = idx
-            pytest_args_start = idx + 3
-            break
-    if pytest_idx is None or pytest_args_start is None:
-        return None
-    if any(tok not in env_prefix for tok in tokens[:pytest_idx]):
-        return None
-
-    invocation = tokens[:pytest_args_start]
-    parsed_pytest_args = _pytest_collect_only_args(tokens[pytest_args_start:])
-    if parsed_pytest_args is None:
-        return None
-    pytest_args, warnings = parsed_pytest_args
-    cache_dir = artifact_dir / ".pytest_cache"
-    if timeout_override_s is not None:
-        warnings.append("original timeout prefix enforced by subprocess timeout")
-    env_overrides: dict[str, str] = {}
-    for token in env_prefix:
-        key, value = token.split("=", 1)
-        env_overrides[key] = value
-    argv = [
-        *invocation,
-        "--collect-only",
-        *pytest_args,
-        "-o",
-        f"cache_dir={cache_dir}",
-    ]
-    return PytestCollectOnlyInvocation(
-        argv=argv,
-        working_directory=invocation_cwd,
-        env_overrides=env_overrides,
-        warnings=warnings,
-        timeout_s=timeout_override_s,
-    )
-
-
-def build_pytest_collect_only_command(command: str) -> str | None:
-    """Return a display string for the supported collect-only invocation."""
-    invocation = build_pytest_collect_only_invocation(
-        command,
-        working_directory=None,
-        artifact_dir=Path("."),
-    )
-    if invocation is None:
-        return None
-    return " ".join(shlex.quote(arg) for arg in invocation.argv)
-
-
-def _pytest_collect_only_args(pytest_args: list[str]) -> tuple[list[str], list[str]] | None:
-    kept: list[str] = []
-    warnings: list[str] = []
-    side_effect_value_flags = {
-        "--junitxml",
-        "--html",
-        "--cov",
-        "--cov-report",
-        "--cov-config",
-        "--basetemp",
-    }
-    side_effect_bool_flags = {
-        "--cache-clear",
-        "--cov-append",
-        "--self-contained-html",
-    }
-    cache_dependent_selectors = {
-        "--lf",
-        "--last-failed",
-        "--ff",
-        "--failed-first",
-        "--nf",
-        "--new-first",
-    }
-    idx = 0
-    while idx < len(pytest_args):
-        token = pytest_args[idx]
-        if token in _SHELL_STOP_TOKENS or _is_redirection_token(token):
-            break
-        split = _split_option_value(token)
-        option_name = split[0] if split is not None else token
-        if option_name in cache_dependent_selectors:
-            return None
-        if option_name in side_effect_bool_flags:
-            warnings.append(f"removed collect-only side-effect flag: {option_name}")
-            idx += 1
-            continue
-        if option_name in side_effect_value_flags:
-            warnings.append(f"removed collect-only side-effect flag: {option_name}")
-            idx += 1 if split is not None else 2
-            continue
-        kept.append(token)
-        idx += 1
-    return kept, warnings
-
-
-def _collect_only_timeout_s(tool_args: dict[str, Any]) -> float:
-    value = tool_args.get("timeout")
-    if isinstance(value, (int, float)) and value > 0:
-        return float(value)
-    return DEFAULT_COLLECT_ONLY_TIMEOUT_S
-
-
-def _run_pytest_collect_only(
-    *,
-    command: str,
-    invocation_dir: Path,
-    working_directory: str | None,
-    timeout_s: float,
-    path_append: str = "",
-) -> dict[str, Any]:
-    collect_dir = invocation_dir / "collect_only"
-    runtime_json = collect_dir / COLLECT_ONLY_JSON_FILENAME
-    collect_dir.mkdir(parents=True, exist_ok=True)
-    plugin_env = prepare_pytest_runtime_environment(invocation_dir=collect_dir)
-    plugin_env["OPENCLAW_PYTEST_RUNTIME_JSON"] = str(runtime_json)
-    env = prepare_exec_env(
-        path_append,
-        isolate_runtime_env=bool(os.environ.get("OPENCLAW_TASK_USERBASE")),
-    )
-    env = merge_pytest_runtime_environment(env, plugin_env)
-
-    collect_invocation = build_pytest_collect_only_invocation(
-        command,
-        working_directory=working_directory,
-        artifact_dir=collect_dir,
-    )
-    if collect_invocation is not None:
-        env.update(collect_invocation.env_overrides)
-    effective_timeout_s = (
-        min(timeout_s, collect_invocation.timeout_s)
-        if collect_invocation is not None
-        and collect_invocation.timeout_s is not None
-        else timeout_s
-    )
-    started_wall = time.time()
-    started_mono = time.monotonic()
-    payload: dict[str, Any] = {
-        "schema_version": 1,
-        "command": (
-            " ".join(shlex.quote(arg) for arg in collect_invocation.argv)
-            if collect_invocation is not None
-            else None
-        ),
-        "argv": collect_invocation.argv if collect_invocation is not None else [],
-        "ts_start": started_wall,
-        "timeout_s": effective_timeout_s,
-        "working_directory": (
-            collect_invocation.working_directory
-            if collect_invocation is not None
-            else working_directory
-        ),
-        "status": "unsupported_command" if collect_invocation is None else "started",
-        "nodeids": [],
-        "collected_count": 0,
-    }
-    if collect_invocation is None:
-        payload["ts_end"] = time.time()
-        payload["duration_s"] = time.monotonic() - started_mono
-        payload["warnings"] = ["unsupported collect-only command shape"]
-        return payload
-
-    try:
-        completed = subprocess.run(
-            collect_invocation.argv,
-            cwd=collect_invocation.working_directory or None,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=effective_timeout_s,
-            check=False,
-        )
-        payload["exit_code"] = completed.returncode
-        payload["stdout_length_chars"] = len(completed.stdout or "")
-        payload["stderr_length_chars"] = len(completed.stderr or "")
-        payload["stdout_preview"] = (completed.stdout or "")[:500]
-        payload["stderr_preview"] = (completed.stderr or "")[:500]
-        runtime_payload, runtime_warning = _load_json(runtime_json)
-        tests = _load_runtime_tests(runtime_payload)
-        nodeids = [str(test["nodeid"]) for test in tests]
-        payload["nodeids"] = nodeids
-        payload["collected_count"] = len(nodeids)
-        collection_observed = (
-            isinstance(runtime_payload.get("collected_count"), int)
-            or isinstance(runtime_payload.get("tests"), list)
-        )
-        if completed.returncode == 0:
-            payload["status"] = "collected" if nodeids else "collected_empty"
-        elif collection_observed:
-            payload["status"] = "collected_with_pytest_exit"
-        else:
-            payload["status"] = "failed"
-        payload["warnings"] = [
-            warning
-            for warning in [*collect_invocation.warnings, runtime_warning]
-            if warning
-        ]
-    except subprocess.TimeoutExpired as exc:
-        payload["status"] = "timeout"
-        payload["stdout_length_chars"] = len(exc.stdout or "")
-        payload["stderr_length_chars"] = len(exc.stderr or "")
-        payload["warnings"] = [
-            f"collect-only timed out after {effective_timeout_s:.1f}s"
-        ]
-    except Exception as exc:
-        payload["status"] = "error"
-        payload["warnings"] = [f"collect-only failed: {exc!r}"]
-    finally:
-        payload["ts_end"] = time.time()
-        payload["duration_s"] = time.monotonic() - started_mono
-    return payload
-
-
 def merge_pytest_runtime_environment(
     env: dict[str, str],
     overrides: dict[str, str],
@@ -784,7 +650,8 @@ def prepare_pytest_runtime_prediction_before_tool(
     working_directory: str | Path | None = None,
     path_append: str = "",
 ) -> PytestRuntimeRecord | None:
-    """Prepare artifact directory and annotate pytest tool args for ExecTool."""
+    """Prepare historical prediction artifacts without running pytest."""
+    _ = path_append  # Kept for caller compatibility; pre-run probing is forbidden.
     if not is_pytest_tool_call(tool_name, tool_args):
         return None
     command = str(tool_args.get("command") or "")
@@ -812,35 +679,28 @@ def prepare_pytest_runtime_prediction_before_tool(
         family_history_path = prediction_root / "family_history.json"
         if family_history_path.exists():
             family_history, _family_warning = _load_json(family_history_path)
-    if effective_working_directory:
-        collect_only = _run_pytest_collect_only(
-            command=command,
-            invocation_dir=invocation_dir,
-            working_directory=effective_working_directory,
-            timeout_s=_collect_only_timeout_s(tool_args),
-            path_append=path_append,
-        )
-    else:
-        collect_only = {
-            "schema_version": 1,
-            "command": None,
-            "working_directory": "",
-            "status": "skipped_missing_working_directory",
-            "nodeids": [],
-            "collected_count": 0,
-            "duration_s": 0.0,
-            "warnings": ["collect-only skipped because working directory is unknown"],
-        }
-    collect_nodeids = [
-        str(nodeid)
-        for nodeid in collect_only.get("nodeids", [])
-        if isinstance(nodeid, str)
-    ]
+    explicit_nodeids = extract_explicit_pytest_nodeids(command)
     predictions = compute_pytest_predictions(
         history=history,
         family_history=family_history,
         command=command,
-        nodeids=collect_nodeids,
+        nodeids=explicit_nodeids.nodeids,
+        nodeid_coverage=explicit_nodeids.coverage,
+    )
+    per_test_details = predictions.get("per_test_prediction_details")
+    exact_explicit_nodeids = (
+        bool(explicit_nodeids.nodeids)
+        and isinstance(per_test_details, list)
+        and all(
+            isinstance(detail, dict) and detail.get("source") == "nodeid"
+            for detail in per_test_details
+        )
+    )
+    pre_execution_test_set_known = (
+        explicit_nodeids.coverage == "explicit_only" and exact_explicit_nodeids
+    )
+    pre_execution_collected_count = (
+        len(explicit_nodeids.nodeids) if pre_execution_test_set_known else None
     )
 
     record = {
@@ -853,10 +713,29 @@ def prepare_pytest_runtime_prediction_before_tool(
         "history_path": str(history_path),
         "history_scope": "shared" if history_root is not None else "attempt",
         "history_snapshot": history,
-        "collect_only": collect_only,
-        "pre_execution_nodeids": collect_nodeids,
-        "pre_execution_collected_count": len(collect_nodeids),
-        "prediction_overhead_s": collect_only.get("duration_s"),
+        "collect_only": {
+            "schema_version": 1,
+            "status": "disabled",
+            "reason": "pre-execution pytest probing is disabled",
+            "command": None,
+            "argv": [],
+            "nodeids": [],
+            "collected_count": None,
+            "duration_s": None,
+        },
+        "pre_execution_nodeid_source": "command_explicit"
+        if explicit_nodeids.nodeids
+        else "none",
+        "pre_execution_nodeid_coverage": explicit_nodeids.coverage,
+        "pre_execution_test_set_known": pre_execution_test_set_known,
+        "pre_execution_nodeids": explicit_nodeids.nodeids,
+        "pre_execution_explicit_nodeid_count": len(explicit_nodeids.nodeids),
+        "pre_execution_unmatched_positional_args": (
+            explicit_nodeids.unmatched_positional_args
+        ),
+        "pre_execution_selector_flags": explicit_nodeids.selector_flags,
+        "pre_execution_collected_count": pre_execution_collected_count,
+        "prediction_overhead_s": None,
         "history_before": {
             "test_count": len(_history_tests(history)),
             "command_count": len(_history_commands(history)),
@@ -871,14 +750,7 @@ def prepare_pytest_runtime_prediction_before_tool(
         "predictions": predictions,
         "warnings": [
             warning
-            for warning in [
-                history_warning,
-                *(
-                    str(warning)
-                    for warning in collect_only.get("warnings", [])
-                    if isinstance(warning, str)
-                ),
-            ]
+            for warning in [history_warning, *explicit_nodeids.warnings]
             if warning
         ],
         "status": "pending_execution",
@@ -1047,6 +919,7 @@ def compute_prediction_reliability(
     command_rec: dict[str, Any] | None,
     predictions: dict[str, Any],
     family_last_run: float | None = None,
+    nodeid_coverage: str = "complete",
 ) -> dict[str, Any]:
     """Choose an interpretable recommended prediction from pre-run history."""
     total = len(nodeids)
@@ -1084,6 +957,8 @@ def compute_prediction_reliability(
     last_run = predictions.get("prediction_last_run_s")
     per_test = predictions.get("prediction_per_test_s")
     unknown_fallback = predictions.get("prediction_unknown_test_fallback_s")
+    explicit_partial = bool(nodeids) and nodeid_coverage == "partial"
+    explicit_only = bool(nodeids) and nodeid_coverage == "explicit_only"
 
     if total <= 0:
         if repeated_command and isinstance(last_run, (int, float)):
@@ -1092,8 +967,16 @@ def compute_prediction_reliability(
             level = "medium"
             reasons.append("same_normalized_command_seen_before")
             reasons.append("pre_execution_test_set_unknown")
+        elif isinstance(family_last_run, (int, float)):
+            method = "family_last_run"
+            value = float(family_last_run)
+            level = "medium"
+            reasons.append("family_last_run_fallback")
+            reasons.append("pre_execution_test_set_unknown")
         else:
-            reasons.append("no_collected_tests")
+            level = "coldstart"
+            reasons.append("pre_execution_test_set_unknown")
+            reasons.append("no_available_prediction")
     elif (
         repeated_command
         and isinstance(last_run, (int, float))
@@ -1116,7 +999,11 @@ def compute_prediction_reliability(
         value = float(family_last_run)
         level = "medium"
         reasons.append("family_last_run_fallback")
-    elif isinstance(per_test, (int, float)) and known_node_ratio >= KNOWN_NODE_HIGH_RATIO:
+    elif (
+        isinstance(per_test, (int, float))
+        and known_node_ratio >= KNOWN_NODE_HIGH_RATIO
+        and not explicit_partial
+    ):
         method = "per_test"
         value = float(per_test)
         level = "high"
@@ -1124,16 +1011,26 @@ def compute_prediction_reliability(
     elif (
         isinstance(per_test, (int, float))
         and known_or_file_ratio >= KNOWN_OR_FILE_MEDIUM_RATIO
+        and not explicit_only
+        and not explicit_partial
     ):
         method = "per_test"
         value = float(per_test)
         level = "medium"
         reasons.append("known_or_file_ratio_high")
     elif isinstance(unknown_fallback, (int, float)):
-        method = "unknown_test_fallback"
-        value = float(unknown_fallback)
-        level = "low"
-        reasons.append("cold_start_or_project_fallback")
+        if explicit_partial or explicit_only:
+            level = "coldstart"
+            if explicit_partial:
+                reasons.append("partial_prediction_lower_bound")
+            else:
+                reasons.append("explicit_nodeids_not_exact")
+            reasons.append("no_full_command_prediction")
+        else:
+            method = "unknown_test_fallback"
+            value = float(unknown_fallback)
+            level = "low"
+            reasons.append("cold_start_or_project_fallback")
     else:
         if total > 0:
             level = "coldstart"
@@ -1147,6 +1044,10 @@ def compute_prediction_reliability(
         reasons.append("unknown_test_fallback_used")
     if unavailable_ratio > 0:
         reasons.append("some_tests_unavailable")
+    if explicit_partial and "explicit_nodeids_partial" not in reasons:
+        reasons.append("explicit_nodeids_partial")
+    if explicit_only and known_node_ratio < KNOWN_NODE_HIGH_RATIO:
+        reasons.append("explicit_nodeids_not_exact")
 
     return {
         "level": level,
@@ -1159,6 +1060,7 @@ def compute_prediction_reliability(
         "repeated_command": repeated_command,
         "previous_collected_count": previous_count,
         "collected_count_delta_ratio": count_delta,
+        "nodeid_coverage": nodeid_coverage,
         "recommended_method": method,
         "recommended_prediction_s": value,
     }
@@ -1170,8 +1072,10 @@ def compute_pytest_predictions(
     family_history: dict[str, Any] | None = None,
     command: str,
     nodeids: list[str],
+    nodeid_coverage: str | None = None,
 ) -> dict[str, Any]:
     """Compute Last Run, Test Count, and overhead-adjusted Per-Test Sum."""
+    effective_nodeid_coverage = nodeid_coverage or ("complete" if nodeids else "unknown")
     project_median = global_history_median(history)
     overhead_median = global_overhead_median(history)
     unknown_median = global_unknown_test_median(history)
@@ -1284,10 +1188,16 @@ def compute_pytest_predictions(
         "project_unknown_test_median_s": unknown_median,
         "prediction_last_run_s": last_run,
         "prediction_family_last_run_s": family_last_run,
+        "prediction_nodeid_coverage": effective_nodeid_coverage,
         "prediction_test_count_s": test_count,
         "prediction_per_test_without_overhead_s": per_test_without_overhead,
         "prediction_per_test_overhead_s": overhead_used,
         "prediction_per_test_s": per_test_with_overhead,
+        "prediction_explicit_nodeid_lower_bound_s": (
+            per_test_with_overhead
+            if effective_nodeid_coverage in {"partial", "explicit_only"}
+            else None
+        ),
         "per_test_prediction_details": per_test_values,
         "prediction_unknown_test_fallback_without_overhead_s": unknown_without_overhead,
         "prediction_unknown_test_fallback_overhead_s": unknown_overhead_used,
@@ -1299,6 +1209,7 @@ def compute_pytest_predictions(
         command_rec=command_rec if isinstance(command_rec, dict) else None,
         predictions=result,
         family_last_run=family_last_run,
+        nodeid_coverage=effective_nodeid_coverage,
     )
     result["prediction_reliability"] = reliability
     result["prediction_recommended_s"] = reliability["recommended_prediction_s"]
@@ -1314,10 +1225,12 @@ def _empty_pytest_predictions(command: str) -> dict[str, Any]:
         "project_unknown_test_median_s": None,
         "prediction_last_run_s": None,
         "prediction_family_last_run_s": None,
+        "prediction_nodeid_coverage": "unknown",
         "prediction_test_count_s": None,
         "prediction_per_test_without_overhead_s": None,
         "prediction_per_test_overhead_s": None,
         "prediction_per_test_s": None,
+        "prediction_explicit_nodeid_lower_bound_s": None,
         "per_test_prediction_details": [],
         "prediction_unknown_test_fallback_without_overhead_s": None,
         "prediction_unknown_test_fallback_overhead_s": None,
@@ -1334,6 +1247,7 @@ def _empty_pytest_predictions(command: str) -> dict[str, Any]:
             "repeated_command": False,
             "previous_collected_count": None,
             "collected_count_delta_ratio": None,
+            "nodeid_coverage": "unknown",
             "recommended_method": "none",
             "recommended_prediction_s": None,
         },
@@ -1612,6 +1526,27 @@ def finalize_pytest_runtime_prediction(
         for nodeid in pending.get("pre_execution_nodeids", [])
         if isinstance(nodeid, str)
     ]
+    pre_execution_collected_count = pending.get("pre_execution_collected_count")
+    if not isinstance(pre_execution_collected_count, int):
+        pre_execution_collected_count = None
+    pre_execution_test_set_known = (
+        pending.get("pre_execution_test_set_known")
+        if isinstance(pending.get("pre_execution_test_set_known"), bool)
+        else bool(pre_execution_nodeids)
+    )
+    pre_execution_nodeid_source = pending.get("pre_execution_nodeid_source")
+    if not isinstance(pre_execution_nodeid_source, str):
+        pre_execution_nodeid_source = "unknown"
+    pre_execution_nodeid_coverage = pending.get("pre_execution_nodeid_coverage")
+    if not isinstance(pre_execution_nodeid_coverage, str):
+        pre_execution_nodeid_coverage = (
+            "complete" if pre_execution_test_set_known else "unknown"
+        )
+    pre_execution_explicit_nodeid_count = pending.get(
+        "pre_execution_explicit_nodeid_count"
+    )
+    if not isinstance(pre_execution_explicit_nodeid_count, int):
+        pre_execution_explicit_nodeid_count = len(pre_execution_nodeids)
     pre_execution_history = (
         pending.get("history_snapshot")
         if isinstance(pending.get("history_snapshot"), dict)
@@ -1698,7 +1633,19 @@ def finalize_pytest_runtime_prediction(
         ),
         "collected_tests": nodeids,
         "tests": tests,
-        "pre_execution_collected_count": len(pre_execution_nodeids),
+        "pre_execution_test_set_known": pre_execution_test_set_known,
+        "pre_execution_nodeid_source": pre_execution_nodeid_source,
+        "pre_execution_nodeid_coverage": pre_execution_nodeid_coverage,
+        "pre_execution_collected_count": pre_execution_collected_count,
+        "pre_execution_explicit_nodeid_count": pre_execution_explicit_nodeid_count,
+        "pre_execution_unmatched_positional_args": pending.get(
+            "pre_execution_unmatched_positional_args"
+        )
+        if isinstance(pending.get("pre_execution_unmatched_positional_args"), list)
+        else [],
+        "pre_execution_selector_flags": pending.get("pre_execution_selector_flags")
+        if isinstance(pending.get("pre_execution_selector_flags"), list)
+        else [],
         "pre_execution_nodeids": pre_execution_nodeids,
         "collect_only": collect_only,
         "collect_only_duration_s": collect_only_duration_s,
@@ -1716,6 +1663,9 @@ def finalize_pytest_runtime_prediction(
             "prediction_per_test_without_overhead_s"
         ],
         "prediction_per_test_overhead_s": predictions["prediction_per_test_overhead_s"],
+        "prediction_explicit_nodeid_lower_bound_s": predictions[
+            "prediction_explicit_nodeid_lower_bound_s"
+        ],
         "per_test_prediction_details": predictions["per_test_prediction_details"],
         "history_update_per_test_prediction_details": history_update_predictions[
             "per_test_prediction_details"
@@ -1814,7 +1764,6 @@ def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
         f"[pytest-predict] #{payload.get('iteration')}",
         f"tests={count}",
         f"| {_s(actual)} actual",
-        f"(collect {_s(overhead)})",
         _strat("last", "prediction_last_run_s", "last_run"),
         _strat("fam", "prediction_family_last_run_s", "family_last_run"),
         _strat("count", "prediction_test_count_s", "test_count"),
@@ -1822,4 +1771,6 @@ def format_pytest_prediction_summary(payload: dict[str, Any]) -> str:
         _strat("unk", "prediction_unknown_test_fallback_s", "unknown_test_fallback"),
         f"| {reliability}",
     ]
+    if overhead is not None:
+        parts.insert(3, f"(probe {_s(overhead)})")
     return " ".join(parts)

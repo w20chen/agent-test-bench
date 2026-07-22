@@ -87,7 +87,7 @@ def test_analyze_pytest_prediction_reports_recommended_and_reliability(
     )
 
     assert "Recommended" in result.stdout
-    assert "Average collect-only overhead: 1.0s" in result.stdout
+    assert "Average legacy collect-only overhead: 1.0s" in result.stdout
     assert "Reliability buckets:" in result.stdout
     assert "high" in result.stdout
     assert re.search(r"coldstart\s+runs=\s+1\b", result.stdout)

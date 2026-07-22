@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-22T08:24:57.768116Z",
+  "iteration": 1,
+  "tool_call_id": "call_1",
+  "command": "python -m pytest tests -q",
+  "working_directory": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_small_project_generates_p0\\project",
+  "history_path": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_small_project_generates_p0\\pytest_runtime\\history.json",
+  "history_scope": "attempt",
+  "history_snapshot": {
+    "schema_version": 5,
+    "updated_at": "2026-07-22T08:24:57.758493Z",
+    "history_limit": 5,
+    "tests": {
+      ".pytest-tmp-root/test_small_project_generates_p0/project/tests/test_sample.py::test_short": {
+        "durations": [
+          0.0003866
+        ],
+        "last_outcome": "passed",
+        "last_seen_at": "2026-07-22T08:24:57.758493Z"
+      },
+      ".pytest-tmp-root/test_small_project_generates_p0/project/tests/test_sample.py::test_medium": {
+        "durations": [
+          0.0056735
+        ],
+        "last_outcome": "passed",
+        "last_seen_at": "2026-07-22T08:24:57.758493Z"
+      },
+      ".pytest-tmp-root/test_small_project_generates_p0/project/tests/test_sample.py::test_longer": {
+        "durations": [
+          0.0103942
+        ],
+        "last_outcome": "passed",
+        "last_seen_at": "2026-07-22T08:24:57.758493Z"
+      }
+    },
+    "commands": {
+      "pytest tests": {
+        "durations": [
+          0.1
+        ],
+        "collected_counts": [
+          3.0
+        ],
+        "last_seen_at": "2026-07-22T08:24:57.758493Z",
+        "last_observed_test_count": 3
+      }
+    },
+    "overheads": {
+      "durations": [
+        0.0835457
+      ],
+      "last_seen_at": "2026-07-22T08:24:57.758493Z",
+      "last_observed_test_duration_s": 0.016454299999999998,
+      "last_observed_test_count": 3
+    },
+    "unknown_tests": {
+      "durations": [
+        0.0003866,
+        0.0056735,
+        0.0103942
+      ],
+      "last_seen_at": "2026-07-22T08:24:57.758493Z",
+      "last_observed_count": 3
+    }
+  },
+  "collect_only": {
+    "schema_version": 1,
+    "status": "disabled",
+    "reason": "pre-execution pytest probing is disabled",
+    "command": null,
+    "argv": [],
+    "nodeids": [],
+    "collected_count": null,
+    "duration_s": null
+  },
+  "pre_execution_nodeid_source": "none",
+  "pre_execution_nodeid_coverage": "unknown",
+  "pre_execution_test_set_known": false,
+  "pre_execution_nodeids": [],
+  "pre_execution_explicit_nodeid_count": 0,
+  "pre_execution_unmatched_positional_args": [
+    "tests"
+  ],
+  "pre_execution_selector_flags": [],
+  "pre_execution_collected_count": null,
+  "prediction_overhead_s": null,
+  "history_before": {
+    "test_count": 3,
+    "command_count": 1,
+    "project_test_median_s": 0.0056735,
+    "project_overhead_median_s": 0.0835457,
+    "project_unknown_test_median_s": 0.0056735,
+    "recommended_method": "last_run",
+    "reliability_level": "medium"
+  },
+  "predictions": {
+    "command_key": "pytest tests",
+    "project_test_median_s": 0.0056735,
+    "project_overhead_median_s": 0.0835457,
+    "project_unknown_test_median_s": 0.0056735,
+    "prediction_last_run_s": 0.1,
+    "prediction_family_last_run_s": null,
+    "prediction_nodeid_coverage": "unknown",
+    "prediction_test_count_s": null,
+    "prediction_per_test_without_overhead_s": null,
+    "prediction_per_test_overhead_s": null,
+    "prediction_per_test_s": null,
+    "prediction_explicit_nodeid_lower_bound_s": null,
+    "per_test_prediction_details": [],
+    "prediction_unknown_test_fallback_without_overhead_s": null,
+    "prediction_unknown_test_fallback_overhead_s": null,
+    "prediction_unknown_test_fallback_s": null,
+    "unknown_test_fallback_prediction_details": [],
+    "prediction_reliability": {
+      "level": "medium",
+      "reasons": [
+        "same_normalized_command_seen_before",
+        "pre_execution_test_set_unknown",
+        "same_command_collected_count_changed"
+      ],
+      "known_node_ratio": 0.0,
+      "file_fallback_ratio": 0.0,
+      "project_fallback_ratio": 0.0,
+      "unknown_fallback_ratio": 0.0,
+      "unavailable_ratio": 0.0,
+      "repeated_command": true,
+      "previous_collected_count": 3,
+      "collected_count_delta_ratio": 1.0,
+      "nodeid_coverage": "unknown",
+      "recommended_method": "last_run",
+      "recommended_prediction_s": 0.1
+    },
+    "prediction_recommended_s": 0.1,
+    "prediction_recommended_method": "last_run"
+  },
+  "warnings": [],
+  "status": "prepared",
+  "prepared_at": "2026-07-22T08:24:57.775115Z",
+  "plugin_module": "openclaw_pytest_runtime_plugin",
+  "plugin_path": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_small_project_generates_p0\\pytest_runtime\\iter_0001_exec-pytest_call_1\\_plugin\\openclaw_pytest_runtime_plugin.py",
+  "runtime_json": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_small_project_generates_p0\\pytest_runtime\\iter_0001_exec-pytest_call_1\\pytest_runtime.json"
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "prepared_at": "2026-07-22T08:24:56.813696Z",
+  "plugin_module": "openclaw_pytest_runtime_plugin",
+  "plugin_path": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_runtime_environment_merge0\\_plugin\\openclaw_pytest_runtime_plugin.py",
+  "runtime_json": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_runtime_environment_merge0\\pytest_runtime.json",
+  "status": "prepared"
+}

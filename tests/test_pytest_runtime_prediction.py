@@ -6,12 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from trace_collect import pytest_runtime_prediction as pred_mod
 from agents.openclaw._session_runner import TraceCollectorHook
 from agents.openclaw.tools.shell import ExecTool
 from trace_collect.pytest_runtime_prediction import (
     HIDDEN_RUNTIME_DIR_ARG,
-    build_pytest_collect_only_invocation,
     compute_pytest_predictions,
     finalize_pytest_runtime_prediction,
     format_pytest_prediction_summary,
@@ -22,6 +20,7 @@ from trace_collect.pytest_runtime_prediction import (
     is_pytest_tool_call,
     merge_pytest_runtime_environment,
     normalize_pytest_command,
+    extract_explicit_pytest_nodeids,
     predict_test_duration,
     prepare_pytest_runtime_environment,
     prepare_pytest_runtime_prediction_before_tool,
@@ -147,6 +146,54 @@ def test_normalized_command_keeps_known_value_flags_out_of_targets() -> None:
         "cd /testbed && pytest tests/test_a.py "
         "--junitxml out.xml --cov src --cov-report term"
     )
+
+
+def test_extract_explicit_pytest_nodeids_complete_selection() -> None:
+    extracted = extract_explicit_pytest_nodeids(
+        "cd /testbed && python -m pytest "
+        "/testbed/tests/test_a.py::test_one tests/test_b.py::TestB::test_two "
+        "-q 2>&1 | head -100"
+    )
+
+    assert extracted.nodeids == [
+        "tests/test_a.py::test_one",
+        "tests/test_b.py::TestB::test_two",
+    ]
+    assert extracted.coverage == "explicit_only"
+    assert extracted.unmatched_positional_args == []
+    assert extracted.selector_flags == []
+
+
+def test_extract_explicit_pytest_nodeids_marks_mixed_selection_partial() -> None:
+    extracted = extract_explicit_pytest_nodeids(
+        "python -m pytest tests/test_a.py::test_one tests/test_b.py -k 'not slow'"
+    )
+
+    assert extracted.nodeids == ["tests/test_a.py::test_one"]
+    assert extracted.coverage == "partial"
+    assert extracted.unmatched_positional_args == ["tests/test_b.py"]
+    assert extracted.selector_flags == ["-k"]
+
+
+def test_extract_explicit_pytest_nodeids_skips_option_values() -> None:
+    extracted = extract_explicit_pytest_nodeids(
+        "pytest --ignore tests/test_a.py::test_not_a_target "
+        "--deselect tests/test_b.py::test_deselected tests/test_c.py::test_target"
+    )
+
+    assert extracted.nodeids == ["tests/test_c.py::test_target"]
+    assert extracted.coverage == "partial"
+    assert extracted.selector_flags == ["--deselect"]
+
+
+def test_extract_explicit_pytest_nodeids_skips_basetemp_value() -> None:
+    extracted = extract_explicit_pytest_nodeids(
+        "pytest --basetemp tmp::not_a_node tests/test_c.py::test_target"
+    )
+
+    assert extracted.nodeids == ["tests/test_c.py::test_target"]
+    assert extracted.coverage == "explicit_only"
+    assert extracted.unmatched_positional_args == []
 
 
 def test_history_median_and_fallbacks() -> None:
@@ -277,6 +324,28 @@ def test_recommended_last_run_without_collected_count_is_medium() -> None:
     assert "previous_collected_count_unavailable" in reliability["reasons"]
 
 
+def test_recommended_family_last_run_without_pre_execution_nodeids() -> None:
+    family_history = {
+        "commands": {
+            "pytest tests/test_a.py": {"durations": [3.5]},
+        },
+    }
+
+    predictions = compute_pytest_predictions(
+        history={},
+        family_history=family_history,
+        command="python -m pytest tests/test_a.py",
+        nodeids=[],
+    )
+
+    reliability = predictions["prediction_reliability"]
+    assert predictions["prediction_family_last_run_s"] == pytest.approx(3.5)
+    assert predictions["prediction_recommended_method"] == "family_last_run"
+    assert predictions["prediction_recommended_s"] == pytest.approx(3.5)
+    assert reliability["level"] == "medium"
+    assert "pre_execution_test_set_unknown" in reliability["reasons"]
+
+
 def test_recommended_uses_medium_file_history_path() -> None:
     history = {
         "tests": {
@@ -320,7 +389,7 @@ def test_recommended_marks_cold_start_unknown_fallback_low_reliability() -> None
     assert reliability["unknown_fallback_ratio"] == 1.0
 
 
-def test_recommended_marks_empty_collection_as_error() -> None:
+def test_recommended_marks_unknown_pre_execution_test_set_as_coldstart() -> None:
     predictions = compute_pytest_predictions(
         history={},
         command="python -m pytest tests/test_a.py",
@@ -330,8 +399,8 @@ def test_recommended_marks_empty_collection_as_error() -> None:
     reliability = predictions["prediction_reliability"]
     assert predictions["prediction_recommended_method"] == "none"
     assert predictions["prediction_recommended_s"] is None
-    assert reliability["level"] == "error"
-    assert "no_collected_tests" in reliability["reasons"]
+    assert reliability["level"] == "coldstart"
+    assert "pre_execution_test_set_unknown" in reliability["reasons"]
 
 
 def test_recommended_marks_pre_execution_history_miss_as_coldstart() -> None:
@@ -832,7 +901,6 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
             "iteration": 3,
             "collected_count": 2,
             "actual_duration_s": 10.0,
-            "collect_only_duration_s": 1.25,
             "prediction_last_run_s": 8.0,
             "prediction_test_count_s": 5.0,
             "prediction_per_test_s": 9.0,
@@ -851,7 +919,7 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     )
 
     assert line.startswith("[pytest-predict] ")
-    assert "(collect 1.2s)" in line
+    assert "(probe " not in line
     assert "last=8.0s(+20.0%)" in line
     assert "count=5.0s(+50.0%)" in line
     assert "→per=9.0s(+10.0%)" in line
@@ -901,66 +969,10 @@ def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> 
     assert env["OPENCLAW_PYTEST_RUNTIME_JSON"].endswith("pytest_runtime.json")
 
 
-def test_collect_only_invocation_strips_side_effect_output_flags(tmp_path: Path) -> None:
-    invocation = build_pytest_collect_only_invocation(
-        "cd project && python -m pytest tests --junitxml out.xml "
-        "--cov src --cov-report html --cache-clear -q",
-        working_directory=tmp_path,
-        artifact_dir=tmp_path / "artifacts",
-    )
-
-    assert invocation is not None
-    joined = " ".join(invocation.argv)
-    assert "--collect-only" in invocation.argv
-    assert "--junitxml" not in invocation.argv
-    assert "--cov" not in invocation.argv
-    assert "--cov-report" not in invocation.argv
-    assert "--cache-clear" not in invocation.argv
-    assert "cache_dir=" in joined
-    assert Path(invocation.working_directory or "").name == "project"
-    assert invocation.warnings
-
-
-def test_collect_only_invocation_rejects_cache_dependent_selectors(
+def test_prepare_does_not_probe_pytest_before_tool_execution(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    invocation = build_pytest_collect_only_invocation(
-        "python -m pytest --lf tests",
-        working_directory=tmp_path,
-        artifact_dir=tmp_path / "artifacts",
-    )
-
-    assert invocation is None
-
-
-def test_collect_only_invocation_uses_shell_timeout_prefix(tmp_path: Path) -> None:
-    invocation = build_pytest_collect_only_invocation(
-        "timeout 5 python -m pytest tests",
-        working_directory=tmp_path,
-        artifact_dir=tmp_path / "artifacts",
-    )
-
-    assert invocation is not None
-    assert invocation.timeout_s == pytest.approx(5.0)
-    assert "timeout" not in invocation.argv
-
-
-def test_collect_only_invocation_moves_env_prefix_to_env_overrides(
-    tmp_path: Path,
-) -> None:
-    invocation = build_pytest_collect_only_invocation(
-        "FOO=bar python -m pytest tests",
-        working_directory=tmp_path,
-        artifact_dir=tmp_path / "artifacts",
-    )
-
-    assert invocation is not None
-    assert invocation.env_overrides == {"FOO": "bar"}
-    assert invocation.argv[:3] == ["python", "-m", "pytest"]
-    assert "FOO=bar" not in invocation.argv
-
-
-def test_prepare_collect_only_records_nodeids_and_overhead(tmp_path: Path) -> None:
     project = tmp_path / "project"
     tests_dir = project / "tests"
     tests_dir.mkdir(parents=True)
@@ -978,6 +990,11 @@ def test_prepare_collect_only_records_nodeids_and_overhead(tmp_path: Path) -> No
     )
     root = tmp_path / "pytest_runtime"
 
+    def fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pre-execution pytest probing must not run subprocesses")
+
+    monkeypatch.setattr("subprocess.run", fail_if_called)
+
     record = prepare_pytest_runtime_prediction_before_tool(
         prediction_root=root,
         iteration=1,
@@ -989,99 +1006,178 @@ def test_prepare_collect_only_records_nodeids_and_overhead(tmp_path: Path) -> No
 
     assert record is not None
     pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
-    assert pending["collect_only"]["status"] == "collected"
-    assert pending["collect_only"]["duration_s"] >= 0
-    assert pending["prediction_overhead_s"] == pytest.approx(
-        pending["collect_only"]["duration_s"]
-    )
-    nodeids = {nodeid.replace("\\", "/") for nodeid in pending["pre_execution_nodeids"]}
-    assert any(nodeid.endswith("tests/test_sample.py::test_one") for nodeid in nodeids)
-    assert any(nodeid.endswith("tests/test_sample.py::test_two") for nodeid in nodeids)
+    assert pending["collect_only"]["status"] == "disabled"
+    assert pending["collect_only"]["duration_s"] is None
+    assert pending["prediction_overhead_s"] is None
+    assert pending["pre_execution_test_set_known"] is False
+    assert pending["pre_execution_nodeids"] == []
+    assert pending["pre_execution_collected_count"] is None
 
 
-def test_prepare_collect_only_distinguishes_empty_collection(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    (project / "tests").mkdir(parents=True)
+def test_prepare_uses_history_only_for_pre_run_recommendation(tmp_path: Path) -> None:
     root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "commands": {
+                    "pytest tests": {
+                        "durations": [4.0, 5.0],
+                        "collected_counts": [2.0, 2.0],
+                    }
+                },
+                "tests": {
+                    "tests/test_a.py::test_a": {"durations": [1.0]},
+                    "tests/test_b.py::test_b": {"durations": [2.0]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     record = prepare_pytest_runtime_prediction_before_tool(
         prediction_root=root,
         iteration=1,
-        tool_call_id="call_empty",
+        tool_call_id="call_history",
         tool_name="exec",
-        tool_args={"command": "python -m pytest tests -q", "timeout": 30},
-        working_directory=project,
+        tool_args={"command": "python -m pytest tests"},
     )
 
     assert record is not None
     pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
-    assert pending["collect_only"]["status"] in {
-        "collected_empty",
-        "collected_with_pytest_exit",
-    }
-    assert pending["pre_execution_nodeids"] == []
-    assert pending["pre_execution_collected_count"] == 0
+    predictions = pending["predictions"]
+    assert predictions["prediction_last_run_s"] == pytest.approx(5.0)
+    assert predictions["prediction_recommended_s"] == pytest.approx(5.0)
+    assert predictions["prediction_recommended_method"] == "last_run"
+    assert predictions["prediction_reliability"]["level"] == "medium"
+    assert "pre_execution_test_set_unknown" in predictions["prediction_reliability"][
+        "reasons"
+    ]
+    assert predictions["prediction_per_test_s"] is None
 
 
-def test_collect_only_uses_exec_tool_runtime_environment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = tmp_path / "project"
-    (project / "tests").mkdir(parents=True)
-    userbase = tmp_path / "userbase"
-    userbase_bin = userbase / "bin"
-    captured: dict[str, object] = {}
-
-    class _Completed:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def _fake_run(*args: object, **kwargs: object) -> _Completed:
-        env = kwargs["env"]
-        assert isinstance(env, dict)
-        runtime_json = Path(str(env["OPENCLAW_PYTEST_RUNTIME_JSON"]))
-        runtime_json.parent.mkdir(parents=True, exist_ok=True)
-        runtime_json.write_text(
-            json.dumps(
-                {
-                    "collected_count": 1,
-                    "exit_code": 0,
-                    "tests": [
-                        {
-                            "nodeid": "tests/test_sample.py::test_one",
-                            "duration_s": 0.0,
-                            "outcome": "notrun",
-                        }
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        captured["env"] = env
-        return _Completed()
-
-    monkeypatch.setenv("OPENCLAW_TASK_USERBASE", str(userbase))
-    monkeypatch.setenv("PYTHONPATH", "host-pythonpath-should-not-leak")
-    monkeypatch.setattr(pred_mod.subprocess, "run", _fake_run)
+def test_prepare_uses_explicit_nodeids_for_per_test_prediction(tmp_path: Path) -> None:
+    root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_a.py::test_one": {"durations": [1.0]},
+                    "tests/test_b.py::test_two": {"durations": [2.0]},
+                },
+                "overheads": {"durations": [0.5]},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     record = prepare_pytest_runtime_prediction_before_tool(
-        prediction_root=tmp_path / "pytest_runtime",
-        iteration=1,
-        tool_call_id="call_env",
+        prediction_root=root,
+        iteration=2,
+        tool_call_id="call_explicit",
         tool_name="exec",
-        tool_args={"command": "python -m pytest tests"},
-        working_directory=project,
-        path_append=str(userbase_bin),
+        tool_args={
+            "command": (
+                "python -m pytest tests/test_a.py::test_one "
+                "tests/test_b.py::test_two -q"
+            )
+        },
     )
 
     assert record is not None
-    env = captured["env"]
-    assert isinstance(env, dict)
-    assert env["PYTHONUSERBASE"] == str(userbase)
-    assert str(env["PATH"]).startswith(str(userbase_bin))
-    assert "host-pythonpath-should-not-leak" not in str(env.get("PYTHONPATH", ""))
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    predictions = pending["predictions"]
+    assert pending["pre_execution_test_set_known"] is True
+    assert pending["pre_execution_nodeid_coverage"] == "explicit_only"
+    assert pending["pre_execution_collected_count"] == 2
+    assert pending["pre_execution_explicit_nodeid_count"] == 2
+    assert predictions["prediction_per_test_s"] == pytest.approx(3.5)
+    assert predictions["prediction_recommended_method"] == "per_test"
+    assert predictions["prediction_reliability"]["level"] == "high"
+
+
+def test_prepare_marks_mixed_explicit_nodeids_as_partial(tmp_path: Path) -> None:
+    root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_a.py::test_one": {"durations": [1.0]},
+                },
+                "overheads": {"durations": [0.25]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=3,
+        tool_call_id="call_partial",
+        tool_name="exec",
+        tool_args={
+            "command": (
+                "python -m pytest tests/test_a.py::test_one tests/test_b.py -q"
+            )
+        },
+    )
+
+    assert record is not None
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    predictions = pending["predictions"]
+    reliability = predictions["prediction_reliability"]
+    assert pending["pre_execution_test_set_known"] is False
+    assert pending["pre_execution_nodeid_coverage"] == "partial"
+    assert pending["pre_execution_collected_count"] is None
+    assert pending["pre_execution_explicit_nodeid_count"] == 1
+    assert pending["pre_execution_unmatched_positional_args"] == ["tests/test_b.py"]
+    assert predictions["prediction_per_test_s"] == pytest.approx(1.25)
+    assert predictions["prediction_nodeid_coverage"] == "partial"
+    assert predictions["prediction_explicit_nodeid_lower_bound_s"] == pytest.approx(1.25)
+    assert predictions["prediction_recommended_method"] == "none"
+    assert predictions["prediction_recommended_s"] is None
+    assert reliability["level"] == "coldstart"
+    assert "partial_prediction_lower_bound" in reliability["reasons"]
+
+
+def test_prepare_does_not_treat_class_selector_as_known_test_set(tmp_path: Path) -> None:
+    root = tmp_path / "pytest_runtime"
+    root.mkdir()
+    (root / "history.json").write_text(
+        json.dumps(
+            {
+                "tests": {
+                    "tests/test_a.py::TestA::test_one": {"durations": [1.0]},
+                    "tests/test_a.py::TestA::test_two": {"durations": [2.0]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=4,
+        tool_call_id="call_class",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests/test_a.py::TestA"},
+    )
+
+    assert record is not None
+    pending = json.loads((record.directory / "pending.json").read_text(encoding="utf-8"))
+    predictions = pending["predictions"]
+    assert pending["pre_execution_nodeid_coverage"] == "explicit_only"
+    assert pending["pre_execution_test_set_known"] is False
+    assert pending["pre_execution_collected_count"] is None
+    assert predictions["per_test_prediction_details"][0]["source"] == "file"
+    assert predictions["prediction_explicit_nodeid_lower_bound_s"] == pytest.approx(1.5)
+    assert predictions["prediction_recommended_method"] == "none"
+    assert predictions["prediction_reliability"]["level"] == "coldstart"
+    assert "explicit_nodeids_not_exact" in predictions["prediction_reliability"][
+        "reasons"
+    ]
 
 
 def test_three_prediction_methods_with_new_test_fallback() -> None:
@@ -1214,17 +1310,16 @@ def test_small_project_generates_predictions_after_history(tmp_path: Path) -> No
 
     first, second = payloads
     assert first["prediction_per_test_s"] is None
-    assert first["collect_only_duration_s"] is not None
-    assert first["pre_execution_collected_count"] == 3
+    assert first["collect_only_duration_s"] is None
+    assert first["pre_execution_test_set_known"] is False
+    assert first["pre_execution_collected_count"] is None
     assert second["prediction_last_run_s"] == pytest.approx(0.1)
-    assert second["prediction_test_count_s"] is not None
-    assert second["prediction_per_test_s"] is not None
+    assert second["prediction_test_count_s"] is None
+    assert second["prediction_per_test_s"] is None
     assert second["prediction_recommended_method"] == "last_run"
-    assert second["prediction_reliability"]["level"] == "high"
-    assert second["collect_only_duration_s"] is not None
-    assert second["total_duration_with_prediction_overhead_s"] == pytest.approx(
-        second["actual_duration_s"] + second["collect_only_duration_s"]
-    )
+    assert second["prediction_reliability"]["level"] == "medium"
+    assert second["collect_only_duration_s"] is None
+    assert second["total_duration_with_prediction_overhead_s"] is None
     assert (prediction_root / "history.json").exists()
     assert len((prediction_root / "predictions.jsonl").read_text().splitlines()) == 2
 

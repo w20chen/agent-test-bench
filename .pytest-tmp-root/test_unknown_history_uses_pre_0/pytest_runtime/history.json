@@ -1,0 +1,47 @@
+{
+  "schema_version": 5,
+  "updated_at": "2026-07-22T08:24:56.803695Z",
+  "history_limit": 5,
+  "tests": {
+    "tests/test_known.py::test_known": {
+      "durations": [
+        0.01
+      ]
+    },
+    "tests/test_new.py::test_new": {
+      "durations": [
+        99.0,
+        2.0
+      ],
+      "last_outcome": "passed",
+      "last_seen_at": "2026-07-22T08:24:56.803695Z"
+    }
+  },
+  "commands": {
+    "pytest tests": {
+      "durations": [
+        2.0
+      ],
+      "collected_counts": [
+        1.0
+      ],
+      "last_seen_at": "2026-07-22T08:24:56.803695Z",
+      "last_observed_test_count": 1
+    }
+  },
+  "overheads": {
+    "durations": [
+      0.0
+    ],
+    "last_seen_at": "2026-07-22T08:24:56.803695Z",
+    "last_observed_test_duration_s": 2.0,
+    "last_observed_test_count": 1
+  },
+  "unknown_tests": {
+    "durations": [
+      2.0
+    ],
+    "last_seen_at": "2026-07-22T08:24:56.803695Z",
+    "last_observed_count": 1
+  }
+}

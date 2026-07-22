@@ -1,0 +1,1 @@
+{"commands": {"pytest tests": {"durations": [4.0, 5.0], "collected_counts": [2.0, 2.0]}}, "tests": {"tests/test_a.py::test_a": {"durations": [1.0]}, "tests/test_b.py::test_b": {"durations": [2.0]}}}

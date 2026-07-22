@@ -113,9 +113,15 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "total_duration_with_prediction_overhead_s",
         "collected_count",
         "pre_execution_collected_count",
+        "pre_execution_test_set_known",
+        "pre_execution_nodeid_source",
+        "pre_execution_nodeid_coverage",
+        "pre_execution_explicit_nodeid_count",
+        "prediction_nodeid_coverage",
         "prediction_last_run_s",
         "prediction_test_count_s",
         "prediction_per_test_s",
+        "prediction_explicit_nodeid_lower_bound_s",
         "prediction_per_test_without_overhead_s",
         "prediction_per_test_overhead_s",
         "prediction_unknown_test_fallback_s",
@@ -161,9 +167,27 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
                     "pre_execution_collected_count": row.get(
                         "pre_execution_collected_count"
                     ),
+                    "pre_execution_test_set_known": row.get(
+                        "pre_execution_test_set_known"
+                    ),
+                    "pre_execution_nodeid_source": row.get(
+                        "pre_execution_nodeid_source"
+                    ),
+                    "pre_execution_nodeid_coverage": row.get(
+                        "pre_execution_nodeid_coverage"
+                    ),
+                    "pre_execution_explicit_nodeid_count": row.get(
+                        "pre_execution_explicit_nodeid_count"
+                    ),
+                    "prediction_nodeid_coverage": row.get(
+                        "prediction_nodeid_coverage"
+                    ),
                     "prediction_last_run_s": row.get("prediction_last_run_s"),
                     "prediction_test_count_s": row.get("prediction_test_count_s"),
                     "prediction_per_test_s": row.get("prediction_per_test_s"),
+                    "prediction_explicit_nodeid_lower_bound_s": row.get(
+                        "prediction_explicit_nodeid_lower_bound_s"
+                    ),
                     "prediction_per_test_without_overhead_s": row.get(
                         "prediction_per_test_without_overhead_s"
                     ),
@@ -258,7 +282,7 @@ def main() -> None:
         print(f"Average actual runtime: {mean_actual:.1f}s")
     mean_collect_only = _mean_collect_only_overhead(finalized_rows)
     if mean_collect_only is not None:
-        print(f"Average collect-only overhead: {mean_collect_only:.1f}s")
+        print(f"Average legacy collect-only overhead: {mean_collect_only:.1f}s")
     print()
     print(f"{'Method':<24} {'N':>6} {'MAE(s)':>10} {'MAPE':>10} {'Long MAPE':>12}")
     for method, label in METHODS:
