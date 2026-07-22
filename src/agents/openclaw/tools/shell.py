@@ -19,11 +19,6 @@ from agents.openclaw.tools.exec_env import (
 from agents.openclaw.tools.exec_env import drop_path_entry as _drop_path_entry
 from agents.openclaw.tools.exec_env import prepare_exec_env as _prepare_exec_env
 from trace_collect.exec_classifier import classify_exec_tool_name
-from trace_collect.pytest_runtime_prediction import (
-    HIDDEN_RUNTIME_DIR_ARG,
-    merge_pytest_runtime_environment,
-    prepare_pytest_runtime_environment,
-)
 
 
 MAX_EXEC_TOOL_TIMEOUT_SEC = 600
@@ -311,16 +306,6 @@ class ExecTool(Tool):
         # VTune wrapping only happens when VTUNE_BIN is also set (vtune mode).
         _tool_profile = os.environ.get("VTUNE_PROFILE") == "1"
         _classified = classify_exec_tool_name("exec", {"command": command})
-
-        pytest_runtime_dir = kwargs.get(HIDDEN_RUNTIME_DIR_ARG)
-        if _classified == "exec-pytest" and pytest_runtime_dir:
-            try:
-                runtime_env = prepare_pytest_runtime_environment(
-                    invocation_dir=Path(str(pytest_runtime_dir)),
-                )
-                env = merge_pytest_runtime_environment(env, runtime_env)
-            except Exception as exc:
-                logger.warning("pytest runtime instrumentation disabled: {}", exc)
 
         if _tool_profile and _classified in vtune_tools:
             vtune_bin = os.environ.get("VTUNE_BIN", "")

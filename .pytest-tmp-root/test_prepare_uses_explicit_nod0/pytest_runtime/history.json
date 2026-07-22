@@ -1,1 +1,0 @@
-{"tests": {"tests/test_a.py::test_one": {"durations": [1.0]}, "tests/test_b.py::test_two": {"durations": [2.0]}}, "overheads": {"durations": [0.5]}}

@@ -197,7 +197,11 @@ Personal KB.
 Source: `src/trace_collect/pytest_runtime_prediction.py`
 
 `pytest` has the most specialized predictor because test nodeids are meaningful
-units of historical work. The predictor still does not probe.
+units of historical work. The predictor still does not probe, and collect mode
+does not inject pytest plugins or environment variables into the agent's shell.
+Successful pytest tool calls update command-level duration history from the
+outer tool timing. Node-level history is used only when it already exists from
+prior artifacts; it is not collected by hidden in-process instrumentation.
 
 Allowed pre-execution inputs:
 
@@ -290,7 +294,6 @@ attempt_N/
     iter_0017_exec-pytest_<id>/
       pending.json
       prediction.json
-      pytest_runtime.json
       instrumentation.json
   tool_profiles_summary.json
   tool_scheduler_summary.json

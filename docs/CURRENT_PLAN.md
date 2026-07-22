@@ -48,6 +48,49 @@ Research integrity notes:
 
 ---
 
+Objective: Make pytest runtime instrumentation invisible to the agent.
+
+User requirement:
+- Agent should not be able to perceive or disable runtime prediction/capture
+  machinery through ordinary shell environment inspection.
+- Real pytest invocations may still be observed, but the mechanism must stay
+  outside the agent-visible command surface.
+
+Plan:
+1. Stop injecting pytest runtime variables into the whole shell environment. -
+   completed
+2. Inject the runtime variables only at the pytest process boundary so commands
+   such as `env` do not expose them and `unset PYTEST_PLUGINS && pytest ...`
+   cannot disable capture. - superseded
+3. Add regression tests for agent-invisible environment and unset resilience. -
+   completed
+4. Run focused tests and a fresh reviewer because this touches the evaluation
+   runtime path. - completed
+
+Review outcome:
+- Review found that both direct process-boundary env injection and PATH shims
+  remain agent-visible or disableable through ordinary shell/pytest mechanisms.
+- Final direction: do not inject pytest plugins, `PYTEST_PLUGINS`, or PATH
+  shims into agent tool commands. Use outer tool-call duration for successful
+  pytest command-level history, and use node-level history only when it already
+  exists from prior artifacts.
+- Follow-up review found stale injection helper APIs and misleading Personal KB
+  update status. The helper APIs/tests were removed, missing node timing is now
+  recorded as `runtime_observation_status: outer_tool_timing_only`, and
+  Personal KB updates now reflect command-level duration learning.
+- Final review found no remaining major or critical issues. Residual risk:
+  prediction quality is coarser without node-level online capture, by design.
+
+Verification so far:
+- `python -m pytest tests\test_runtime_knowledge.py tests\test_package_runtime_prediction.py tests\test_python_script_runtime_prediction.py tests\test_pytest_runtime_prediction.py tests\test_shell_pytest_runtime_invisibility.py --basetemp .pytest-tmp-root`
+  passed: 96 passed.
+- `python -m py_compile src\agents\openclaw\tools\shell.py src\trace_collect\pytest_runtime_prediction.py tests\test_shell_pytest_runtime_invisibility.py tests\test_pytest_runtime_prediction.py`
+  passed.
+- `python -m ruff check src\agents\openclaw\tools\shell.py src\trace_collect\pytest_runtime_prediction.py tests\test_shell_pytest_runtime_invisibility.py tests\test_pytest_runtime_prediction.py`
+  could not run in the current Python environment: `No module named ruff`.
+
+---
+
 Objective: Use explicit pytest nodeids from command text without probing.
 
 User requirement:

@@ -90,7 +90,7 @@ The table below lists the most commonly used flags.
 | `--tool-profiling off\|vtune\|ksys` | Wrap each matching tool invocation with a platform profiler (VTune for Intel x86, ksys for Kunpeng) |
 | `--tool-profiling-tools <list>` | Comma-separated tool names to profile (default: `exec-pytest`) |
 | `--capture-pytest-scripts` / `--no-capture-pytest-scripts` | Save pytest scripts referenced by `exec-pytest` calls (default: on) |
-| `--capture-pytest-runtime` / `--no-capture-pytest-runtime` | Enable pytest node timing collection and prediction artifacts (default: on) |
+| `--capture-pytest-runtime` / `--no-capture-pytest-runtime` | Enable pytest runtime prediction artifacts from agent-invisible tool timing (default: on) |
 | `--capture-pip-runtime` / `--no-capture-pip-runtime` | Enable compact `pip install` duration prediction artifacts (default: on) |
 | `--concurrency N` | Spawn N agent instances per task |
 | `--provider` | LLM provider name |

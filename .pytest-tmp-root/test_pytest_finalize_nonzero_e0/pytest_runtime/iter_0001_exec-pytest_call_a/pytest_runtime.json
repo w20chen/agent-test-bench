@@ -1,1 +1,0 @@
-{"collected_count": 1, "exit_code": 2, "tests": [{"nodeid": "tests/test_a.py::test_1", "duration_s": 0.01, "outcome": "failed"}]}

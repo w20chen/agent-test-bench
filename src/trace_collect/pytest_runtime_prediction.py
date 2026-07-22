@@ -1,9 +1,10 @@
 """Minimal pytest runtime prediction artifacts for trace collection.
 
-The prototype is intentionally small: it records per-node pytest durations from
+The prototype is intentionally small: it records outer tool-call duration for
 the real command, computes predictions from bounded history, and writes
 attempt-local JSON artifacts.  It does not run pre-execution pytest probes,
-change benchmark labels, or use oracle data.
+inject agent-visible pytest plugins, change benchmark labels, or use oracle
+data.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ HISTORY_FILENAME = "history.json"
 PREDICTIONS_FILENAME = "predictions.jsonl"
 RUNTIME_JSON_FILENAME = "pytest_runtime.json"
 INSTRUMENTATION_FILENAME = "instrumentation.json"
-PLUGIN_MODULE = "openclaw_pytest_runtime_plugin"
 HISTORY_LIMIT = 5
 PREDICTION_SCHEMA_VERSION = 5
 HISTORY_SCHEMA_VERSION = 5
@@ -515,135 +515,6 @@ def parse_exit_code(tool_result: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
-
-
-def _plugin_source() -> str:
-    return r'''
-from __future__ import annotations
-
-import json
-import os
-from pathlib import Path
-
-_COLLECTED = []
-_TESTS = {}
-
-
-def pytest_collection_finish(session):
-    global _COLLECTED
-    try:
-        _COLLECTED = [item.nodeid for item in getattr(session, "items", [])]
-    except Exception:
-        _COLLECTED = []
-
-
-def pytest_runtest_logreport(report):
-    try:
-        if report.when not in {"setup", "call", "teardown"}:
-            return
-        rec = _TESTS.setdefault(
-            report.nodeid,
-            {"nodeid": report.nodeid, "duration_s": 0.0, "outcome": "unknown"},
-        )
-        rec["duration_s"] += float(getattr(report, "duration", 0.0) or 0.0)
-        if report.when == "call" or report.failed or report.skipped:
-            rec["outcome"] = str(report.outcome)
-    except Exception:
-        return
-
-
-def pytest_sessionfinish(session, exitstatus):
-    try:
-        out = os.environ.get("OPENCLAW_PYTEST_RUNTIME_JSON")
-        if not out:
-            return
-        tests = []
-        seen = set()
-        for nodeid in _COLLECTED:
-            rec = dict(_TESTS.get(nodeid) or {
-                "nodeid": nodeid,
-                "duration_s": 0.0,
-                "outcome": "notrun",
-            })
-            rec["duration_s"] = round(float(rec.get("duration_s") or 0.0), 9)
-            tests.append(rec)
-            seen.add(nodeid)
-        for nodeid, rec in sorted(_TESTS.items()):
-            if nodeid in seen:
-                continue
-            item = dict(rec)
-            item["duration_s"] = round(float(item.get("duration_s") or 0.0), 9)
-            tests.append(item)
-        payload = {
-            "schema_version": 1,
-            "collected_count": len(_COLLECTED),
-            "exit_code": int(exitstatus),
-            "tests": tests,
-        }
-        path = Path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(path)
-    except Exception:
-        return
-'''.lstrip()
-
-
-def prepare_pytest_runtime_environment(
-    *,
-    invocation_dir: Path,
-) -> dict[str, str]:
-    """Write the temporary pytest plugin and return environment overrides."""
-    invocation_dir.mkdir(parents=True, exist_ok=True)
-    plugin_dir = invocation_dir / "_plugin"
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    plugin_path = plugin_dir / f"{PLUGIN_MODULE}.py"
-    source = _plugin_source()
-    compile(source, str(plugin_path), "exec")
-    plugin_path.write_text(source, encoding="utf-8")
-    runtime_json = invocation_dir / RUNTIME_JSON_FILENAME
-
-    existing, _warning = _load_json(invocation_dir / INSTRUMENTATION_FILENAME)
-    payload = {
-        **existing,
-        "schema_version": 1,
-        "prepared_at": _utc_now(),
-        "plugin_module": PLUGIN_MODULE,
-        "plugin_path": str(plugin_path),
-        "runtime_json": str(runtime_json),
-        "status": "prepared",
-    }
-    _write_json(invocation_dir / INSTRUMENTATION_FILENAME, payload)
-    return {
-        "OPENCLAW_PYTEST_RUNTIME_JSON": str(runtime_json),
-        "OPENCLAW_PYTEST_RUNTIME_PLUGIN_DIR": str(plugin_dir),
-        "OPENCLAW_PYTEST_RUNTIME_PLUGIN": PLUGIN_MODULE,
-    }
-
-
-def merge_pytest_runtime_environment(
-    env: dict[str, str],
-    overrides: dict[str, str],
-) -> dict[str, str]:
-    """Merge pytest runtime plugin settings into a subprocess environment."""
-    merged = dict(env)
-    plugin_dir = overrides["OPENCLAW_PYTEST_RUNTIME_PLUGIN_DIR"]
-    plugin_name = overrides["OPENCLAW_PYTEST_RUNTIME_PLUGIN"]
-    existing_plugins = merged.get("PYTEST_PLUGINS", "").strip()
-    if existing_plugins:
-        merged["PYTEST_PLUGINS"] = f"{existing_plugins},{plugin_name}"
-    else:
-        merged["PYTEST_PLUGINS"] = plugin_name
-    existing_pythonpath = merged.get("PYTHONPATH", "")
-    if existing_pythonpath:
-        merged["PYTHONPATH"] = plugin_dir + os.pathsep + existing_pythonpath
-    else:
-        merged["PYTHONPATH"] = plugin_dir
-    merged["OPENCLAW_PYTEST_RUNTIME_JSON"] = overrides[
-        "OPENCLAW_PYTEST_RUNTIME_JSON"
-    ]
-    return merged
 
 
 def prepare_pytest_runtime_prediction_before_tool(
@@ -1399,21 +1270,20 @@ def update_pytest_history(
         rec["last_seen_at"] = updated["updated_at"]
         test_history[nodeid] = rec
 
+    command_key = normalize_pytest_command(command)
+    command_history = updated["commands"]
+    command_rec = dict(command_history.get(command_key) or {})
+    command_rec["durations"] = _bounded_append(
+        command_rec.get("durations") or [],
+        total_duration_s,
+    )
+    command_rec["last_seen_at"] = updated["updated_at"]
     if observed_test_count > 0:
-        command_key = normalize_pytest_command(command)
-        command_history = updated["commands"]
-        command_rec = dict(command_history.get(command_key) or {})
-        command_rec["durations"] = _bounded_append(
-            command_rec.get("durations") or [],
-            total_duration_s,
-        )
         command_rec["collected_counts"] = _bounded_append(
             command_rec.get("collected_counts") or [],
             float(observed_test_count),
         )
-        command_rec["last_seen_at"] = updated["updated_at"]
         command_rec["last_observed_test_count"] = observed_test_count
-        command_history[command_key] = command_rec
 
         overhead_s = max(0.0, float(total_duration_s) - observed_test_duration_s)
         overheads = dict(updated["overheads"])
@@ -1422,6 +1292,7 @@ def update_pytest_history(
         overheads["last_observed_test_duration_s"] = observed_test_duration_s
         overheads["last_observed_test_count"] = observed_test_count
         updated["overheads"] = overheads
+    command_history[command_key] = command_rec
     if unknown_observed_durations:
         unknown_tests = dict(updated["unknown_tests"])
         durations = unknown_tests.get("durations") or []
@@ -1639,10 +1510,9 @@ def finalize_pytest_runtime_prediction(
         if isinstance(runtime_payload.get("exit_code"), int)
         else parse_exit_code(tool_result)
     )
-    successful_pytest_run = (
-        bool(success)
-        and bool(tests)
-        and (exit_code is None or exit_code == 0)
+    successful_pytest_command = bool(success) and (exit_code is None or exit_code == 0)
+    runtime_observation_status = (
+        "node_timing_available" if tests else "outer_tool_timing_only"
     )
 
     warnings = [
@@ -1660,8 +1530,6 @@ def finalize_pytest_runtime_prediction(
         for warning in pending.get("warnings", [])
         if isinstance(warning, str)
     )
-    if not tests:
-        warnings.append("pytest runtime JSON missing or contains no tests")
 
     prediction_values = {
         "last_run": predictions["prediction_last_run_s"],
@@ -1704,7 +1572,7 @@ def finalize_pytest_runtime_prediction(
         "actual_duration_s": actual_duration_s,
         "exit_code": exit_code,
         "success": success,
-        "history_updated": successful_pytest_run,
+        "history_updated": successful_pytest_command,
         "history_path": str(history_path),
         "history_scope": "shared" if effective_history_root is not None else "attempt",
         "collected_count": (
@@ -1714,6 +1582,7 @@ def finalize_pytest_runtime_prediction(
         ),
         "collected_tests": nodeids,
         "tests": tests,
+        "runtime_observation_status": runtime_observation_status,
         "pre_execution_test_set_known": pre_execution_test_set_known,
         "pre_execution_nodeid_source": pre_execution_nodeid_source,
         "pre_execution_nodeid_coverage": pre_execution_nodeid_coverage,
@@ -1792,7 +1661,7 @@ def finalize_pytest_runtime_prediction(
         },
         "warnings": warnings,
     }
-    if successful_pytest_run:
+    if successful_pytest_command:
         try:
             with _history_lock(history_path):
                 locked_history, locked_warning = _load_json(history_path)
@@ -1821,7 +1690,7 @@ def finalize_pytest_runtime_prediction(
             operation="run_tests",
             normalized_command=predictions["command_key"],
             duration_s=actual_duration_s,
-            success=successful_pytest_run,
+            success=successful_pytest_command,
             repo_id=payload.get("working_directory")
             if isinstance(payload.get("working_directory"), str)
             else None,
@@ -1829,7 +1698,7 @@ def finalize_pytest_runtime_prediction(
         )
         write_json_object(personal_kb_path, updated_personal_kb)
         payload["personal_kb_path"] = str(personal_kb_path)
-        payload["personal_kb_updated"] = successful_pytest_run
+        payload["personal_kb_updated"] = successful_pytest_command
     except Exception as exc:
         payload["personal_kb_updated"] = False
         payload["warnings"].append(f"failed to update personal kb: {exc!r}")

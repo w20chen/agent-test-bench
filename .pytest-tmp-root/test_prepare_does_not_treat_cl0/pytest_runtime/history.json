@@ -1,1 +1,0 @@
-{"tests": {"tests/test_a.py::TestA::test_one": {"durations": [1.0]}, "tests/test_a.py::TestA::test_two": {"durations": [2.0]}}}

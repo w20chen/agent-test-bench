@@ -18,11 +18,9 @@ from trace_collect.pytest_runtime_prediction import (
     global_unknown_test_median,
     historical_duration,
     is_pytest_tool_call,
-    merge_pytest_runtime_environment,
     normalize_pytest_command,
     extract_explicit_pytest_nodeids,
     predict_test_duration,
-    prepare_pytest_runtime_environment,
     prepare_pytest_runtime_prediction_before_tool,
     update_pytest_history,
 )
@@ -244,7 +242,7 @@ def test_prediction_methods_do_not_use_current_run() -> None:
     assert predictions["prediction_reliability"]["level"] == "high"
 
 
-def test_command_history_ignores_runs_without_observed_tests() -> None:
+def test_command_history_records_command_duration_without_observed_tests() -> None:
     history = update_pytest_history(
         history={},
         command="python -m pytest tests/test_a.py -v",
@@ -252,7 +250,10 @@ def test_command_history_ignores_runs_without_observed_tests() -> None:
         tests=[],
     )
 
-    assert history["commands"] == {}
+    command = history["commands"]["pytest tests/test_a.py"]
+    assert command["durations"] == [0.02]
+    assert "collected_counts" not in command
+    assert history["tests"] == {}
 
 
 def test_command_history_records_collected_counts_for_observed_runs() -> None:
@@ -957,18 +958,6 @@ def test_realtime_summary_prints_coldstart_and_error_reliability() -> None:
     assert error_line.endswith("| error")
 
 
-def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:
-    overrides = prepare_pytest_runtime_environment(invocation_dir=tmp_path)
-    env = merge_pytest_runtime_environment(
-        {"PYTHONPATH": "oldpath", "PYTEST_PLUGINS": "existing"},
-        overrides,
-    )
-
-    assert env["PYTEST_PLUGINS"].endswith(",openclaw_pytest_runtime_plugin")
-    assert env["PYTHONPATH"].endswith("oldpath")
-    assert env["OPENCLAW_PYTEST_RUNTIME_JSON"].endswith("pytest_runtime.json")
-
-
 def test_prepare_does_not_probe_pytest_before_tool_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1215,7 +1204,7 @@ def statistics_median(values: list[float]) -> float:
     return (values[mid - 1] + values[mid]) / 2
 
 
-def test_exec_tool_collects_pytest_runtime_json_for_small_project(tmp_path: Path) -> None:
+def test_exec_tool_does_not_expose_pytest_runtime_env(tmp_path: Path) -> None:
     project = tmp_path / "project"
     tests_dir = project / "tests"
     tests_dir.mkdir(parents=True)
@@ -1241,19 +1230,19 @@ def test_exec_tool_collects_pytest_runtime_json_for_small_project(tmp_path: Path
 
     result = asyncio.run(
         tool.execute(
-            command="python -m pytest tests -q",
+            command=(
+                "python -c \"import os; print('visible=' + "
+                "str(any(k.startswith('OPENCLAW_PYTEST_RUNTIME') "
+                "or k == 'PYTEST_PLUGINS' for k in os.environ)))\" && "
+                "python -m pytest tests -q"
+            ),
             **{HIDDEN_RUNTIME_DIR_ARG: str(invocation_dir)},
         )
     )
 
+    assert "visible=False" in result
     assert "Exit code: 0" in result
-    runtime = json.loads((invocation_dir / "pytest_runtime.json").read_text())
-    assert runtime["collected_count"] == 3
-    nodeids = {test["nodeid"].replace("\\", "/") for test in runtime["tests"]}
-    assert any(nodeid.endswith("tests/test_sample.py::test_short") for nodeid in nodeids)
-    assert any(nodeid.endswith("tests/test_sample.py::test_medium") for nodeid in nodeids)
-    assert any(nodeid.endswith("tests/test_sample.py::test_longer") for nodeid in nodeids)
-    assert all(test["duration_s"] >= 0 for test in runtime["tests"])
+    assert not (invocation_dir / "pytest_runtime.json").exists()
 
 
 def test_small_project_generates_predictions_after_history(tmp_path: Path) -> None:
@@ -1313,6 +1302,9 @@ def test_small_project_generates_predictions_after_history(tmp_path: Path) -> No
     assert first["collect_only_duration_s"] is None
     assert first["pre_execution_test_set_known"] is False
     assert first["pre_execution_collected_count"] is None
+    assert first["runtime_observation_status"] == "outer_tool_timing_only"
+    assert "pytest runtime JSON missing or contains no tests" not in first["warnings"]
+    assert first["personal_kb_updated"] is True
     assert second["prediction_last_run_s"] == pytest.approx(0.1)
     assert second["prediction_test_count_s"] is None
     assert second["prediction_per_test_s"] is None

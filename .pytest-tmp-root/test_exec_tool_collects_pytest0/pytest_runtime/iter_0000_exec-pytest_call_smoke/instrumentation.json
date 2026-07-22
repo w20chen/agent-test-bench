@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "prepared_at": "2026-07-22T08:24:56.866001Z",
-  "plugin_module": "openclaw_pytest_runtime_plugin",
-  "plugin_path": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_exec_tool_collects_pytest0\\pytest_runtime\\iter_0000_exec-pytest_call_smoke\\_plugin\\openclaw_pytest_runtime_plugin.py",
-  "runtime_json": "C:\\Users\\user\\Desktop\\agent-test-bench\\.pytest-tmp-root\\test_exec_tool_collects_pytest0\\pytest_runtime\\iter_0000_exec-pytest_call_smoke\\pytest_runtime.json",
-  "status": "prepared"
-}
