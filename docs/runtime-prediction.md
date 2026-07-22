@@ -11,9 +11,14 @@ Prediction history lives in per-run databases under `run_dir`:
 
 ```text
 run_dir/
-  pip_runtime_db/           # pip prediction history
-  python_script_runtime_db/ # python script prediction history
-  pytest_runtime_db/        # pytest prediction history
+  pip_runtime_db/<instance>/history.json            # pip retry history
+  python_script_runtime_db/<instance>/history.json  # Python script retry history
+  pytest_runtime_db/<instance>/history.json         # pytest retry history
+  runtime_kb/
+    repo/<repo>/
+      pip/history.json
+      python_script/history.json
+      pytest/history.json
 ```
 
 Each database has **two bucket levels**:
@@ -21,15 +26,18 @@ Each database has **two bucket levels**:
 | Bucket | Location | Scope | Used when |
 |--------|----------|-------|-----------|
 | **Instance** | `<tool>_runtime_db/<instance>/history.json` | This exact task instance | Attempt N+1 reads attempt 1..N |
-| **Family** | `<tool>_runtime_db/family/<family>/history.json` | All tasks sharing the same repository | Cross-instance cold start |
+| **Family** | `runtime_kb/repo/<repo>/<tool>/history.json` | All tasks sharing the same repository | Cross-instance cold start |
 
 **Seed (before each attempt):** instance history is always seeded into `history.json`.  Family history is independently seeded into `family_history.json` when available — the two signals are stored separately and used side-by-side in prediction.
 
 **Merge (after each attempt):** successful prediction rows write to **both** instance and family buckets.
 
+Repo-family history is organized repo-first: one repository-level knowledge base
+contains separate tool libraries (`pip`, `python_script`, and `pytest`).
+
 Family scope is intentionally minimal: **only repo**.  Image family, Python version, and install config are deliberately excluded so that all instances of the same repository share a single history bucket — maximising the chance of a cold-start hit.
 
-All history containers are bounded to **5 entries** per key (FIFO).  File-based exclusivity locks (`O_CREAT | O_EXCL`) protect concurrent access with 600 s stale-lock cleanup.
+All history containers are bounded to **5 entries** per key (FIFO).  File-based exclusivity locks (`O_CREAT | O_EXCL`) protect concurrent access with 600 s stale-lock cleanup. Compound commands whose elapsed time includes unrelated work still emit artifacts, but they do not update predictive history.
 
 ---
 
@@ -39,7 +47,7 @@ All history containers are bounded to **5 entries** per key (FIFO).  File-based 
 
 **Recognised commands:** `pip install`, `pip3 install`, `python -m pip install`.
 
-**Command normalization:** strips output and boolean flags, sorts package specs, hashes requirement-file contents.  Commands with `||` chains are recorded but excluded from history.
+**Command normalization:** strips output and boolean flags, sorts package specs, hashes requirement-file contents.  Commands with `||`, prefix work, follow-up shell segments, or pipes are recorded but excluded from history.
 
 **Four baselines** (cascading priority):
 
@@ -87,7 +95,7 @@ attempt_N/pip_runtime/
 | 4 | **Basename Median** | `low` | Median of all runs sharing the same filename |
 | 5 | **Global Median** | `low` | Median of all successful Python script runs |
 
-Only successful, standalone runs (not `or`-chains, not pipes) enter history.
+Only successful, standalone runs (not `or`-chains, prefix work, follow-up commands, or pipes) enter history.
 
 **CLI flags:** `--capture-python-script-runtime` / `--no-capture-python-script-runtime` (default: on).
 
@@ -109,7 +117,9 @@ attempt_N/python_script_runtime/
 The most sophisticated of the three.  Before the actual pytest runs, a
 lightweight `pytest --collect-only` discovers all test nodeids without
 executing tests.  A temporary pytest plugin records per-node timing data
-after the real run.
+after the real run. Only successful pytest invocations update predictive
+history; failed, interrupted, or partial runs keep artifacts for audit but are
+not used as future runtime knowledge.
 
 ### Pre-execution: collect-only
 

@@ -1627,6 +1627,11 @@ def finalize_pytest_runtime_prediction(
         if isinstance(runtime_payload.get("exit_code"), int)
         else parse_exit_code(tool_result)
     )
+    successful_pytest_run = (
+        bool(success)
+        and bool(tests)
+        and (exit_code is None or exit_code == 0)
+    )
 
     warnings = [
         warning
@@ -1683,7 +1688,7 @@ def finalize_pytest_runtime_prediction(
         "actual_duration_s": actual_duration_s,
         "exit_code": exit_code,
         "success": success,
-        "history_updated": bool(tests),
+        "history_updated": successful_pytest_run,
         "history_path": str(history_path),
         "history_scope": "shared" if effective_history_root is not None else "attempt",
         "collected_count": (
@@ -1749,7 +1754,7 @@ def finalize_pytest_runtime_prediction(
         },
         "warnings": warnings,
     }
-    if tests:
+    if successful_pytest_run:
         try:
             with _history_lock(history_path):
                 locked_history, locked_warning = _load_json(history_path)

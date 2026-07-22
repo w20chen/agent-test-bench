@@ -514,6 +514,52 @@ def test_prediction_json_includes_pytest_output_but_jsonl_stays_compact(
     assert "recommended" in prediction_jsonl["relative_error"]
 
 
+def test_pytest_finalize_nonzero_exit_does_not_update_history(
+    tmp_path: Path,
+) -> None:
+    invocation = tmp_path / "pytest_runtime" / "iter_0001_exec-pytest_call_a"
+    invocation.mkdir(parents=True)
+    (invocation / "pytest_runtime.json").write_text(
+        json.dumps(
+            {
+                "collected_count": 1,
+                "exit_code": 2,
+                "tests": [
+                    {
+                        "nodeid": "tests/test_a.py::test_1",
+                        "duration_s": 0.01,
+                        "outcome": "failed",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = prepare_pytest_runtime_prediction_before_tool(
+        prediction_root=tmp_path / "pytest_runtime",
+        iteration=1,
+        tool_call_id="call_a",
+        tool_name="exec",
+        tool_args={"command": "python -m pytest tests/test_a.py"},
+    )
+    assert record is not None
+    record.directory = invocation
+
+    payload = finalize_pytest_runtime_prediction(
+        record,
+        prediction_root=tmp_path / "pytest_runtime",
+        action_id="tool_1_call_a",
+        ts_start=1.0,
+        ts_end=1.2,
+        duration_ms=200.0,
+        success=False,
+        tool_result="failed\nExit code: 2",
+    )
+
+    assert payload["history_updated"] is False
+    assert not (tmp_path / "pytest_runtime" / "history.json").exists()
+
+
 def test_pytest_finalize_uses_pre_execution_prediction_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -642,9 +688,8 @@ def test_notrun_tests_are_not_added_to_history(tmp_path: Path) -> None:
     )
 
     assert "tests/test_a.py::test_notrun" in payload["collected_tests"]
-    history = json.loads((tmp_path / "pytest_runtime" / "history.json").read_text())
-    assert "tests/test_a.py::test_ran" in history["tests"]
-    assert "tests/test_a.py::test_notrun" not in history["tests"]
+    assert payload["history_updated"] is False
+    assert not (tmp_path / "pytest_runtime" / "history.json").exists()
 
 
 def test_unknown_history_records_only_tests_that_were_unknown(tmp_path: Path) -> None:
@@ -806,13 +851,12 @@ def test_realtime_summary_prints_all_prediction_errors() -> None:
     )
 
     assert line.startswith("[pytest-predict] ")
-    assert "collect_overhead=1.25s" in line
-    assert "last=8.00s last_err=20.0%" in line
-    assert "count=5.00s count_err=50.0%" in line
-    assert "per_test=9.00s per_test_err=10.0%" in line
-    assert "unknown=11.00s unknown_err=10.0%" in line
-    assert "recommended=per_test:9.00s rec_err=10.0%" in line
-    assert "reliability=high" in line
+    assert "(collect 1.2s)" in line
+    assert "last=8.0s(+20.0%)" in line
+    assert "count=5.0s(+50.0%)" in line
+    assert "→per=9.0s(+10.0%)" in line
+    assert "unk=11.0s(+10.0%)" in line
+    assert line.endswith("| high")
 
 
 def test_realtime_summary_prints_coldstart_and_error_reliability() -> None:
@@ -839,10 +883,10 @@ def test_realtime_summary_prints_coldstart_and_error_reliability() -> None:
         }
     )
 
-    assert "recommended=none:n/a" in coldstart_line
-    assert "reliability=coldstart" in coldstart_line
-    assert "recommended=none:n/a" in error_line
-    assert "reliability=error" in error_line
+    assert "last=?(?)" in coldstart_line
+    assert coldstart_line.endswith("| coldstart")
+    assert "last=?(?)" in error_line
+    assert error_line.endswith("| error")
 
 
 def test_runtime_environment_merges_without_wrapping_command(tmp_path: Path) -> None:
@@ -899,6 +943,21 @@ def test_collect_only_invocation_uses_shell_timeout_prefix(tmp_path: Path) -> No
     assert invocation is not None
     assert invocation.timeout_s == pytest.approx(5.0)
     assert "timeout" not in invocation.argv
+
+
+def test_collect_only_invocation_moves_env_prefix_to_env_overrides(
+    tmp_path: Path,
+) -> None:
+    invocation = build_pytest_collect_only_invocation(
+        "FOO=bar python -m pytest tests",
+        working_directory=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert invocation is not None
+    assert invocation.env_overrides == {"FOO": "bar"}
+    assert invocation.argv[:3] == ["python", "-m", "pytest"]
+    assert "FOO=bar" not in invocation.argv
 
 
 def test_prepare_collect_only_records_nodeids_and_overhead(tmp_path: Path) -> None:

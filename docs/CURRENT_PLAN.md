@@ -1,22 +1,25 @@
-# Current Plan
+Objective: Fix runtime prediction knowledge-base correctness and scheduler signal bugs.
 
-Objective: Audit and fix correctness bugs in `tool_profiler` and its OpenClaw integration.
+Scope:
+- Runtime prediction history for pip, Python scripts, and pytest.
+- Repo/family-scoped knowledge sharing and instance retry history.
+- Tool scheduler resource-signal correctness where it affects predictions.
+- Focused tests for the fixed behavior.
 
-Status: completed
+Plan:
+1. Confirm knowledge-base scope design and keep repo/family as the sharing boundary. - completed
+2. Fix pip prediction history pollution from compound commands and duplicate shared merges. - completed
+3. Fix pytest prediction history pollution and collect-only environment-prefix handling. - completed
+4. Fix tool_scheduler PMU stderr parsing, idle snapshot consistency, and history persistence semantics. - completed
+5. Align summary tests/docs and run focused tests with an in-workspace pytest basetemp. - completed
+6. Run strict independent review before finalizing. - completed
 
-## Scope
+Review follow-up:
+- Moved scheduler history from attempt-local default to repo-level runtime KB when launched by the collector.
+- Clarified scheduler as a dry-run placement recommender, not an affinity-applying scheduler.
+- Strengthened tests for instance/family merge coverage and scheduler history persistence.
 
-- Keep `tool_profiler` as a profiling/measurement wrapper; do not add scheduling behavior.
-- Preserve the profile JSONL schema unless a narrow diagnostic addition is required.
-- Fix only confirmed bugs in command semantics, output preservation, process cleanup, and measurement validity.
-- Avoid benchmark-specific behavior or workload shortcuts.
-
-## Steps
-
-1. Inspect `prototype/tool_profiler` runner/CLI/sampler/output and OpenClaw wrapping. - completed
-2. Identify confirmed bugs and choose minimal general fixes. - completed
-3. Implement fixes. - completed
-4. Add regression tests for fixed behavior. - completed
-5. Run focused tests with workspace-local pytest temp directories. - completed
-6. Run independent strict review because this touches tool execution paths. - completed
-7. Address review findings and summarize final state. - completed
+Notes:
+- Do not introduce benchmark-specific heuristics.
+- Only write complete, inference-time-available runtime observations into predictive history.
+- Compound commands may still emit artifacts, but must not update tool-specific duration history when elapsed time includes unrelated work.

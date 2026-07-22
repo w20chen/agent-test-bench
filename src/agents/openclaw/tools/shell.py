@@ -430,14 +430,20 @@ class ExecTool(Tool):
             )
             os.makedirs(_ts_out_dir, exist_ok=True)
             _ts_profile_path = os.path.join(_ts_out_dir, "profile.jsonl")
+            _ts_history_path = os.environ.get(
+                "TOOL_SCHEDULER_HISTORY_DB",
+                os.path.join(_ts_out, "history.json"),
+            )
 
             if sys.platform == "win32":
                 _py_exe = '"' + sys.executable.replace('"', '""') + '"'
                 _ts_path_q = '"' + _ts_profile_path.replace('"', '""') + '"'
+                _ts_history_q = '"' + _ts_history_path.replace('"', '""') + '"'
                 _ts_payload_q = '"' + run_command.replace('"', '""') + '"'
             else:
                 _py_exe = shlex.quote(sys.executable)
                 _ts_path_q = shlex.quote(_ts_profile_path)
+                _ts_history_q = shlex.quote(_ts_history_path)
                 _ts_payload_q = shlex.quote(run_command)
 
             _ts_hardcode_flag = "--hardcode-topology " if _ts_hardcode else ""
@@ -446,6 +452,7 @@ class ExecTool(Tool):
                 f"{_py_exe} -m prototype.tool_scheduler "
                 f"{_ts_hardcode_flag}"
                 f"--output {_ts_path_q} "
+                f"--history-db {_ts_history_q} "
                 f"--dry-run "
                 f"--shell-command "
                 f"-- {_ts_payload_q}"

@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from .runner import run_tool
 from .cost_model import CostModelConfig
@@ -20,9 +21,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Online load prediction & hardware-aware scheduling for tool invocations. "
-            "Monitors process tree, predicts CPU demand, and generates dry-run "
-            "placement recommendations."
+            "Online load prediction & hardware-aware placement recommendation "
+            "for tool invocations. Monitors process tree, predicts CPU demand, "
+            "and emits dry-run placement recommendations."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
@@ -163,7 +164,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.history_db:
         try:
             with open(args.history_db, "r", encoding="utf-8") as f:
-                history_db = json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    history_db = loaded
         except (OSError, json.JSONDecodeError):
             pass  # Start fresh if unreadable
 
@@ -197,6 +200,7 @@ def main(argv: list[str] | None = None) -> None:
     # Save history DB if path provided
     if args.history_db and history_db:
         try:
+            Path(args.history_db).parent.mkdir(parents=True, exist_ok=True)
             with open(args.history_db, "w", encoding="utf-8") as f:
                 json.dump(history_db, f, indent=2, ensure_ascii=False)
         except OSError as e:

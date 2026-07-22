@@ -93,6 +93,8 @@ class PipInstallCommand:
     packages: list[str]
     requirement_files: list[str]
     shell_has_or_chain: bool = False
+    shell_has_prefix_work: bool = False
+    shell_has_followup_segments: bool = False
 
 
 def _utc_now() -> str:
@@ -288,12 +290,13 @@ def _pip_install_tokens(
     command: str,
     *,
     working_directory: str | Path | None = None,
-) -> tuple[list[str], Path | None, bool] | None:
+) -> tuple[list[str], Path | None, bool, bool, bool] | None:
     current_dir: Path | None = None
     working_dir = Path(working_directory) if working_directory else None
     segments = _split_shell_segments(command)
     has_or_chain = any(operator == "||" for _, operator in segments)
-    for segment, _operator in segments:
+    shell_has_prefix_work = False
+    for segment_index, (segment, _operator) in enumerate(segments):
         try:
             tokens = shlex.split(segment, posix=True)
         except ValueError:
@@ -323,9 +326,21 @@ def _pip_install_tokens(
         ):
             args = tokens[3:]
         else:
+            shell_has_prefix_work = True
             continue
         if args and args[0] == "install":
-            return args[1:], current_dir, has_or_chain
+            shell_has_followup_segments = any(
+                later_segment.strip()
+                for later_segment, _later_operator in segments[segment_index + 1 :]
+            )
+            return (
+                args[1:],
+                current_dir,
+                has_or_chain,
+                shell_has_prefix_work,
+                shell_has_followup_segments,
+            )
+        shell_has_prefix_work = True
     return None
 
 
@@ -343,7 +358,13 @@ def parse_pip_install_command(
     parsed = _pip_install_tokens(command, working_directory=working_directory)
     if parsed is None:
         return None
-    args, command_dir, has_or_chain = parsed
+    (
+        args,
+        command_dir,
+        has_or_chain,
+        shell_has_prefix_work,
+        shell_has_followup_segments,
+    ) = parsed
     base_dir = command_dir or (Path(working_directory) if working_directory else None)
 
     packages: list[str] = []
@@ -408,6 +429,8 @@ def parse_pip_install_command(
         packages=sorted(packages),
         requirement_files=sorted(requirement_files),
         shell_has_or_chain=has_or_chain,
+        shell_has_prefix_work=shell_has_prefix_work,
+        shell_has_followup_segments=shell_has_followup_segments,
     )
 
 
@@ -482,6 +505,8 @@ def prepare_pip_runtime_prediction_before_tool(
         "packages": parsed.packages,
         "requirement_files": parsed.requirement_files,
         "shell_has_or_chain": parsed.shell_has_or_chain,
+        "shell_has_prefix_work": parsed.shell_has_prefix_work,
+        "shell_has_followup_segments": parsed.shell_has_followup_segments,
         "predictions": predictions,
         "warnings": [history_warning] if history_warning else [],
         "working_directory": working_directory,
@@ -713,6 +738,8 @@ def merge_pip_predictions_into_shared_history(
         for row in rows:
             if row.get("history_updated") is not True:
                 continue
+            if row.get("history_scope") == "shared":
+                continue
             normalized_command = row.get("normalized_command")
             total_duration_s = row.get("actual_duration_s")
             if not isinstance(normalized_command, str) or not isinstance(
@@ -801,6 +828,16 @@ def finalize_pip_runtime_prediction(
         if isinstance(pending.get("shell_has_or_chain"), bool)
         else parsed.shell_has_or_chain
     )
+    shell_has_prefix_work = (
+        bool(pending.get("shell_has_prefix_work"))
+        if isinstance(pending.get("shell_has_prefix_work"), bool)
+        else parsed.shell_has_prefix_work
+    )
+    shell_has_followup_segments = (
+        bool(pending.get("shell_has_followup_segments"))
+        if isinstance(pending.get("shell_has_followup_segments"), bool)
+        else parsed.shell_has_followup_segments
+    )
     effective_history_root = history_root or record.history_root
     history_path = _history_path(effective_history_root, prediction_root)
     _, history_warning = _load_json(history_path)
@@ -829,6 +866,8 @@ def finalize_pip_runtime_prediction(
         bool(success)
         and (exit_code is None or exit_code == 0)
         and not shell_has_or_chain
+        and not shell_has_prefix_work
+        and not shell_has_followup_segments
     )
     warnings = [
         warning for warning in (pending_warning, history_warning) if warning
@@ -856,6 +895,8 @@ def finalize_pip_runtime_prediction(
         "packages": packages,
         "requirement_files": requirement_files,
         "shell_has_or_chain": shell_has_or_chain,
+        "shell_has_prefix_work": shell_has_prefix_work,
+        "shell_has_followup_segments": shell_has_followup_segments,
         "exit_code": exit_code,
         "success": success,
         "history_updated": successful_install,

@@ -499,7 +499,11 @@ class TestSchedulerPlacement:
 
         monkeypatch.setattr(sched_mod, "get_process_tree_cpu_ids", lambda pid: [5])
         monkeypatch.setattr(sched_mod, "get_bandwidth_utilization", lambda numa: None)
-        monkeypatch.setattr(sched_mod, "idle_breakdown", lambda cpus, physical_cores_per_cpu: (2, 0))
+        monkeypatch.setattr(
+            sched_mod,
+            "idle_breakdown",
+            lambda cpus, physical_cores_per_cpu, utilization=None: (2, 0),
+        )
 
         scheduler = sched_mod.Scheduler(
             predictor=predictor,
@@ -537,7 +541,11 @@ class TestSchedulerPlacement:
 
         monkeypatch.setattr(sched_mod, "get_process_tree_cpu_ids", lambda pid: [0, 4])
         monkeypatch.setattr(sched_mod, "get_bandwidth_utilization", lambda numa: None)
-        monkeypatch.setattr(sched_mod, "idle_breakdown", lambda cpus, physical_cores_per_cpu: (len(cpus), 0))
+        monkeypatch.setattr(
+            sched_mod,
+            "idle_breakdown",
+            lambda cpus, physical_cores_per_cpu, utilization=None: (len(cpus), 0),
+        )
 
         scheduler = sched_mod.Scheduler(
             predictor=predictor,
@@ -552,6 +560,48 @@ class TestSchedulerPlacement:
         assert decision.current_cost is None
         assert decision.current_cost_breakdown is None
         assert decision.gain is None
+
+    def test_scheduler_uses_one_idle_snapshot_per_evaluation(self, monkeypatch):
+        from prototype.tool_scheduler import scheduler as sched_mod
+        from prototype.tool_scheduler.predictor import Predictor
+        from prototype.tool_scheduler.topology import CpuInfo, Topology
+
+        predictor = Predictor(alpha=0.3)
+        for _ in range(3):
+            predictor.update(2.0)
+
+        topo = Topology(
+            cpus={
+                i: CpuInfo(i, 0, i, [i], 0, 0 if i < 2 else 2)
+                for i in range(4)
+            },
+            numa_nodes=[0],
+            llc_groups={0: {0: [0, 1], 2: [2, 3]}},
+            physical_cores_per_cpu={i: i for i in range(4)},
+            total_logical_cpus=4,
+            total_physical_cores=4,
+            available=True,
+        )
+        calls = {"util": 0}
+
+        def _get_cpu_utilization():
+            calls["util"] += 1
+            return {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0}
+
+        monkeypatch.setattr(sched_mod, "get_process_tree_cpu_ids", lambda pid: [0])
+        monkeypatch.setattr(sched_mod, "get_bandwidth_utilization", lambda numa: None)
+        monkeypatch.setattr(sched_mod, "get_cpu_utilization", _get_cpu_utilization)
+
+        scheduler = sched_mod.Scheduler(
+            predictor=predictor,
+            topology=topo,
+            history={},
+            cooldown_seconds=0.0,
+        )
+        decision = scheduler.evaluate(2.0, root_pid=111)
+
+        assert decision is not None
+        assert calls["util"] == 1
 
 
 class TestBandwidth:
@@ -596,6 +646,35 @@ class TestBandwidth:
         assert cfg.pmu_read_event is None
         assert cfg.pmu_write_event is None
         assert cfg.pmu_combined_event is None
+
+    def test_perf_stat_csv_is_parsed_from_stderr(self, monkeypatch):
+        from prototype.tool_scheduler import bandwidth
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = "1.000000,1073741824,,hisi_sccl0_ddrc0/flux_rd/\n"
+
+        monkeypatch.setattr(
+            bandwidth.subprocess,
+            "run",
+            lambda *args, **kwargs: _Completed(),
+        )
+        collector = bandwidth.BandwidthCollector(
+            0,
+            bandwidth.MemoryDomainConfig(
+                numa_node=0,
+                sustainable_bandwidth_gib_s=10.0,
+                pmu_read_event="hisi_sccl0_ddrc0/flux_rd/",
+            ),
+            sample_interval=1.0,
+        )
+
+        snapshot = collector._sample_perf()
+
+        assert snapshot.available is True
+        assert snapshot.read_gib_s == pytest.approx(1.0)
+        assert snapshot.utilization == pytest.approx(0.1)
 
     def test_auto_detect_on_windows(self):
         """_auto_detect_memory_domains returns configs without PMU events on Windows."""

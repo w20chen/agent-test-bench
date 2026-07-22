@@ -111,7 +111,8 @@ def test_family_history_scope_groups_related_tasks(tmp_path: Path) -> None:
 
     assert first == second
     assert first != third
-    assert first.parent.name == "family"
+    assert first.name == "pip"
+    assert first.parent.parent.name == "repo"
 
 
 def test_run_openclaw_in_task_container_normalizes_trace_on_host(
@@ -122,7 +123,7 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     preflight_seen: dict[str, object] = {}
     bootstrap_seen: dict[str, object] = {}
     pip_seed_seen: dict[str, object] = {}
-    pip_merge_seen: dict[str, object] = {}
+    pip_merge_seen: list[dict[str, object]] = []
     python_seed_seen: dict[str, object] = {}
     python_merge_seen: dict[str, object] = {}
     pytest_seed_seen: dict[str, object] = {}
@@ -229,7 +230,7 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     )
     monkeypatch.setattr(
         "trace_collect.collector.merge_pip_predictions_into_shared_history",
-        lambda **kwargs: pip_merge_seen.update(kwargs),
+        lambda **kwargs: pip_merge_seen.append(dict(kwargs)),
     )
     monkeypatch.setattr(
         "trace_collect.collector.seed_python_script_history_from_shared",
@@ -306,10 +307,15 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert pip_seed_seen["attempt_prediction_root"] == (
         ctx.attempt_dir.resolve() / "pip_runtime"
     )
-    assert pip_merge_seen["attempt_prediction_root"] == pip_seed_seen[
+    assert len(pip_merge_seen) == 2
+    assert pip_merge_seen[0]["attempt_prediction_root"] == pip_seed_seen[
         "attempt_prediction_root"
     ]
-    assert pip_merge_seen["shared_history_root"] == _family_history_scope_dir(
+    assert pip_merge_seen[0]["shared_history_root"] == _pip_history_scope_dir(
+        ctx.run_dir,
+        "encode__httpx-2701",
+    )
+    assert pip_merge_seen[1]["shared_history_root"] == _family_history_scope_dir(
         ctx.run_dir,
         "pip",
         dict(ctx.task),
@@ -400,7 +406,7 @@ def test_run_openclaw_in_task_container_normalizes_trace_on_host(
     assert "pip_history_dir" not in seen
     assert "python_script_history_dir" not in seen
     assert pip_seed_seen == {}
-    assert pip_merge_seen == {}
+    assert pip_merge_seen == []
     assert python_seed_seen == {}
     assert python_merge_seen == {}
     assert pytest_seed_seen == {}

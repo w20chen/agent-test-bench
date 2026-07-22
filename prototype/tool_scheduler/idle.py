@@ -138,6 +138,7 @@ def idle_breakdown(
     cpu_list: list[int],
     threshold: float = DEFAULT_IDLE_THRESHOLD,
     physical_cores_per_cpu: dict[int, int] | None = None,
+    utilization: dict[int, float] | None = None,
 ) -> tuple[int, int]:
     """Break down *cpu_list* into (available_physical_cores, available_smt_threads).
 
@@ -156,7 +157,24 @@ def idle_breakdown(
     Returns:
         (available_physical_cores, available_smt_threads)
     """
-    util = get_cpu_utilization()
+    util = utilization if utilization is not None else get_cpu_utilization()
+    return idle_breakdown_from_utilization(
+        cpu_list,
+        util,
+        threshold=threshold,
+        physical_cores_per_cpu=physical_cores_per_cpu,
+    )
+
+
+def idle_breakdown_from_utilization(
+    cpu_list: list[int],
+    utilization: dict[int, float],
+    threshold: float = DEFAULT_IDLE_THRESHOLD,
+    physical_cores_per_cpu: dict[int, int] | None = None,
+) -> tuple[int, int]:
+    """Break down idle CPUs using a caller-provided utilization snapshot."""
+
+    util = utilization
     if not util:
         # No data -- assume all available
         if physical_cores_per_cpu:

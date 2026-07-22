@@ -137,11 +137,12 @@ def _family_history_scope_dir(
     task: dict[str, Any],
     instance_id: str,
 ) -> Path:
-    return _history_bucket_dir(
-        run_dir,
-        tool,
-        "family",
-        _task_family_scope(task, instance_id),
+    return (
+        run_dir.resolve()
+        / "runtime_kb"
+        / "repo"
+        / _safe_scope_dir_name(_task_family_scope(task, instance_id), fallback="repo")
+        / tool
     )
 
 
@@ -1796,6 +1797,15 @@ async def _run_openclaw_in_task_container(
     vtune_out_dir = ctx.attempt_dir.resolve() / "vtune"
     tool_profiler_out_dir = ctx.attempt_dir.resolve() / "tool_profiles"
     tool_scheduler_out_dir = ctx.attempt_dir.resolve() / "tool_scheduler"
+    tool_scheduler_history_db = (
+        _family_history_scope_dir(
+            ctx.run_dir,
+            "tool_scheduler",
+            task,
+            ctx.instance_id,
+        )
+        / "history.json"
+    )
     vtune = tool_profiling == "vtune"
     ksys_tool = tool_profiling == "ksys"
     tool_profiler_mode = tool_profiling == "tool_profiler"
@@ -1830,15 +1840,17 @@ async def _run_openclaw_in_task_container(
         ])
     elif tool_scheduler_mode:
         # tool_scheduler per-tool: uses the prototype online load-prediction
-        # scheduler.  Wraps matching tool commands with:
+        # scheduler recommender.  Wraps matching tool commands with:
         #   python -m prototype.tool_scheduler --output <profile.jsonl>
         #     --dry-run --shell-command -- <command>
         # Activation is via env vars read by ExecTool.execute() in shell.py.
         tool_scheduler_out_dir.mkdir(parents=True, exist_ok=True)
+        tool_scheduler_history_db.parent.mkdir(parents=True, exist_ok=True)
         tools = ",".join(tool_profiling_tools or ["exec-pytest"])
         start_extra_args.extend([
             "-e", "TOOL_SCHEDULER=1",
             "-e", f"TOOL_SCHEDULER_OUT={tool_scheduler_out_dir.resolve()}",
+            "-e", f"TOOL_SCHEDULER_HISTORY_DB={tool_scheduler_history_db.resolve()}",
             "-e", f"TOOL_SCHEDULER_TOOLS={tools}",
         ])
     container_id = start_task_container(

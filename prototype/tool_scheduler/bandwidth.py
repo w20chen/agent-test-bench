@@ -250,7 +250,8 @@ class BandwidthCollector:
         write_val = 0.0
         combined_val = 0.0
 
-        for line in result.stdout.splitlines():
+        perf_output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        for line in perf_output.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -261,7 +262,7 @@ class BandwidthCollector:
                 count = float(parts[1])
             except ValueError:
                 continue
-            event_str = parts[3] if len(parts) > 3 else ""
+            event_str = ",".join(parts[2:])
 
             # Heuristic: match event to read/write/combined
             if self._config.pmu_read_event and self._config.pmu_read_event in event_str:

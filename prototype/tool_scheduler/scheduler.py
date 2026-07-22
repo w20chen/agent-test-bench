@@ -24,6 +24,7 @@ from .cost_model import (
 )
 from .predictor import Predictor
 from .idle import idle_breakdown
+from .idle import get_cpu_utilization
 from .bandwidth import get_bandwidth_utilization
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ class Scheduler:
 
         candidates: list[Placement] = []
         current_placement: Optional[Placement] = None
+        cpu_utilization = get_cpu_utilization()
 
         for current_numa in candidate_numa_nodes:
             # Get real bandwidth utilization for this NUMA node
@@ -162,6 +164,7 @@ class Scheduler:
                 free_phys, free_smt = idle_breakdown(
                     cpu_list,
                     physical_cores_per_cpu=self._topology.physical_cores_per_cpu,
+                    utilization=cpu_utilization,
                 )
 
                 placement_id = f"numa{current_numa}-llc{llc_id}"

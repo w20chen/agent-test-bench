@@ -183,10 +183,10 @@ def test_format_pip_prediction_summary_includes_all_method_errors() -> None:
         }
     )
 
-    assert "last=9.00s last_err=10.0%" in summary
-    assert "package_count=11.00s package_count_err=10.0%" in summary
-    assert "global=8.00s global_err=20.0%" in summary
-    assert "recommended=package_count:11.00s rec_err=10.0%" in summary
+    assert "last=9.0s(+10.0%)" in summary
+    assert "→pkgs=11.0s(+10.0%)" in summary
+    assert "glob=8.0s(+20.0%)" in summary
+    assert summary.endswith("| medium")
 
 
 def test_update_history_skips_failed_runs_for_future_predictions() -> None:
@@ -340,6 +340,42 @@ def test_seed_and_merge_shared_history_for_task_container_attempts(
     assert pending["history_scope"] == "attempt"
     assert pending["predictions"]["prediction_recommended_method"] == "last_run"
     assert pending["predictions"]["prediction_recommended_s"] == pytest.approx(4.0)
+
+
+def test_merge_shared_history_skips_rows_already_written_to_shared(
+    tmp_path: Path,
+) -> None:
+    shared_root = tmp_path / "pip_runtime_db"
+    attempt_root = tmp_path / "attempt" / "pip_runtime"
+
+    record = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=attempt_root,
+        history_root=shared_root,
+        iteration=1,
+        tool_call_id="call-shared",
+        tool_name="exec",
+        tool_args={"command": "pip install requests"},
+    )
+    assert record is not None
+    finalize_pip_runtime_prediction(
+        record,
+        prediction_root=attempt_root,
+        history_root=shared_root,
+        action_id="tool_1_call-shared",
+        ts_start=1.0,
+        ts_end=5.0,
+        duration_ms=4000.0,
+        success=True,
+        tool_result="Successfully installed requests\nExit code: 0",
+    )
+
+    merge_pip_predictions_into_shared_history(
+        shared_history_root=shared_root,
+        attempt_prediction_root=attempt_root,
+    )
+
+    history = json.loads((shared_root / "history.json").read_text(encoding="utf-8"))
+    assert history["commands"]["pip install requests"]["durations"] == [4.0]
 
 
 def test_shared_history_concurrent_updates_keep_both_samples(tmp_path: Path) -> None:
@@ -553,3 +589,56 @@ def test_finalize_or_chain_does_not_update_history_on_masked_success(
     assert payload["shell_has_or_chain"] is True
     assert payload["history_updated"] is False
     assert history["commands"] == {}
+
+
+@pytest.mark.parametrize(
+    "command,flag",
+    [
+        ("pip install requests; echo done", "shell_has_followup_segments"),
+        ("pip install requests | tee pip.log", "shell_has_followup_segments"),
+    ],
+)
+def test_finalize_compound_pip_command_does_not_update_history(
+    tmp_path: Path,
+    command: str,
+    flag: str,
+) -> None:
+    root = tmp_path / "pip_runtime"
+    record = prepare_pip_runtime_prediction_before_tool(
+        prediction_root=root,
+        iteration=1,
+        tool_call_id="call-compound",
+        tool_name="exec",
+        tool_args={"command": command},
+    )
+    assert record is not None
+
+    payload = finalize_pip_runtime_prediction(
+        record,
+        prediction_root=root,
+        action_id="tool_1_call-compound",
+        ts_start=1.0,
+        ts_end=8.0,
+        duration_ms=7000.0,
+        success=True,
+        tool_result="ok\nExit code: 0",
+    )
+
+    history = json.loads((root / "history.json").read_text(encoding="utf-8"))
+    assert payload[flag] is True
+    assert payload["history_updated"] is False
+    assert history["commands"] == {}
+
+
+def test_parse_pip_install_marks_prefix_work() -> None:
+    parsed = parse_pip_install_command("make deps && pip install requests")
+
+    assert parsed is not None
+    assert parsed.shell_has_prefix_work is True
+
+
+def test_parse_pip_install_marks_followup_work() -> None:
+    parsed = parse_pip_install_command("pip install requests && pytest tests")
+
+    assert parsed is not None
+    assert parsed.shell_has_followup_segments is True

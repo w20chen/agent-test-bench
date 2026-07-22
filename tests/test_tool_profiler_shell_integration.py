@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import json
 import os
 import tempfile
 
@@ -214,3 +215,29 @@ class TestToolSchedulerShellIntegration:
         assert "WARNING: keep me" in result
         assert "action: keep me" in result
         assert "[tool-scheduler]" not in result
+
+    def test_tool_scheduler_uses_persistent_history_db(self, monkeypatch, tmp_path) -> None:
+        """Scheduler wrapping should persist history outside per-invocation profiles."""
+        out_dir = str(tmp_path / "tool_scheduler")
+        history_path = tmp_path / "runtime_kb" / "repo" / "encode_httpx" / "tool_scheduler" / "history.json"
+        monkeypatch.setenv("TOOL_SCHEDULER", "1")
+        monkeypatch.setenv("TOOL_SCHEDULER_TOOLS", "exec-python")
+        monkeypatch.setenv("TOOL_SCHEDULER_OUT", out_dir)
+        monkeypatch.setenv("TOOL_SCHEDULER_HISTORY_DB", str(history_path))
+        monkeypatch.delenv("TOOL_SCHEDULER_HARDCODE_TOPOLOGY", raising=False)
+
+        from agents.openclaw.tools.shell import ExecTool
+
+        tool = ExecTool(timeout=30)
+
+        async def _run():
+            return await tool.execute(
+                command="python -c \"import time; time.sleep(2.2)\""
+            )
+
+        result = asyncio.run(_run())
+
+        assert "Exit code: 0" in result
+        assert history_path.exists()
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        assert history
