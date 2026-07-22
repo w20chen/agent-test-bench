@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -51,18 +50,29 @@ from trace_collect.monitoring import (
 )
 from trace_collect.package_runtime_prediction import (
     merge_pip_predictions_into_shared_history,
+    parse_pip_install_command,
     seed_pip_history_from_shared,
     seed_pip_family_history_from_shared,
 )
 from trace_collect.pytest_runtime_prediction import (
     merge_pytest_predictions_into_shared_history,
+    normalize_pytest_command,
+    command_contains_literal_pytest,
     seed_pytest_history_from_shared,
     seed_pytest_family_history_from_shared,
 )
 from trace_collect.python_script_runtime_prediction import (
     merge_python_script_predictions_into_shared_history,
+    parse_python_script_command,
     seed_python_script_history_from_shared,
     seed_python_script_family_history_from_shared,
+)
+from trace_collect.runtime_knowledge import (
+    default_personal_kb_path,
+    load_json_object,
+    resource_summary_from_profile,
+    update_personal_kb,
+    write_json_object,
 )
 from trace_collect.runtime.task_container import (
     bootstrap_task_container_python,
@@ -1384,21 +1394,31 @@ async def collect_traces(
                     run_task_kwargs["capture_pytest_runtime"] = capture_pytest_runtime
                 if "pytest_history_dir" in run_task_params and capture_pytest_runtime:
                     run_task_kwargs["pytest_history_dir"] = (
-                        _pytest_history_scope_dir(run_dir, instance_id)
+                        _pytest_history_scope_dir(run_dir, ctx.instance_id)
                     )
                 if "pytest_family_history_dir" in run_task_params and capture_pytest_runtime:
                     run_task_kwargs["pytest_family_history_dir"] = (
-                        _family_history_scope_dir(run_dir, "pytest", task, instance_id)
+                        _family_history_scope_dir(
+                            run_dir,
+                            "pytest",
+                            task,
+                            ctx.instance_id,
+                        )
                     )
                 if "capture_pip_runtime" in run_task_params:
                     run_task_kwargs["capture_pip_runtime"] = capture_pip_runtime
                 if "pip_history_dir" in run_task_params and capture_pip_runtime:
                     run_task_kwargs["pip_history_dir"] = (
-                        _pip_history_scope_dir(run_dir, instance_id)
+                        _pip_history_scope_dir(run_dir, ctx.instance_id)
                     )
                 if "pip_family_history_dir" in run_task_params and capture_pip_runtime:
                     run_task_kwargs["pip_family_history_dir"] = (
-                        _family_history_scope_dir(run_dir, "pip", task, instance_id)
+                        _family_history_scope_dir(
+                            run_dir,
+                            "pip",
+                            task,
+                            ctx.instance_id,
+                        )
                     )
                 if "capture_python_script_runtime" in run_task_params:
                     run_task_kwargs["capture_python_script_runtime"] = (
@@ -1409,14 +1429,19 @@ async def collect_traces(
                     and capture_python_script_runtime
                 ):
                     run_task_kwargs["python_script_history_dir"] = (
-                        _python_script_history_scope_dir(run_dir, instance_id)
+                        _python_script_history_scope_dir(run_dir, ctx.instance_id)
                     )
                 if (
                     "python_script_family_history_dir" in run_task_params
                     and capture_python_script_runtime
                 ):
                     run_task_kwargs["python_script_family_history_dir"] = (
-                        _family_history_scope_dir(run_dir, "python_script", task, instance_id)
+                        _family_history_scope_dir(
+                            run_dir,
+                            "python_script",
+                            task,
+                            ctx.instance_id,
+                        )
                     )
                 result = await runner.run_task(
                     task,
@@ -1461,9 +1486,86 @@ async def collect_traces(
         )
 
 
+def _profile_tool_descriptor(record: dict[str, Any]) -> tuple[str, str, str, str]:
+    command = record.get("command_string")
+    if not isinstance(command, str) or not command.strip():
+        raw_command = record.get("command")
+        if isinstance(raw_command, list):
+            command = " ".join(str(part) for part in raw_command)
+        else:
+            command = str(raw_command or "")
+    command = " ".join(command.split())
+
+    parsed_pip = parse_pip_install_command(command)
+    if parsed_pip is not None:
+        return (
+            "pip",
+            "package_install",
+            "install",
+            parsed_pip.normalized_command,
+        )
+    parsed_python = parse_python_script_command(command)
+    if parsed_python is not None:
+        return (
+            "python",
+            "script_execution",
+            "run_script",
+            parsed_python.normalized_command,
+        )
+    if command_contains_literal_pytest(command):
+        return (
+            "pytest",
+            "test_runner",
+            "run_tests",
+            normalize_pytest_command(command),
+        )
+    first = command.split(maxsplit=1)[0] if command else "unknown"
+    return (first, "generic_process", "run", command or first)
+
+
+def _update_personal_kb_from_profiles(
+    records: list[dict[str, Any]],
+    *,
+    personal_kb_path: Path,
+    repo_id: str,
+) -> dict[str, Any]:
+    kb = load_json_object(personal_kb_path)
+    updated_count = 0
+    for record in records:
+        resource_summary = resource_summary_from_profile(record)
+        if resource_summary is None:
+            continue
+        duration_s = resource_summary.wall_time_s
+        if not isinstance(duration_s, (int, float)):
+            continue
+        success = record.get("exit_code") in {0, None}
+        if not success:
+            continue
+        tool_name, tool_family, operation, normalized_command = _profile_tool_descriptor(
+            record
+        )
+        kb = update_personal_kb(
+            kb,
+            tool_name=tool_name,
+            tool_family=tool_family,
+            operation=operation,
+            normalized_command=normalized_command,
+            duration_s=float(duration_s),
+            success=success,
+            repo_id=repo_id,
+            features={"profile_invocation_id": record.get("invocation_id")},
+            resource_summary=resource_summary,
+        )
+        updated_count += 1
+    if updated_count:
+        write_json_object(personal_kb_path, kb)
+    return {"path": str(personal_kb_path), "updated_count": updated_count}
+
+
 def _finalize_tool_profiler(
     out_dir: Path,
     attempt_dir: Path,
+    personal_kb_path: Path | None = None,
 ) -> None:
     """Collect per-tool profile JSONL files and write a summary.
 
@@ -1532,6 +1634,12 @@ def _finalize_tool_profiler(
             "avg_effective_cores_relative_error": avg_rel_error,
         },
     }
+    personal_update = _update_personal_kb_from_profiles(
+        records,
+        personal_kb_path=personal_kb_path or default_personal_kb_path(None, attempt_dir),
+        repo_id=str(attempt_dir),
+    )
+    summary["personal_kb_update"] = personal_update
 
     summary_path = attempt_dir / "tool_profiles_summary.json"
     try:
@@ -1558,6 +1666,7 @@ def _finalize_tool_profiler(
 def _finalize_tool_scheduler(
     out_dir: Path,
     attempt_dir: Path,
+    personal_kb_path: Path | None = None,
 ) -> None:
     """Collect per-tool scheduler JSONL files and write a summary.
 
@@ -1609,6 +1718,12 @@ def _finalize_tool_scheduler(
         "n_recommend_moves": n_moves,
         "avg_median_effective_cores": avg_cores,
     }
+    personal_update = _update_personal_kb_from_profiles(
+        records,
+        personal_kb_path=personal_kb_path or default_personal_kb_path(None, attempt_dir),
+        repo_id=str(attempt_dir),
+    )
+    summary["personal_kb_update"] = personal_update
 
     summary_path = attempt_dir / "tool_scheduler_summary.json"
     try:
@@ -2136,11 +2251,19 @@ async def _run_openclaw_in_task_container(
             _finalize_tool_profiler(
                 tool_profiler_out_dir,
                 ctx.attempt_dir,
+                personal_kb_path=default_personal_kb_path(
+                    _pytest_history_scope_dir(ctx.run_dir, ctx.instance_id),
+                    ctx.attempt_dir,
+                ),
             )
         if tool_scheduler_mode:
             _finalize_tool_scheduler(
                 tool_scheduler_out_dir,
                 ctx.attempt_dir,
+                personal_kb_path=default_personal_kb_path(
+                    _pytest_history_scope_dir(ctx.run_dir, ctx.instance_id),
+                    ctx.attempt_dir,
+                ),
             )
         container_logs = stop_task_container(
             container_id,

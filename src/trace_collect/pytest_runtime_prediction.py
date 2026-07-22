@@ -21,6 +21,14 @@ import time
 from typing import Any, Iterator
 
 from trace_collect.exec_classifier import classify_exec_tool_name
+from trace_collect.runtime_knowledge import (
+    default_common_kb_path,
+    default_personal_kb_path,
+    load_json_object,
+    select_unified_prediction,
+    update_personal_kb,
+    write_json_object,
+)
 
 HIDDEN_RUNTIME_DIR_ARG = "__openclaw_pytest_runtime_dir"
 HIDDEN_RUNTIME_ENABLED_ARG = "__openclaw_pytest_runtime_enabled"
@@ -680,9 +688,15 @@ def prepare_pytest_runtime_prediction_before_tool(
         if family_history_path.exists():
             family_history, _family_warning = _load_json(family_history_path)
     explicit_nodeids = extract_explicit_pytest_nodeids(command)
+    common_knowledge = load_json_object(default_common_kb_path())
+    personal_knowledge = load_json_object(
+        default_personal_kb_path(history_root, prediction_root)
+    )
     predictions = compute_pytest_predictions(
         history=history,
         family_history=family_history,
+        personal_knowledge=personal_knowledge,
+        common_knowledge=common_knowledge,
         command=command,
         nodeids=explicit_nodeids.nodeids,
         nodeid_coverage=explicit_nodeids.coverage,
@@ -1070,6 +1084,8 @@ def compute_pytest_predictions(
     *,
     history: dict[str, Any],
     family_history: dict[str, Any] | None = None,
+    personal_knowledge: dict[str, Any] | None = None,
+    common_knowledge: dict[str, Any] | None = None,
     command: str,
     nodeids: list[str],
     nodeid_coverage: str | None = None,
@@ -1204,6 +1220,15 @@ def compute_pytest_predictions(
         "prediction_unknown_test_fallback_s": unknown_with_overhead,
         "unknown_test_fallback_prediction_details": unknown_fallback_values,
     }
+    unified = select_unified_prediction(
+        personal_kb=personal_knowledge or {},
+        common_kb=common_knowledge or {},
+        tool_name="pytest",
+        tool_family="test_runner",
+        operation="run_tests",
+        normalized_command=command_key,
+        workload_bucket=_pytest_workload_bucket(len(nodeids) if nodeids else None),
+    )
     reliability = compute_prediction_reliability(
         nodeids=nodeids,
         command_rec=command_rec if isinstance(command_rec, dict) else None,
@@ -1211,10 +1236,57 @@ def compute_pytest_predictions(
         family_last_run=family_last_run,
         nodeid_coverage=effective_nodeid_coverage,
     )
+    if (
+        reliability["recommended_prediction_s"] is None
+        and unified is not None
+        and unified.duration_p50_s is not None
+        and effective_nodeid_coverage not in {"partial", "explicit_only"}
+    ):
+        reliability = {
+            **reliability,
+            "level": unified.confidence,
+            "reasons": [
+                *[
+                    reason
+                    for reason in reliability.get("reasons", [])
+                    if isinstance(reason, str)
+                ],
+            "runtime_knowledge_fallback",
+        ],
+            "recommended_method": unified.prediction_source,
+            "recommended_prediction_s": unified.duration_p50_s,
+        }
+    knowledge_p50 = unified.duration_p50_s if unified is not None else None
+    knowledge_p90 = unified.duration_p90_s if unified is not None else None
+    result["prediction_knowledge_p50_s"] = knowledge_p50
+    result["prediction_knowledge_p90_s"] = knowledge_p90
+    result["prediction_common_p50_s"] = (
+        knowledge_p50
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
+    result["prediction_common_p90_s"] = (
+        knowledge_p90
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
+    result["runtime_knowledge_prediction"] = unified.to_dict() if unified else None
     result["prediction_reliability"] = reliability
     result["prediction_recommended_s"] = reliability["recommended_prediction_s"]
     result["prediction_recommended_method"] = reliability["recommended_method"]
     return result
+
+
+def _pytest_workload_bucket(test_count: int | None) -> str | None:
+    if test_count is None:
+        return None
+    if test_count <= 10:
+        return "1-10-tests"
+    if test_count <= 100:
+        return "11-100-tests"
+    if test_count <= 500:
+        return "101-500-tests"
+    return "500-plus-tests"
 
 
 def _empty_pytest_predictions(command: str) -> dict[str, Any]:
@@ -1236,6 +1308,11 @@ def _empty_pytest_predictions(command: str) -> dict[str, Any]:
         "prediction_unknown_test_fallback_overhead_s": None,
         "prediction_unknown_test_fallback_s": None,
         "unknown_test_fallback_prediction_details": [],
+        "prediction_knowledge_p50_s": None,
+        "prediction_knowledge_p90_s": None,
+        "prediction_common_p50_s": None,
+        "prediction_common_p90_s": None,
+        "runtime_knowledge_prediction": None,
         "prediction_reliability": {
             "level": "error",
             "reasons": ["pre_execution_prediction_missing"],
@@ -1592,6 +1669,10 @@ def finalize_pytest_runtime_prediction(
         "test_count": predictions["prediction_test_count_s"],
         "per_test": predictions["prediction_per_test_s"],
         "unknown_test_fallback": predictions["prediction_unknown_test_fallback_s"],
+        "knowledge_p50": predictions.get("prediction_knowledge_p50_s"),
+        "knowledge_p90": predictions.get("prediction_knowledge_p90_s"),
+        "common_p50": predictions.get("prediction_common_p50_s"),
+        "common_p90": predictions.get("prediction_common_p90_s"),
         "recommended": predictions["prediction_recommended_s"],
     }
     absolute_error = {
@@ -1682,6 +1763,13 @@ def finalize_pytest_runtime_prediction(
         "unknown_test_fallback_prediction_details": predictions[
             "unknown_test_fallback_prediction_details"
         ],
+        "prediction_common_p50_s": predictions.get("prediction_common_p50_s"),
+        "prediction_common_p90_s": predictions.get("prediction_common_p90_s"),
+        "runtime_knowledge_prediction": predictions.get(
+            "runtime_knowledge_prediction"
+        ),
+        "prediction_knowledge_p50_s": predictions.get("prediction_knowledge_p50_s"),
+        "prediction_knowledge_p90_s": predictions.get("prediction_knowledge_p90_s"),
         "prediction_recommended_s": predictions["prediction_recommended_s"],
         "prediction_recommended_method": predictions[
             "prediction_recommended_method"
@@ -1723,6 +1811,28 @@ def finalize_pytest_runtime_prediction(
         except Exception as exc:
             payload["history_updated"] = False
             payload["warnings"].append(f"failed to update history: {exc!r}")
+    personal_kb_path = default_personal_kb_path(effective_history_root, prediction_root)
+    try:
+        personal_kb = load_json_object(personal_kb_path)
+        updated_personal_kb = update_personal_kb(
+            personal_kb,
+            tool_name="pytest",
+            tool_family="test_runner",
+            operation="run_tests",
+            normalized_command=predictions["command_key"],
+            duration_s=actual_duration_s,
+            success=successful_pytest_run,
+            repo_id=payload.get("working_directory")
+            if isinstance(payload.get("working_directory"), str)
+            else None,
+            features={"test_count": len(nodeids)},
+        )
+        write_json_object(personal_kb_path, updated_personal_kb)
+        payload["personal_kb_path"] = str(personal_kb_path)
+        payload["personal_kb_updated"] = successful_pytest_run
+    except Exception as exc:
+        payload["personal_kb_updated"] = False
+        payload["warnings"].append(f"failed to update personal kb: {exc!r}")
 
     detailed_payload: dict[str, Any] = {
         **payload,

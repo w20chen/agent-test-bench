@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,6 +15,14 @@ import time
 from typing import Any, Iterator
 
 from trace_collect.exec_classifier import classify_exec_tool_name
+from trace_collect.runtime_knowledge import (
+    default_common_kb_path,
+    default_personal_kb_path,
+    load_json_object,
+    select_unified_prediction,
+    update_personal_kb,
+    write_json_object,
+)
 
 HISTORY_FILENAME = "history.json"
 PREDICTIONS_FILENAME = "predictions.jsonl"
@@ -465,6 +472,8 @@ def compute_python_script_predictions(
     *,
     history: dict[str, Any],
     family_history: dict[str, Any] | None = None,
+    personal_knowledge: dict[str, Any] | None = None,
+    common_knowledge: dict[str, Any] | None = None,
     normalized_command: str,
     script_path: str,
     script_basename: str,
@@ -526,6 +535,27 @@ def compute_python_script_predictions(
         if isinstance(_history_tool(history).get("durations"), list)
         else []
     )
+    unified = select_unified_prediction(
+        personal_kb=personal_knowledge or {},
+        common_kb=common_knowledge or {},
+        tool_name="python",
+        tool_family="script_execution",
+        operation="run_script",
+        normalized_command=normalized_command,
+        workload_bucket=None,
+    )
+    knowledge_p50 = unified.duration_p50_s if unified is not None else None
+    knowledge_p90 = unified.duration_p90_s if unified is not None else None
+    common_p50 = (
+        knowledge_p50
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
+    common_p90 = (
+        knowledge_p90
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
     if last_run is not None:
         recommended = last_run
         method = "last_run"
@@ -542,6 +572,10 @@ def compute_python_script_predictions(
         recommended = basename_median
         method = "basename_median"
         reliability = "low"
+    elif knowledge_p50 is not None:
+        recommended = knowledge_p50
+        method = unified.prediction_source if unified is not None else "knowledge_prior"
+        reliability = unified.confidence if unified is not None else "low"
     else:
         recommended = global_median
         method = "global_median" if global_median is not None else "unavailable"
@@ -552,9 +586,14 @@ def compute_python_script_predictions(
         "prediction_script_path_median_s": script_median,
         "prediction_basename_median_s": basename_median,
         "prediction_global_median_s": global_median,
+        "prediction_knowledge_p50_s": knowledge_p50,
+        "prediction_knowledge_p90_s": knowledge_p90,
+        "prediction_common_p50_s": common_p50,
+        "prediction_common_p90_s": common_p90,
         "prediction_recommended_s": recommended,
         "prediction_recommended_method": method,
         "prediction_reliability": {"level": reliability},
+        "runtime_knowledge_prediction": unified.to_dict() if unified else None,
     }
 
 
@@ -641,9 +680,15 @@ def prepare_python_script_runtime_prediction_before_tool(
         family_history_path = prediction_root / "family_history.json"
         if family_history_path.exists():
             family_history, _family_warning = _load_json(family_history_path)
+    common_knowledge = load_json_object(default_common_kb_path())
+    personal_knowledge = load_json_object(
+        default_personal_kb_path(history_root, prediction_root)
+    )
     predictions = compute_python_script_predictions(
         history=history,
         family_history=family_history,
+        personal_knowledge=personal_knowledge,
+        common_knowledge=common_knowledge,
         normalized_command=parsed.normalized_command,
         script_path=parsed.script_path,
         script_basename=parsed.script_basename,
@@ -862,9 +907,14 @@ def finalize_python_script_runtime_prediction(
             "prediction_script_path_median_s": None,
             "prediction_basename_median_s": None,
             "prediction_global_median_s": None,
+            "prediction_knowledge_p50_s": None,
+            "prediction_knowledge_p90_s": None,
+            "prediction_common_p50_s": None,
+            "prediction_common_p90_s": None,
             "prediction_recommended_s": None,
             "prediction_recommended_method": "unavailable",
             "prediction_reliability": {"level": "unavailable"},
+            "runtime_knowledge_prediction": None,
         }
     )
     prediction_values = {
@@ -873,6 +923,10 @@ def finalize_python_script_runtime_prediction(
         "script_path_median": predictions["prediction_script_path_median_s"],
         "basename_median": predictions["prediction_basename_median_s"],
         "global_median": predictions["prediction_global_median_s"],
+        "knowledge_p50": predictions.get("prediction_knowledge_p50_s"),
+        "knowledge_p90": predictions.get("prediction_knowledge_p90_s"),
+        "common_p50": predictions.get("prediction_common_p50_s"),
+        "common_p90": predictions.get("prediction_common_p90_s"),
         "recommended": predictions["prediction_recommended_s"],
     }
     exit_code = parse_exit_code(tool_result)
@@ -946,6 +1000,29 @@ def finalize_python_script_runtime_prediction(
     except Exception as exc:
         payload["history_updated"] = False
         payload["warnings"].append(f"failed to update history: {exc!r}")
+    personal_kb_path = default_personal_kb_path(effective_history_root, prediction_root)
+    try:
+        personal_kb = load_json_object(personal_kb_path)
+        updated_personal_kb = update_personal_kb(
+            personal_kb,
+            tool_name="python",
+            tool_family="script_execution",
+            operation="run_script",
+            normalized_command=normalized_command,
+            duration_s=actual_duration_s,
+            success=successful_run,
+            repo_id=effective_working_dir,
+            features={
+                "script_path": script_path,
+                "script_basename": script_basename,
+            },
+        )
+        write_json_object(personal_kb_path, updated_personal_kb)
+        payload["personal_kb_path"] = str(personal_kb_path)
+        payload["personal_kb_updated"] = successful_run
+    except Exception as exc:
+        payload["personal_kb_updated"] = False
+        payload["warnings"].append(f"failed to update personal kb: {exc!r}")
     _write_json(record.directory / PREDICTION_FILENAME, payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
     summary = format_python_script_prediction_summary(payload)

@@ -16,6 +16,14 @@ import time
 from typing import Any, Iterator
 
 from trace_collect.exec_classifier import classify_exec_tool_name
+from trace_collect.runtime_knowledge import (
+    default_common_kb_path,
+    default_personal_kb_path,
+    load_json_object,
+    select_unified_prediction,
+    update_personal_kb,
+    write_json_object,
+)
 
 HISTORY_FILENAME = "history.json"
 PREDICTIONS_FILENAME = "predictions.jsonl"
@@ -488,9 +496,15 @@ def prepare_pip_runtime_prediction_before_tool(
         family_history_path = prediction_root / "family_history.json"
         if family_history_path.exists():
             family_history, _family_warning = _load_json(family_history_path)
+    common_knowledge = load_json_object(default_common_kb_path())
+    personal_knowledge = load_json_object(
+        default_personal_kb_path(history_root, prediction_root)
+    )
     predictions = compute_pip_predictions(
         history=history,
         family_history=family_history,
+        common_knowledge=common_knowledge,
+        personal_knowledge=personal_knowledge,
         normalized_command=parsed.normalized_command,
         package_count=parsed.package_count,
     )
@@ -539,6 +553,8 @@ def compute_pip_predictions(
     *,
     history: dict[str, Any],
     family_history: dict[str, Any] | None = None,
+    common_knowledge: dict[str, Any] | None = None,
+    personal_knowledge: dict[str, Any] | None = None,
     normalized_command: str,
     package_count: int | None,
 ) -> dict[str, Any]:
@@ -595,6 +611,27 @@ def compute_pip_predictions(
         if isinstance(tool_history.get("durations"), list)
         else []
     )
+    unified = select_unified_prediction(
+        personal_kb=personal_knowledge or {},
+        common_kb=common_knowledge or {},
+        tool_name="pip",
+        tool_family="package_install",
+        operation="install",
+        normalized_command=normalized_command,
+        workload_bucket=_pip_workload_bucket(package_count),
+    )
+    knowledge_p50 = unified.duration_p50_s if unified is not None else None
+    knowledge_p90 = unified.duration_p90_s if unified is not None else None
+    common_p50 = (
+        knowledge_p50
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
+    common_p90 = (
+        knowledge_p90
+        if unified is not None and unified.prediction_source.startswith("common:")
+        else None
+    )
     if last_run is not None:
         recommended = last_run
         method = "last_run"
@@ -607,6 +644,10 @@ def compute_pip_predictions(
         recommended = package_count_prediction
         method = "package_count"
         reliability = "medium"
+    elif knowledge_p50 is not None:
+        recommended = knowledge_p50
+        method = unified.prediction_source if unified is not None else "knowledge_prior"
+        reliability = unified.confidence if unified is not None else "low"
     else:
         recommended = global_median
         method = "global_median" if global_median is not None else "unavailable"
@@ -616,10 +657,25 @@ def compute_pip_predictions(
         "prediction_family_last_run_s": family_last_run,
         "prediction_package_count_s": package_count_prediction,
         "prediction_global_median_s": global_median,
+        "prediction_knowledge_p50_s": knowledge_p50,
+        "prediction_knowledge_p90_s": knowledge_p90,
+        "prediction_common_p50_s": common_p50,
+        "prediction_common_p90_s": common_p90,
         "prediction_recommended_s": recommended,
         "prediction_recommended_method": method,
         "prediction_reliability": {"level": reliability},
+        "runtime_knowledge_prediction": unified.to_dict() if unified else None,
     }
+
+
+def _pip_workload_bucket(package_count: int | None) -> str | None:
+    if package_count is None:
+        return None
+    if package_count <= 1:
+        return "1-package"
+    if package_count <= 10:
+        return "2-10-packages"
+    return "10-plus-packages"
 
 
 def update_pip_history(
@@ -849,9 +905,14 @@ def finalize_pip_runtime_prediction(
             "prediction_family_last_run_s": None,
             "prediction_package_count_s": None,
             "prediction_global_median_s": None,
+            "prediction_knowledge_p50_s": None,
+            "prediction_knowledge_p90_s": None,
+            "prediction_common_p50_s": None,
+            "prediction_common_p90_s": None,
             "prediction_recommended_s": None,
             "prediction_recommended_method": "unavailable",
             "prediction_reliability": {"level": "unavailable"},
+            "runtime_knowledge_prediction": None,
         }
     )
     prediction_values = {
@@ -859,6 +920,10 @@ def finalize_pip_runtime_prediction(
         "family_last_run": predictions["prediction_family_last_run_s"],
         "package_count": predictions["prediction_package_count_s"],
         "global_median": predictions["prediction_global_median_s"],
+        "knowledge_p50": predictions.get("prediction_knowledge_p50_s"),
+        "knowledge_p90": predictions.get("prediction_knowledge_p90_s"),
+        "common_p50": predictions.get("prediction_common_p50_s"),
+        "common_p90": predictions.get("prediction_common_p90_s"),
         "recommended": predictions["prediction_recommended_s"],
     }
     exit_code = parse_exit_code(tool_result)
@@ -929,6 +994,26 @@ def finalize_pip_runtime_prediction(
     except Exception as exc:
         payload["history_updated"] = False
         payload["warnings"].append(f"failed to update history: {exc!r}")
+    personal_kb_path = default_personal_kb_path(effective_history_root, prediction_root)
+    try:
+        personal_kb = load_json_object(personal_kb_path)
+        updated_personal_kb = update_personal_kb(
+            personal_kb,
+            tool_name="pip",
+            tool_family="package_install",
+            operation="install",
+            normalized_command=normalized_command,
+            duration_s=actual_duration_s,
+            success=successful_install,
+            repo_id=effective_working_dir,
+            features={"package_count": package_count},
+        )
+        write_json_object(personal_kb_path, updated_personal_kb)
+        payload["personal_kb_path"] = str(personal_kb_path)
+        payload["personal_kb_updated"] = successful_install
+    except Exception as exc:
+        payload["personal_kb_updated"] = False
+        payload["warnings"].append(f"failed to update personal kb: {exc!r}")
     _write_json(record.directory / PREDICTION_FILENAME, payload)
     _append_jsonl(prediction_root / PREDICTIONS_FILENAME, payload)
     summary = format_pip_prediction_summary(payload)
